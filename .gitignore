@@ -59,4 +59,10 @@ dist/
 
 # Temporary files
 tmp/
-temp/ 
+temp/
+
+# Ignore prompts folder
+prompts/
+
+# Ignore tests folder
+tests/ 
