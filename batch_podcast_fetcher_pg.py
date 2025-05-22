@@ -149,7 +149,7 @@ class BatchPodcastFetcherPG:
         current_rss_url = enriched_data.get('rss_url')
         current_itunes_id_for_lookup = _sanitize_numeric_string(enriched_data.get('itunes_id'), int)
         
-        try:
+        try: # This try-except block now specifically handles APIClientErrors during cross-enrichment
             if source_api == "ListenNotes": # Try to enrich with Podscan
                 podscan_match = None
                 if current_itunes_id_for_lookup:
@@ -214,8 +214,11 @@ class BatchPodcastFetcherPG:
                     ln_itunes_id_str = str(listennotes_match.get('itunes_id','')).strip()
                     if ln_itunes_id_str: enriched_data['itunes_id'] = ln_itunes_id_str 
                     enriched_data.setdefault('website', listennotes_match.get('website') or enriched_data.get('website'))
-        except Exception as e:
-            logger.warning(f"Error during cross-API enrichment for '{enriched_data.get('name')}': {e}", exc_info=True)
+        except APIClientError as e: # Catch specific API client errors (e.g., 404 from _request)
+            logger.warning(f"Non-fatal API client error during cross-API enrichment for '{enriched_data.get('name')}': {e}")
+            # No need to re-raise or return None, just log and continue with the data we have
+        except Exception as e: # Catch any other unexpected errors during enrichment
+            logger.warning(f"Unexpected error during cross-API enrichment for '{enriched_data.get('name')}': {e}", exc_info=True)
         return enriched_data
 
     async def _map_and_upsert_media(self, enriched_podcast_data: Dict[str, Any], primary_source_api: str, campaign_uuid: uuid.UUID, keyword: str):
@@ -284,15 +287,36 @@ class BatchPodcastFetcherPG:
         try:
             retrieved_media = await db_service_pg.upsert_media_in_db(media_payload_cleaned)
             if retrieved_media and retrieved_media.get('media_id'):
-                match_suggestion_data = {
-                    'campaign_id': campaign_uuid,
-                    'media_id': retrieved_media['media_id'],
-                    'matched_keywords': [keyword],
-                    'match_score': 1.0, 'status': 'pending',
-                    'ai_reasoning': f'Found via {primary_source_api} keyword: {keyword}.'
-                }
-                await db_service_pg.create_match_suggestion_in_db(match_suggestion_data)
-                logger.info(f"DB: Processed match for media ID {retrieved_media['media_id']} ({primary_source_api}, kw '{keyword}').")
+                media_id = retrieved_media['media_id']
+                # Check if a match suggestion already exists for this campaign and media ID
+                existing_suggestion = await db_service_pg.get_match_suggestion_by_campaign_and_media_ids(campaign_uuid, media_id)
+                
+                if existing_suggestion:
+                    logger.info(f"DB: MatchSuggestion already exists for media ID {media_id} and campaign ID {campaign_uuid}. Skipping creation.")
+                    # Optionally, update the existing suggestion if needed (e.g., add new keyword)
+                    # For now, we just skip creation as per the requirement.
+                else:
+                    match_suggestion_data = {
+                        'campaign_id': campaign_uuid,
+                        'media_id': media_id,
+                        'matched_keywords': [keyword],
+                        'status': 'pending',
+                    }
+                    created_suggestion = await db_service_pg.create_match_suggestion_in_db(match_suggestion_data)
+                    logger.info(f"DB: Created new MatchSuggestion for media ID {media_id} ({primary_source_api}, kw '{keyword}').")
+
+                    if created_suggestion and created_suggestion.get('match_id'):
+                        review_task_payload = {
+                            'task_type': 'match_suggestion',
+                            'related_id': created_suggestion['match_id'],
+                            'campaign_id': campaign_uuid,
+                            # 'assigned_to': specific_user_id, # If you have a user to assign it to
+                            'status': 'pending'
+                        }
+                        await db_service_pg.create_review_task_in_db(review_task_payload)
+                        logger.info(f"DB: Created ReviewTask for MatchSuggestion ID {created_suggestion['match_id']}.")
+                    else:
+                        logger.warning(f"DB: Could not create ReviewTask because MatchSuggestion creation failed or returned no ID for media ID {media_id}.")
             else:
                 logger.warning(f"DB: Upsert failed for {primary_source_api} result: {media_payload_cleaned.get('name')}")
         except Exception as e:

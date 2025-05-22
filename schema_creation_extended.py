@@ -144,17 +144,20 @@ def create_media_table(conn):
         ai_description            TEXT,
         embedding                 VECTOR(1536),
         created_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- NEW: Add updated_at
+        last_fetched_at           TIMESTAMPTZ,
+        latest_episode_date       DATE, -- This will be updated by enrichment
 
-        -- new profile_data fields
+        -- new profile_data fields from EnrichedPodcastProfile
         source_api                TEXT,
-        api_id                    TEXT,
+        api_id                    TEXT UNIQUE, -- NEW: Make api_id unique for easier lookup
         title                     TEXT,
         website                   TEXT,
         podcast_spotify_id        TEXT,
         itunes_id                 TEXT,
         total_episodes            INTEGER,
-        last_posted_at            TIMESTAMPTZ,
-        rss_feed_url              TEXT,
+        last_posted_at            TIMESTAMPTZ, -- This is likely redundant with latest_episode_date, consider removing one
+        rss_feed_url              TEXT, -- Redundant with rss_url, but keeping for now
         listen_score              REAL,
         listen_score_global_rank  INTEGER,
         audience_size             INTEGER,
@@ -168,14 +171,36 @@ def create_media_table(conn):
         podcast_facebook_url      TEXT,
         podcast_youtube_url       TEXT,
         podcast_tiktok_url        TEXT,
-        podcast_other_social_url  TEXT
+        podcast_other_social_url  TEXT,
+        
+        -- NEW ENRICHMENT FIELDS
+        host_names                TEXT[], -- List of strings
+        rss_owner_name            TEXT,
+        rss_owner_email           TEXT,
+        rss_explicit              BOOLEAN,
+        rss_categories            TEXT[], -- List of strings
+        twitter_followers         INTEGER,
+        twitter_following         INTEGER,
+        is_twitter_verified       BOOLEAN,
+        linkedin_connections      INTEGER, -- Can be followers or connections
+        instagram_followers       INTEGER,
+        tiktok_followers          INTEGER,
+        facebook_likes            INTEGER,
+        youtube_subscribers       INTEGER,
+        publishing_frequency_days REAL,
+        last_enriched_timestamp   TIMESTAMPTZ, -- When was this record last enriched
+        -- NEW FIELDS FOR ENRICHMENT SUPPORT
+        quality_score             NUMERIC,     -- Calculated quality score
+        first_episode_date        DATE         -- When the podcast first published an episode
     );
 
     CREATE INDEX IF NOT EXISTS idx_media_company_id           ON media (company_id);
     CREATE INDEX IF NOT EXISTS idx_media_embedding_hnsw       ON media USING hnsw (embedding vector_cosine_ops);
+    CREATE INDEX IF NOT EXISTS idx_media_api_id               ON media (api_id); -- NEW: Index for api_id
     """
     execute_sql(conn, sql_statement)
     print("Table MEDIA created/ensured with extended profile_data columns.")
+    apply_timestamp_update_trigger(conn, "media") # NEW: Apply trigger to media table
 
 
 def create_media_people_table(conn):
@@ -236,7 +261,10 @@ def create_episodes_table(conn):
         transcribe BOOLEAN,
         downloaded BOOLEAN,
         guest_names TEXT,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        source_api TEXT,
+        api_episode_id TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_episodes_media_id ON episodes (media_id);
     CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON episodes USING hnsw (embedding vector_cosine_ops);
@@ -244,17 +272,19 @@ def create_episodes_table(conn):
     execute_sql(conn, sql_statement)
     print("Table EPISODES created/ensured.")
 
+# In schema_creation_extended.py
 def create_match_suggestions(conn):
     sql_statement = """
     CREATE TABLE match_suggestions (
         match_id SERIAL PRIMARY KEY,
-        campaign_id UUID REFERENCES campaigns(campaign_id),
-        media_id INTEGER REFERENCES media(media_id),
+        campaign_id UUID REFERENCES campaigns(campaign_id), -- Consider ON DELETE CASCADE or RESTRICT
+        media_id INTEGER REFERENCES media(media_id),       -- Consider ON DELETE CASCADE or RESTRICT
         match_score NUMERIC,
         matched_keywords TEXT[],
         ai_reasoning TEXT,
-        client_approved BOOLEAN DEFAULT FALSE,
+        client_approved BOOLEAN DEFAULT FALSE, 
         approved_at TIMESTAMPTZ,
+        status VARCHAR(50) DEFAULT 'pending',  
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaign_id);
@@ -343,6 +373,7 @@ def create_pitches_table(conn):
         send_ts TIMESTAMPTZ,
         reply_bool BOOLEAN,
         reply_ts TIMESTAMPTZ,
+
         pitch_gen_id INTEGER REFERENCES pitch_generations(pitch_gen_id) ON DELETE SET NULL,
         placement_id INTEGER REFERENCES placements(placement_id) ON DELETE SET NULL, -- Renamed from booking_id
         pitch_state VARCHAR(100),

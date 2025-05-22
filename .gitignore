@@ -65,4 +65,15 @@ temp/
 prompts/
 
 # Ignore tests folder
-tests/ 
+tests/
+
+# Ignore specific script files
+test_instantly_emails.py
+temp_show_tables.py
+temp_backup_script.py
+
+# Ignore specific data files
+processed_instantly_to_attio_ids.txt
+
+# Ignore AI usage logs
+ai_usage_logs.csv
