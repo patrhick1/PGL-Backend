@@ -1,6 +1,11 @@
+import os
+import sys
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 
 # Assuming services and models are in paths like src.services, src.enrichment, src.models
@@ -72,7 +77,7 @@ class EnrichmentOrchestrator:
                         update_data['contact_email'] = update_data.pop('primary_email')
 
                     # last_enriched_timestamp is crucial
-                    update_data['last_enriched_timestamp'] = datetime.utcnow()
+                    update_data['last_enriched_timestamp'] = datetime.now(timezone.utc)
 
                     updated_media = await db_service_pg.update_media_enrichment_data(media_id, update_data)
                     if updated_media:
@@ -183,7 +188,7 @@ class EnrichmentOrchestrator:
     async def run_pipeline_once(self):
         """Runs one full cycle of the enrichment pipeline."""
         logger.info("=== Starting Single Enrichment Pipeline Run ===")
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         # 1. Enrich Media Metadata
         await self._enrich_media_batch()
@@ -194,7 +199,7 @@ class EnrichmentOrchestrator:
         # 3. Update Quality Scores (for media that have enough transcriptions)
         await self._update_quality_scores_batch()
         
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         logger.info(f"=== Single Enrichment Pipeline Run Finished. Duration: {end_time - start_time} ===")
 
     async def run_continuously(self, stop_event: Optional[asyncio.Event] = None):
@@ -233,10 +238,10 @@ if __name__ == '__main__':
         # Initialize services (in a real app, these might be injected or use a DI framework)
         try:
             from ..services.gemini_service import GeminiService
-            from ..services.social_discovery_service import SocialDiscoveryService
-            # from .data_merger_service import DataMergerService # Already imported
+            from .social_discovery_service import SocialDiscoveryService
+            from .data_merger_service import DataMergerService
 
-            gemini_service = GeminiService() 
+            gemini_service = GeminiService()
             social_discovery_service = SocialDiscoveryService()
             data_merger = DataMergerService()
             
