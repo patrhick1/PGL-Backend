@@ -1,0 +1,1 @@
+# Placeholder for media fetcher service. Content to be migrated from batch_podcast_fetcher_pg.py and fetch_episodes_to_pg.py. 

@@ -1,0 +1,1 @@
+# Placeholder for angles generator service. Content to be migrated from angles_processor_pg.py. 
