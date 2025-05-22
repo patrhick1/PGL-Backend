@@ -20,7 +20,8 @@ class DataMergerService:
 
     def _normalize_url(self, url: Optional[str]) -> Optional[HttpUrl]:
         """Validates and normalizes a URL string to HttpUrl or None."""
-        if not url or not isinstance(url, str):
+        # FIX: Handle string 'null' from LLM output
+        if not url or not isinstance(url, str) or url.lower() == 'null':
             return None
         url = url.strip()
         if not url:
@@ -84,24 +85,27 @@ class DataMergerService:
             # If social_results contains host data (e.g., 'host_linkedin'), that needs to be handled differently,
             # likely by the EnrichmentAgent to update a People record, not EnrichedPodcastProfile directly.
             # For now, this merger focuses on fields directly on EnrichedPodcastProfile.
+            # FIX: Add LinkedIn company profile mapping
+            elif platform_key == 'podcast_linkedin' and platform_map.get('linkedin_company'):
+                map_info = platform_map['linkedin_company']
+                profile.podcast_linkedin_url = self._normalize_url(apify_data.get('profile_url')) or profile.podcast_linkedin_url
+                # Assuming 'followers_count' is the relevant metric for company pages
+                # Note: EnrichedPodcastProfile doesn't have a specific field for LinkedIn followers,
+                # so this data would be lost unless a new field is added or it's mapped to a generic 'linkedin_connections'
+                # if that column is intended for podcast company followers.
+                # For now, just update the URL.
+                # profile.linkedin_followers = self._safe_int_cast(apify_data.get('followers_count')) or profile.linkedin_followers # This field doesn't exist on EnrichedPodcastProfile
+            
+            # FIX: Add Facebook and YouTube if needed, similar to above.
+            # For now, they are placeholders in SocialDiscoveryService, so no data will come through.
 
     def merge_podcast_data(
         self,
         initial_db_data: Dict[str, Any], 
         gemini_enrichment: Optional[GeminiPodcastEnrichment] = None,
-        social_media_results: Optional[Dict[str, Optional[Dict[str, Any]]]] = None # e.g. {"podcast_twitter": {...}, "podcast_instagram": {...}}
-        # rss_data: Optional[Dict[str, Any]] = None, # Removed direct RSS parsing dependency
+        social_media_results: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
     ) -> Optional[EnrichedPodcastProfile]:
-        """Merges initial database data with enrichment data sources into an EnrichedPodcastProfile.
-
-        Args:
-            initial_db_data: Data fetched from the 'media' table.
-            gemini_enrichment: Structured data from GeminiService for social URLs, host names.
-            social_media_results: Results from SocialDiscoveryService for various platforms.
-
-        Returns:
-            An EnrichedPodcastProfile instance or None if critical data is missing or merging fails.
-        """
+        """Merges initial database data with enrichment data sources into an EnrichedPodcastProfile."""
         if not initial_db_data or not isinstance(initial_db_data, dict):
             logger.error("DataMergerService: Initial database data is missing or invalid.")
             return None
@@ -109,13 +113,19 @@ class DataMergerService:
         api_id = initial_db_data.get('api_id') or initial_db_data.get('media_id')
         logger.info(f"Merging data for podcast ID: {api_id or 'Unknown'} (Title: {initial_db_data.get('name', 'N/A')})")
 
+        # FIX: Ensure last_enriched_timestamp is always a datetime object for initial Pydantic validation
+        _last_enriched_ts_from_db = initial_db_data.get('last_enriched_timestamp')
+        if _last_enriched_ts_from_db is None:
+            _last_enriched_ts_from_db = datetime.utcnow() # Fallback for initial profile creation
+
         # Start with data from the database (media table row)
         try:
             profile = EnrichedPodcastProfile(
                 # IDs
                 api_id=str(api_id) if api_id else None,
-                source_api=initial_db_data.get('source_api'), # Assuming 'source_api' comes from DB
-                unified_profile_id=initial_db_data.get('media_id', str(uuid.uuid4())), # Use media_id as unified if available
+                source_api=initial_db_data.get('source_api'),
+                # FIX: Convert media_id to string for unified_profile_id
+                unified_profile_id=str(initial_db_data.get('media_id')) if initial_db_data.get('media_id') is not None else str(uuid.uuid4()),
                 
                 # Core Info
                 title=initial_db_data.get('title') or initial_db_data.get('name'),
@@ -127,7 +137,8 @@ class DataMergerService:
                 itunes_id=str(initial_db_data.get('itunes_id')) if initial_db_data.get('itunes_id') is not None else None,
                 total_episodes=self._safe_int_cast(initial_db_data.get('total_episodes')),
                 last_posted_at=initial_db_data.get('last_posted_at'), # Expects datetime or None
-                rss_feed_url=self._normalize_url(initial_db_data.get('rss_url') or initial_db_data.get('rss_feed_url')),
+                # FIX: Use 'rss_url' from DB for 'rss_feed_url' in profile
+                rss_feed_url=self._normalize_url(initial_db_data.get('rss_url')),
                 category=initial_db_data.get('category'),
                 
                 # Host Info (denormalized from DB)
@@ -176,7 +187,7 @@ class DataMergerService:
                 quality_score=self._safe_float_cast(initial_db_data.get('quality_score')),
                 
                 # Timestamps
-                last_enriched_timestamp=initial_db_data.get('last_enriched_timestamp', datetime.utcnow()) # Fallback to now
+                last_enriched_timestamp=_last_enriched_ts_from_db # Use the ensured datetime object for initial profile creation
             )
         except ValidationError as ve:
             logger.error(f"Pydantic validation error initializing EnrichedPodcastProfile for {api_id}: {ve}")
@@ -221,8 +232,13 @@ class DataMergerService:
                 'tiktok': {
                     'url_field': 'podcast_tiktok_url',
                     'followers_field': 'tiktok_followers'
+                },
+                # FIX: Add mapping for LinkedIn company profiles
+                'linkedin_company': {
+                    'url_field': 'podcast_linkedin_url',
+                    'followers_field': 'linkedin_followers' # This field is not on EnrichedPodcastProfile, only URL will be updated
                 }
-                # Add mappings for LinkedIn (company), Facebook, YouTube if scraping for podcast entity itself
+                # Add mappings for Facebook, YouTube if scraping for podcast entity itself
             }
             self._merge_social_media_data(profile, social_media_results, platform_map)
 
@@ -230,7 +246,7 @@ class DataMergerService:
         if not profile.primary_email and profile.rss_owner_email:
             profile.primary_email = profile.rss_owner_email
         
-        # Update the timestamp
+        # Update the timestamp to reflect the completion time of this enrichment run
         profile.last_enriched_timestamp = datetime.utcnow()
 
         logger.info(f"Successfully merged data for podcast: {profile.api_id} - {profile.title}")

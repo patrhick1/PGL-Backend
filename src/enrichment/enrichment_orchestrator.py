@@ -59,25 +59,17 @@ class EnrichmentOrchestrator:
             try:
                 enriched_profile = await self.enrichment_agent.enrich_podcast_profile(media_data_dict)
                 if enriched_profile:
-                    # Convert EnrichedPodcastProfile to a dict for DB update
-                    # Ensure all fields in the dict match columns in the 'media' table
-                    update_data = enriched_profile.model_dump(exclude_none=False) # include_none=False to only update provided fields
+                    update_data = enriched_profile.model_dump(exclude_none=True)
                     
-                    # Remove fields that are not directly on media table or managed by DB
                     fields_to_remove_before_db_update = ['unified_profile_id', 'recent_episodes', 'quality_score']
                     for field in fields_to_remove_before_db_update:
                         if field in update_data: del update_data[field]
                     
-                    # Ensure primary_email is mapped to contact_email if that's the DB column
-                    if 'primary_email' in update_data and 'contact_email' not in update_data:
+                    if 'primary_email' in update_data:
                         update_data['contact_email'] = update_data.pop('primary_email')
-                    elif 'primary_email' in update_data and 'contact_email' in update_data and not update_data['contact_email']:
-                        update_data['contact_email'] = update_data.pop('primary_email')
-                    elif 'primary_email' in update_data: # Both exist, primary_email might have been consolidated
-                        update_data['contact_email'] = update_data.pop('primary_email')
-
-                    # last_enriched_timestamp is crucial
-                    update_data['last_enriched_timestamp'] = datetime.now(timezone.utc)
+                    
+                    if 'rss_feed_url' in update_data:
+                        update_data['rss_url'] = update_data.pop('rss_feed_url')
 
                     updated_media = await db_service_pg.update_media_enrichment_data(media_id, update_data)
                     if updated_media:

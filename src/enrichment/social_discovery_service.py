@@ -1,19 +1,17 @@
 import os
 import logging
 import asyncio
-import re
-import json
-from urllib.parse import urlparse
-from typing import Optional, Dict, Any, List 
-
 from apify_client import ApifyClient
 from dotenv import load_dotenv
-from pydantic import HttpUrl, ValidationError # For URL validation if used within methods
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
+import re
+import json
 
 # Configure logging
-logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -22,10 +20,7 @@ class SocialDiscoveryService:
     """Discovers and analyzes social media profiles using Apify."""
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initializes the Apify client.
-        Args:
-            api_key: The Apify API key. If None, loads from APIFY_API_KEY env var.
-        """
+        """Initializes the Apify client."""
         if api_key:
             self.api_key = api_key
         else:
@@ -33,7 +28,6 @@ class SocialDiscoveryService:
         
         if not self.api_key:
             logger.error("APIFY_API_KEY not found. Social discovery service will not function.")
-            # Raise an error or handle gracefully depending on how critical this service is at startup
             raise ValueError("APIFY_API_KEY must be set for SocialDiscoveryService.")
         
         try:
@@ -47,11 +41,10 @@ class SocialDiscoveryService:
         """Runs a specific Apify actor asynchronously and retrieves its dataset items."""
         logger.info(f"Running Apify actor: {actor_id} with input (keys): {list(run_input.keys())}")
         try:
-            # Run the actor asynchronously
             actor_call = await asyncio.to_thread(
                 self.client.actor(actor_id).call, 
                 run_input=run_input,
-                timeout_secs=timeout_secs # Add timeout to actor call
+                timeout_secs=timeout_secs
             )
             
             if not actor_call or not actor_call.get("defaultDatasetId"):
@@ -60,11 +53,7 @@ class SocialDiscoveryService:
 
             logger.info(f"Actor {actor_id} run completed. Run ID: {actor_call.get('id')}, Dataset ID: {actor_call.get('defaultDatasetId')}. Fetching items...")
             dataset = self.client.dataset(actor_call["defaultDatasetId"])
-            # dataset.list_items() is sync, run in thread
-            # Consider potential for large datasets and pagination if actors return many items.
-            # For profile scrapers, usually it's one item per profile, or a few related items.
-            dataset_page = await asyncio.to_thread(dataset.list_items) # Default limit is 1000 items
-            
+            dataset_page = await asyncio.to_thread(dataset.list_items)
             dataset_items = dataset_page.items if dataset_page else []
             
             logger.debug(
@@ -78,10 +67,9 @@ class SocialDiscoveryService:
             return None
 
     def _normalize_url(self, url: Optional[str]) -> Optional[str]:
-        """Normalizes a URL: HTTPS, removes www (unless critical), query params, fragments, trailing slashes, lowercase."""
+        """Normalizes a URL: forces HTTPS, removes www. (unless critical like www.linkedin.com), removes query params, fragments, and trailing slashes."""
         if not url or not isinstance(url, str):
-            return None
-
+            return url
         url = url.strip()
         if not url:
             return None
@@ -92,168 +80,102 @@ class SocialDiscoveryService:
             url = "https://" + url[len("http://"):]
 
         try:
-            parsed_url = urlparse(url)
-            hostname = parsed_url.hostname
+            parsed = urlparse(url)
+            hostname = parsed.hostname
             if hostname and hostname.startswith("www."):
-                # Keep www for LinkedIn, remove for most others for canonical form
                 if "linkedin.com" not in hostname.lower():
                     new_hostname = hostname[4:]
                     url = url.replace(hostname, new_hostname, 1)
             
-            # Re-parse after potential hostname change for accurate path/query stripping
-            parsed_url = urlparse(url)
-            # Keep path, remove query and fragment
-            url = parsed_url._replace(query='', fragment='').geturl()
+            parsed = urlparse(url)
+            url = parsed._replace(query='', fragment='').geturl()
             
             if url.endswith("/") and url.count("/") > 2:
                 url = url.rstrip("/")
-            
             return url.lower()
         except Exception as e:
-            logger.warning(f"Could not fully normalize URL '{url}': {e}. Returning as is after basic https forcing.")
-            # Fallback to a simpler normalization if parsing complex URLs fails
-            if not url.startswith("https://"):
-                 if url.startswith("http://"):
-                      url = "https://" + url[len("http://"):]
-                 else:
-                      url = "https://" + url # Default if no scheme
-            return url.split("?")[0].split("#")[0].rstrip("/").lower()
+            logger.warning(f"Could not fully parse URL '{url}' during normalization: {e}. Applying basic normalization.")
+            url = url.split("?")[0].split("#")[0]
+            if url.endswith("/") and url.count("/") > 2:
+                url = url.rstrip("/")
+            return url.lower()
 
-    def _extract_username_from_url(self, url: Optional[str], platform_pattern: re.Pattern) -> Optional[str]:
-        """General username extractor given a platform-specific regex pattern."""
+    def _extract_username_from_twitter_url(self, url: str) -> Optional[str]:
+        """Extracts the username from a Twitter/X URL, assuming URL might need some normalization first."""
+        if not isinstance(url, str): return None
+        # Apply a less aggressive normalization for username extraction, mainly ensuring domain consistency
+        temp_url = url.strip().lower()
+        if '://' not in temp_url:
+            temp_url = "https://" + temp_url
+        temp_url = re.sub(r"https://(?:www\.)?x\.com/", "https://twitter.com/", temp_url, flags=re.IGNORECASE)
+        temp_url = re.sub(r"https://(?:www\.)?twitter\.com/", "https://twitter.com/", temp_url, flags=re.IGNORECASE)
+        
+        try:
+            parsed_url = urlparse(temp_url)
+            if parsed_url.netloc == 'twitter.com':
+                path_parts = parsed_url.path.strip('/').split('/')
+                if path_parts and path_parts[0] and re.match(r'^[A-Za-z0-9_]{1,15}$', path_parts[0]):
+                    # Avoid known non-username paths if they appear as first part
+                    if path_parts[0].lower() not in ['i', 'intent', 'search', 'home', 'explore', 'notifications', 'messages', 'settings', 'compose']:
+                        return path_parts[0]
+        except Exception as e:
+            logger.warning(f"Could not parse username from Twitter URL '{url}' (temp_url: '{temp_url}'): {e}")
+        return None
+
+    def _canonicalize_twitter_url(self, url: str) -> str:
+        """Returns a canonical https://twitter.com/<username> form."""
+        if not isinstance(url, str) or not url: return url 
+        username = self._extract_username_from_twitter_url(url)
+        if username:
+            return f"https://twitter.com/{username}".lower()
+        logger.warning(f"Could not derive canonical Twitter URL for: {url}. Returning normalized version.")
+        return self._normalize_url(url) or url # Fallback to normalized original if username extraction fails
+
+    def _extract_username_from_linkedin_url(self, url: str) -> Optional[str]:
         if not url: return None
         normalized_url = self._normalize_url(url)
         if not normalized_url: return None
-        
-        match = platform_pattern.search(normalized_url)
+        match = re.search(r"linkedin\.com/in/([a-zA-Z0-9_-]+)", normalized_url)
+        return match.group(1) if match else None
+
+    def _extract_vanity_from_linkedin_company_url(self, url: str) -> Optional[str]:
+        if not url: return None
+        normalized_url = self._normalize_url(url)
+        if not normalized_url: return None
+        match = re.search(r"linkedin\.com/company/([a-zA-Z0-9_-]+)", normalized_url)
+        return match.group(1) if match else None
+
+    def _extract_username_from_instagram_url(self, url: str) -> Optional[str]:
+        if not url: return None
+        normalized_url = self._normalize_url(url)
+        if not normalized_url: return None
+        match = re.search(r"instagram\.com/([a-zA-Z0-9_.]+)/?", normalized_url)
         if match:
             username = match.group(1)
-            # Avoid capturing common path segments like 'p', 'reels', 'videos' as usernames
-            if username.lower() in ['p', 'reels', 'videos', 'channel', 'user', 'explore', 'stories', 'post', 'posts']:
-                logger.debug(f"Extracted segment '{username}' from '{normalized_url}' resembles a path, not a username.")
-                return None
-            # Basic check for valid username characters (alphanumeric + underscore + dot for some platforms)
-            if re.match(r'^[a-zA-Z0-9_.-]+$', username):
+            if username.lower() not in ['p', 'reels', 'tv', 'explore', 'accounts', 'stories']:
                 return username
-            logger.debug(f"Extracted segment '{username}' from '{normalized_url}' contains invalid characters.")
         return None
 
-    # Platform-specific regex patterns (adjust as needed for robustness)
-    _twitter_username_pattern = re.compile(r"twitter\.com/([a-zA-Z0-9_]{1,15})")
-    _linkedin_public_profile_pattern = re.compile(r"linkedin\.com/in/([a-zA-Z0-9_-]+)") # Public profiles
-    _linkedin_company_pattern = re.compile(r"linkedin\.com/company/([a-zA-Z0-9_-]+)") # Company pages
-    _instagram_username_pattern = re.compile(r"instagram\.com/([a-zA-Z0-9_.]+)")
-    _tiktok_username_pattern = re.compile(r"tiktok\.com/@([a-zA-Z0-9_.]+)")
-    _facebook_username_pattern = re.compile(r"facebook\.com/(?:people/)?([a-zA-Z0-9_.-]+)(?:/)?")
-    _youtube_channel_pattern = re.compile(r"youtube\.com/(?:channel/|c/|@)?([a-zA-Z0-9_.-]+)")
+    def _extract_username_from_tiktok_url(self, url: str) -> Optional[str]:
+        if not url: return None
+        normalized_url = self._normalize_url(url)
+        if not normalized_url: return None
+        match = re.search(r"tiktok\.com/@([a-zA-Z0-9_.]+)", normalized_url)
+        return match.group(1) if match else None
 
-    def _get_username_extractor(self, platform: str) -> Optional[Any]: # re.Pattern not available for type hint here
-        if platform == 'twitter': return self._twitter_username_pattern
-        if platform == 'linkedin_profile': return self._linkedin_public_profile_pattern
-        if platform == 'linkedin_company': return self._linkedin_company_pattern
-        if platform == 'instagram': return self._instagram_username_pattern
-        if platform == 'tiktok': return self._tiktok_username_pattern
-        if platform == 'facebook': return self._facebook_username_pattern
-        if platform == 'youtube': return self._youtube_channel_pattern
-        return None
-
-    async def _fetch_social_data_batch(self, urls: List[str], actor_id: str, input_url_field: str, result_mapper_func, actor_input_modifier_func=None) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Generic helper to fetch data for a list of URLs using a specific Apify actor."""
-        results_by_norm_url: Dict[str, Optional[Dict[str, Any]]] = {}
-        if not urls:
-            return results_by_norm_url
-
-        # Normalize all input URLs first and create a mapping back to original
-        original_to_norm_map: Dict[str, str] = {url: self._normalize_url(url) for url in urls if url}
-        norm_to_original_map: Dict[str, str] = {v: k for k, v in original_to_norm_map.items() if v} # Filter out None normalized URLs
-        unique_norm_urls = sorted(list(norm_to_original_map.keys()))
-
-        if not unique_norm_urls:
-            logger.info(f"No valid, unique, normalized URLs to process for actor {actor_id}.")
-            return {orig_url: None for orig_url in urls} # Return None for all original inputs
-
-        actor_input_params = {input_url_field: unique_norm_urls}
-        if actor_input_modifier_func:
-            actor_input_params = actor_input_modifier_func(actor_input_params, unique_norm_urls)
-
-        actor_results = await self._run_actor_async(actor_id, actor_input_params)
-
-        if actor_results and isinstance(actor_results, list):
-            for item in actor_results:
-                if not isinstance(item, dict):
-                    logger.warning(f"Skipping non-dict item from actor {actor_id}: {item}")
-                    continue
-                
-                # Map result back to one of the normalized input URLs
-                # This requires the actor result to contain a field that matches or can be normalized to our input URLs
-                # This logic might need to be customized per actor if their output URL field differs.
-                actor_item_url_field = item.get('url') or item.get('profileUrl') or item.get('inputUrl') # Common actor output fields for URL
-                
-                normalized_actor_item_url = self._normalize_url(actor_item_url_field)
-                
-                if normalized_actor_item_url and normalized_actor_item_url in unique_norm_urls:
-                    if results_by_norm_url.get(normalized_actor_item_url) is None: # Process each normalized URL once
-                        mapped_data = result_mapper_func(item)
-                        results_by_norm_url[normalized_actor_item_url] = mapped_data
-                        logger.debug(f"Mapped Apify result for {normalized_actor_item_url} from actor {actor_id}. Data: {str(mapped_data)[:100]}...")
-                    else:
-                         logger.debug(f"Already mapped data for {normalized_actor_item_url} from actor {actor_id}. Skipping duplicate item.")
-                else:
-                    logger.warning(f"Could not map item from actor {actor_id} back to an input URL. Item URL: '{actor_item_url_field}', Normalized: '{normalized_actor_item_url}'. Item keys: {list(item.keys())}")
-        
-        # Final map from original input URL to result
-        final_results: Dict[str, Optional[Dict[str, Any]]] = {}
-        for original_url in urls:
-            norm_url = original_to_norm_map.get(original_url)
-            if norm_url:
-                final_results[original_url] = results_by_norm_url.get(norm_url)
-            else:
-                final_results[original_url] = None # If original URL couldn't be normalized
-        
-        return final_results
-
-    def _map_linkedin_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _map_linkedin_profile_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Maps fields from supreme_coder/linkedin-profile-scraper results."""
         return {
-            'profile_url': self._normalize_url(item.get('inputUrl') or item.get('profileUrl')),
-            'name': item.get('fullName') or item.get('name'),
+            'profile_url': self._normalize_url(item.get('inputUrl') or item.get('url')),
             'headline': item.get('headline') or item.get('occupation'),
             'summary': item.get('summary'),
-            'followers_count': item.get('followersCount'), # Typically for company/influencer pages
-            'connections_count': item.get('connectionsCount'), # For personal profiles
-            'location': item.get('location'),
-            'company': item.get('company') # From company scraper part if used
+            'followers_count': self._safe_int_cast(item.get('followersCount')), # May not be present for personal profiles
+            'connections_count': self._safe_int_cast(item.get('connectionsCount'))
         }
 
-    def _twitter_input_modifier(self, current_input, urls_for_run):
-        # Specific modifications for apidojo/twitter-user-scraper
-        current_input["getFollowers"] = True # Example: always get followers
-        current_input["getFollowing"] = True
-        current_input["maxItems"] = len(urls_for_run)
-        # Padding for twitter actor if needed (from original example)
-        # This is a simplified version; original logic was more complex
-        MIN_URLS_FOR_ACTOR = 5 
-        if len(urls_for_run) < MIN_URLS_FOR_ACTOR:
-            padding_needed = MIN_URLS_FOR_ACTOR - len(urls_for_run)
-            # Add some generic, well-known Twitter profiles for padding if needed
-            # Ensure these are normalized
-            padding_profiles = [self._normalize_url(url) for url in [
-                "https://twitter.com/nasa", "https://twitter.com/apify",
-                "https://twitter.com/google", "https://twitter.com/github", "https://twitter.com/who"
-            ] if self._normalize_url(url)]
-            
-            additional_padding = []
-            for pad_url in padding_profiles:
-                if len(additional_padding) >= padding_needed: break
-                if pad_url not in urls_for_run: additional_padding.append(pad_url)
-            
-            current_input[current_input.get("input_url_field", "startUrls")].extend(additional_padding)
-            logger.info(f"Padded Twitter URLs to {len(current_input[current_input.get("input_url_field", "startUrls")])} for actor requirements.")
-        return current_input
-        
     def _map_twitter_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        # Map fields from apidojo/twitter-user-scraper
         return {
-            'profile_url': self._normalize_url(item.get('url') or item.get('profile_url') or item.get('twitterUrl')),
+            'profile_url': self._canonicalize_twitter_url(item.get('url') or item.get('profile_url') or item.get('twitterUrl')),
             'username': item.get('username') or item.get('screenName') or item.get('userName'),
             'name': item.get('name'),
             'description': item.get('description') or item.get('rawDescription'),
@@ -265,23 +187,11 @@ class SocialDiscoveryService:
             'tweets_count': self._safe_int_cast(item.get('statuses_count') or item.get('tweetCount'))
         }
 
-    def _instagram_input_modifier(self, current_input, urls_for_run):
-        # apify/instagram-profile-scraper expects usernames, not full URLs
-        usernames = []
-        for url_in in urls_for_run:
-            username = self._extract_username_from_url(url_in, self._instagram_username_pattern)
-            if username: usernames.append(username)
-            else: logger.warning(f"Could not extract Instagram username from {url_in} for actor input.")
-        current_input["usernames"] = list(set(usernames)) # Use unique usernames
-        current_input.pop(current_input.get("input_url_field", "directUrls"), None) # Remove the URL field as actor uses usernames
-        return current_input
-
     def _map_instagram_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        # Map fields from apify/instagram-profile-scraper
         username = item.get('username')
-        profile_url = f"https://www.instagram.com/{username}/" if username else None
+        profile_url = f"https://www.instagram.com/{username}/" if username else self._normalize_url(item.get('profileUrl'))
         return {
-            'profile_url': self._normalize_url(profile_url or item.get('profileUrl')),
+            'profile_url': profile_url,
             'username': username,
             'name': item.get('fullName'),
             'description': item.get('biography'),
@@ -292,117 +202,268 @@ class SocialDiscoveryService:
             'posts_count': self._safe_int_cast(item.get('postsCount'))
         }
 
-    def _tiktok_input_modifier(self, current_input, urls_for_run):
-        # apidojo/tiktok-scraper takes startUrls but seems to work best one by one for profiles for stable data.
-        # This service will call it one by one if this modifier isn't robust enough for batching profiles.
-        # For now, let's assume batching works if the actor supports it; if not, this needs a loop in the calling function.
-        current_input["maxItemsPerQuery"] = 1 # Try to get one main profile data per URL
-        current_input["shouldDownloadCovers"] = False
-        current_input["shouldDownloadSlideshowImages"] = False
-        current_input["shouldDownloadVideos"] = False
-        return current_input
-        
     def _map_tiktok_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        # Extracts profile info from apidojo/tiktok-scraper results (which are often video-centric)
-        # The `authorMeta` or `channel` (if present) sub-object usually has profile details.
-        author_meta = item.get('authorMeta') or item.get('author') or item.get('channel') or {}
-        username = author_meta.get('name') or author_meta.get('nickName') or author_meta.get('uniqueId')
-        profile_url = f"https://www.tiktok.com/@{username}" if username else self._normalize_url(author_meta.get('webUrl') or item.get('webVideoUrl'))
+        author_meta = item.get('authorMeta') or item.get('author') or item.get('channel') or item.get('user') or {}
+        username = author_meta.get('name') or author_meta.get('nickName') or author_meta.get('uniqueId') or item.get('unique_id')
+        profile_url = f"https://www.tiktok.com/@{username}" if username else self._normalize_url(author_meta.get('webUrl') or item.get('webVideoUrl') or item.get('url'))
         
-        # Fallback if username is still not found from authorMeta (e.g. if item is a direct profile item)
-        if not username and item.get('uniqueId'): # From a direct profile item structure
+        if not username and item.get('uniqueId'): # Fallback if directly a profile item
             username = item.get('uniqueId')
             profile_url = f"https://www.tiktok.com/@{username}"
+        elif not username and item.get('author') and isinstance(item.get('author'), dict): # Another common pattern
+             username = item['author'].get('uniqueId')
+             if username: profile_url = f"https://www.tiktok.com/@{username}"
 
         return {
             'profile_url': profile_url,
             'username': username,
-            'name': author_meta.get('nickName', item.get('nickname')), # `item.get('nickname')` if direct profile structure
-            'description': author_meta.get('signature', item.get('signature')), # `item.get('signature')` if direct profile structure
-            'followers_count': self._safe_int_cast(author_meta.get('fans', item.get('followerCount'))), # fans or followerCount
-            'following_count': self._safe_int_cast(author_meta.get('following', item.get('followingCount'))),
-            'likes_count': self._safe_int_cast(author_meta.get('heart', item.get('heartCount'))), # total hearts/likes
+            'name': author_meta.get('nickName', item.get('nickname', item.get('name'))),
+            'description': author_meta.get('signature', item.get('signature')),
+            'followers_count': self._safe_int_cast(author_meta.get('fans', item.get('followerCount', item.get('follower_count')))),
+            'following_count': self._safe_int_cast(author_meta.get('following', item.get('followingCount', item.get('following_count')))),
+            'likes_count': self._safe_int_cast(author_meta.get('heart', item.get('heartCount', item.get('like_count')))),
             'is_verified': author_meta.get('verified', item.get('verified')),
             'profile_picture_url': self._normalize_url(author_meta.get('avatar') or item.get('avatarLarger') or item.get('avatarThumb')),
-            'videos_count': self._safe_int_cast(author_meta.get('video', item.get('videoCount')))
+            'videos_count': self._safe_int_cast(author_meta.get('video', item.get('videoCount', item.get('video_count'))))
         }
 
+    async def _fetch_social_data_batch_generic(
+        self, 
+        urls: List[str], 
+        actor_id: str, 
+        input_config: Dict[str, Any], # Actor-specific input structure beyond URLs
+        result_mapper_func,
+        actor_item_url_key_candidates: List[str] = ['url', 'profileUrl', 'inputUrl'] 
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        results_by_norm_url: Dict[str, Optional[Dict[str, Any]]] = {}
+        if not urls: return results_by_norm_url
+
+        # Map original URLs to normalized versions for internal processing and result mapping
+        original_to_norm_map: Dict[str, Optional[str]] = {url: self._normalize_url(url) for url in urls if url}
+        # Create a reverse map from normalized URL back to the first original URL that produced it
+        # This handles cases where multiple original URLs might normalize to the same canonical form.
+        norm_to_first_original_map: Dict[str, str] = {}
+        unique_norm_urls_for_run = []
+        for original_url, norm_url in original_to_norm_map.items():
+            if norm_url:
+                if norm_url not in norm_to_first_original_map: # Keep track of which normalized URLs we are running
+                    norm_to_first_original_map[norm_url] = original_url
+                    unique_norm_urls_for_run.append(norm_url)
+        
+        if not unique_norm_urls_for_run:
+            logger.info(f"No valid, unique, normalized URLs to process for actor {actor_id}.")
+            return {orig_url: None for orig_url in urls} # Return None for all original inputs
+
+        # The actor_input_params should be structured according to what the specific actor expects.
+        # The `input_config` dict should contain the actor-specific keys for the URL list and any other params.
+        # Example: For an actor expecting {"startUrls": [...], "someOption": true}, 
+        # input_config would be {"startUrlsKey": "startUrls", "otherParams": {"someOption": true}}
+        # The actual list of URLs unique_norm_urls_for_run is now passed directly via input_config structure.
+        # This is a slight departure from the previous _fetch_social_data_batch_generic for more flexibility.
+        run_input = input_config.copy() # Start with other params
+        # The key for the URL list itself needs to be dynamic or passed in.
+        # Assuming `input_url_field_name` is the key within `run_input` where URLs should go.
+        # This was from previous; let's use user's `run_input_urls` structure for LinkedIn-like actors.
+        # The key for URL list is often "startUrls" or "urls" or specific to actor (e.g. "usernames")
+
+        # For actors like supreme_coder/linkedin-profile-scraper that take a list of dicts for URLs:
+        if actor_id == 'supreme_coder/linkedin-profile-scraper':
+            run_input['urls'] = run_input.pop('startUrls', []) # ensure urls field is used from input_config
+        elif actor_id == 'apify/instagram-profile-scraper': # Takes usernames
+             run_input['usernames'] = run_input.pop('startUrls', []) # Assume usernames are passed in unique_norm_urls_for_run
+        else: # Default for actors taking a simple list of URLs
+            run_input[input_config.get("url_list_field_name", "startUrls")] = unique_norm_urls_for_run
+
+        actor_results_list = await self._run_actor_async(actor_id, run_input)
+        
+        if actor_results_list and isinstance(actor_results_list, list):
+            for item in actor_results_list:
+                if not isinstance(item, dict):
+                    logger.warning(f"Skipping non-dict item from actor {actor_id}: {item}")
+                    continue
+                
+                actor_item_url_value = None
+                for key_candidate in actor_item_url_key_candidates:
+                    val = item.get(key_candidate)
+                    if isinstance(val, str) and val.strip(): # Ensure it's a non-empty string
+                        actor_item_url_value = val
+                        break
+                
+                normalized_actor_item_url = self._normalize_url(actor_item_url_value)
+
+                if normalized_actor_item_url and normalized_actor_item_url in norm_to_first_original_map:
+                    # Use the first original URL that mapped to this normalized URL
+                    # This is to handle if multiple input URLs normalize to the same thing
+                    key_for_results = norm_to_first_original_map[normalized_actor_item_url]
+                    if results_by_norm_url.get(key_for_results) is None: 
+                        mapped_data = result_mapper_func(item)
+                        results_by_norm_url[key_for_results] = mapped_data
+        
+        final_results: Dict[str, Optional[Dict[str, Any]]] = {}
+        for original_url in urls: # Iterate through original URLs provided by the user
+            norm_url = original_to_norm_map.get(original_url)
+            # Find the first original URL that maps to this norm_url to retrieve the result
+            result_key = norm_to_first_original_map.get(norm_url) if norm_url else None
+            final_results[original_url] = results_by_norm_url.get(result_key) if result_key else None
+        
+        return final_results
+
     async def get_linkedin_data_for_urls(self, profile_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Extracts LinkedIn profile info for a batch of URLs."""
-        # supreme_coder/linkedin-profile-scraper ; input field "urls"
-        return await self._fetch_social_data_batch(profile_urls, 'kamilracek/linkedin-profile-scraper', 'startUrls', self._map_linkedin_result) # Changed actor
+        if not profile_urls: return {}
+        valid_urls = list(set(filter(lambda u: isinstance(u, str) and u.startswith('http'), profile_urls)))
+        if not valid_urls: return {url: None for url in profile_urls}
+        
+        run_input_urls = [{ "url": url } for url in valid_urls] # Actor expects list of dicts
+        actor_input = {"urls": run_input_urls, "findContacts": False, "scrapeCompany": False} # Match user-provided script
+        
+        # Using the actor ID from the user's script
+        return await self._fetch_social_data_batch_generic(
+            profile_urls, # Pass original urls for final mapping
+            'supreme_coder/linkedin-profile-scraper', 
+            actor_input, # Pass the fully structured input here
+            self._map_linkedin_profile_result,
+            actor_item_url_key_candidates=['inputUrl', 'url'] # 'inputUrl' is often in results
+        )
 
     async def get_twitter_data_for_urls(self, twitter_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Fetches Twitter user data for a list of Twitter URLs."""
-        # apidojo/twitter-user-scraper ; input field "startUrls"
-        return await self._fetch_social_data_batch(twitter_urls, 'apidojo/twitter-user-scraper', 'startUrls', self._map_twitter_result, self._twitter_input_modifier)
+        if not self.client: return {url: None for url in twitter_urls}
+        if not twitter_urls: return {}
+
+        # Map original URLs to their canonical versions, and canonical back to one original
+        original_to_canonical_map: Dict[str, str] = {}
+        canonical_to_first_original_map: Dict[str, str] = {}
+        urls_for_actor_run_set = set()
+
+        for url in twitter_urls:
+            if not url or not isinstance(url, str): continue
+            cano_url = self._canonicalize_twitter_url(url)
+            if cano_url:
+                original_to_canonical_map[url] = cano_url
+                if cano_url not in canonical_to_first_original_map:
+                    canonical_to_first_original_map[cano_url] = url
+                    urls_for_actor_run_set.add(cano_url)
+        
+        urls_for_actor_run = sorted(list(urls_for_actor_run_set))
+        if not urls_for_actor_run: return {orig: None for orig in twitter_urls}
+
+        # Padding logic from user's code
+        padding_profiles = [self._canonicalize_twitter_url(url) for url in ["https://twitter.com/nasa", "https://twitter.com/bbcworld", "https://twitter.com/github", "https://twitter.com/teslamotors", "https://twitter.com/apify"]] 
+        MIN_URLS = 5
+        actor_run_urls_with_padding = list(urls_for_actor_run)
+        if len(actor_run_urls_with_padding) < MIN_URLS:
+            padding_to_add = [p for p in padding_profiles if p not in actor_run_urls_with_padding][:MIN_URLS - len(actor_run_urls_with_padding)]
+            actor_run_urls_with_padding.extend(padding_to_add)
+        
+        actor_input = {"startUrls": actor_run_urls_with_padding, "getFollowers": True, "getFollowing": False, "maxItems": len(actor_run_urls_with_padding)}
+        actor_items = await self._run_actor_async("apidojo/twitter-user-scraper", actor_input)
+
+        results_by_canonical_url: Dict[str, Optional[Dict[str, Any]]] = {}
+        if actor_items:
+            for item in actor_items:
+                item_url_canonical = self._canonicalize_twitter_url(item.get('url') or item.get('profile_url') or item.get('twitterUrl'))
+                if item_url_canonical in canonical_to_first_original_map: # Only process if it was one of our original canonical URLs
+                    if results_by_canonical_url.get(item_url_canonical) is None:
+                         results_by_canonical_url[item_url_canonical] = self._map_twitter_result(item)
+        
+        final_results = {}
+        for original_url, canonical_url in original_to_canonical_map.items():
+            final_results[original_url] = results_by_canonical_url.get(canonical_url)
+        return final_results
 
     async def get_instagram_data_for_urls(self, instagram_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Fetches Instagram profile data for a list of Instagram URLs."""
-        # apify/instagram-profile-scraper ; input field "usernames"
-        return await self._fetch_social_data_batch(instagram_urls, 'apify/instagram-profile-scraper', 'directUrls', self._map_instagram_result, self._instagram_input_modifier)
+        if not instagram_urls: return {}
+        unique_normalized_urls = {self._normalize_url(url):url for url in instagram_urls if url and isinstance(url, str)}
+        if not unique_normalized_urls: return {orig:None for orig in instagram_urls}
+        
+        usernames_to_fetch = []
+        norm_url_to_username_map: Dict[str, str] = {}
+        for norm_url, original_url in unique_normalized_urls.items():
+            if not norm_url: continue
+            username = self._extract_username_from_instagram_url(norm_url)
+            if username:
+                if username not in usernames_to_fetch: # Keep list of unique usernames for actor
+                    usernames_to_fetch.append(username)
+                norm_url_to_username_map[norm_url] = username # map norm_url to username for result lookup
+            else: logger.warning(f"Could not extract Instagram username from {original_url} (normalized: {norm_url})")
+
+        if not usernames_to_fetch: return {orig_url: None for orig_url in instagram_urls}
+        
+        actor_input = {"usernames": sorted(list(set(usernames_to_fetch)))}
+        actor_items = await self._run_actor_async("apify/instagram-profile-scraper", actor_input)
+        
+        results_by_username: Dict[str, Dict[str, Any]] = {}
+        if actor_items:
+            for item in actor_items:
+                item_username = item.get('username')
+                if item_username:
+                    results_by_username[item_username] = self._map_instagram_result(item)
+
+        final_results: Dict[str, Optional[Dict[str, Any]]] = {}
+        for original_url in instagram_urls:
+            norm_url = self._normalize_url(original_url)
+            username = norm_url_to_username_map.get(norm_url)
+            final_results[original_url] = results_by_username.get(username) if username else None
+        return final_results
 
     async def get_tiktok_data_for_urls(self, tiktok_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Fetches TikTok profile data for a list of TikTok profile URLs."""
-        # Uses apidojo/tiktok-scraper. Input: "startUrls". May require one URL at a time for profiles.
-        # This generic batcher might not be ideal if actor needs single URL runs for profiles.
-        # If issues, revert to a loop calling _run_actor_async for each URL individually for TikTok.
-        logger.info("Fetching TikTok data. Note: apidojo/tiktok-scraper results are often video-centric; profile data is extracted from authorMeta.")
-        return await self._fetch_social_data_batch(tiktok_urls, 'tensfer/tiktok-profile-scraper', 'profileURLs', self._map_tiktok_result) # Changed actor
+        # Actor: 'tensfer/tiktok-profile-scraper', Input: 'profileURLs' (list of strings)
+        return await self._fetch_social_data_batch_generic(
+            tiktok_urls, 
+            'tensfer/tiktok-profile-scraper', 
+            {"profileURLs": tiktok_urls}, # Pass the full input dict for the actor
+            self._map_tiktok_result,
+            actor_item_url_key_candidates=['profile_url', 'webUrl']
+        )
 
-    # Placeholder for Facebook - Apify actors for Facebook are complex due to login requirements
     async def get_facebook_data_for_urls(self, facebook_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        logger.warning("Facebook scraping is not reliably implemented due to Apify actor complexities and login requirements. Returning empty results.")
+        logger.warning("Facebook scraping is not reliably implemented. Returning empty results.")
         return {url: None for url in facebook_urls}
 
-    # Placeholder for YouTube - Actor would be something like 'apify/youtube-scraper'
     async def get_youtube_data_for_urls(self, youtube_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        # Example actor: 'kAirAমাকেটের/youtube-channel-scraper' (fictional or find a real one)
-        # Input field might be 'channels' or 'channelUrls'
-        # The mapper would extract subscriber_count, video_count, channel_name, etc.
-        logger.warning("YouTube scraping using a generic actor is not fully implemented. Returning empty results.")
-        # Real implementation would call _fetch_social_data_batch with correct actor and mapper
+        logger.warning("YouTube scraping is not fully implemented. Returning empty results.")
         return {url: None for url in youtube_urls}
 
     def _safe_int_cast(self, value: Any) -> Optional[int]:
-        """Safely casts a value to an integer, returning None on failure."""
         if value is None: return None
         try: return int(value)
-        except (ValueError, TypeError): return None
+        except (ValueError, TypeError): 
+            logger.debug(f"Could not cast value '{value}' (type: {type(value)}) to int.")
+            return None
 
-# Example Usage
+# Example Usage (for testing - requires APIFY_API_KEY in .env)
 if __name__ == "__main__":
-    async def main_test():
-        # Ensure APIFY_API_KEY is in your .env file
+    async def main_test(): 
         if not os.getenv("APIFY_API_KEY"):
-            print("Error: APIFY_API_KEY not found. Please set it in .env")
+            print("Error: APIFY_API_KEY not found in environment variables.")
+            print("Please create a .env file with your Apify API key.")
             return
-        try:
-            sds = SocialDiscoveryService()
             
-            test_linkedin_urls = ["https://www.linkedin.com/in/williamhgates/", "https://www.linkedin.com/company/microsoft/"]
-            print(f"\n--- Testing LinkedIn URLs: {test_linkedin_urls} ---")
-            linkedin_results = await sds.get_linkedin_data_for_urls(test_linkedin_urls)
+        try:
+            discovery = SocialDiscoveryService()
+
+            test_linkedin_urls = ["https://www.linkedin.com/in/williamhgates/"] # Personal profile
+            print(f"\n--- Testing LinkedIn URLs (supreme_coder/linkedin-profile-scraper): {test_linkedin_urls} ---")
+            linkedin_results = await discovery.get_linkedin_data_for_urls(test_linkedin_urls)
             print(json.dumps(linkedin_results, indent=2))
 
-            test_twitter_urls = ["https://twitter.com/BillGates", "https://x.com/elonmusk/", "https://twitter.com/nonexistentuser123xyzabc"]
+            test_twitter_urls = ["https://twitter.com/BillGates", "https://x.com/elonmusk/"]
             print(f"\n--- Testing Twitter URLs: {test_twitter_urls} ---")
-            twitter_results = await sds.get_twitter_data_for_urls(test_twitter_urls)
+            twitter_results = await discovery.get_twitter_data_for_urls(test_twitter_urls)
             print(json.dumps(twitter_results, indent=2))
 
             test_instagram_urls = ["https://www.instagram.com/nasa/", "https://www.instagram.com/cristiano/"]
             print(f"\n--- Testing Instagram URLs: {test_instagram_urls} ---")
-            instagram_results = await sds.get_instagram_data_for_urls(test_instagram_urls)
+            instagram_results = await discovery.get_instagram_data_for_urls(test_instagram_urls)
             print(json.dumps(instagram_results, indent=2))
             
             test_tiktok_urls = ["https://www.tiktok.com/@zachking", "https://www.tiktok.com/@therock"]
             print(f"\n--- Testing TikTok URLs: {test_tiktok_urls} ---")
-            tiktok_results = await sds.get_tiktok_data_for_urls(test_tiktok_urls)
+            tiktok_results = await discovery.get_tiktok_data_for_urls(test_tiktok_urls)
             print(json.dumps(tiktok_results, indent=2))
 
-        except ValueError as ve:
-            print(f"Setup Error: {ve}")
+        except ValueError as e:
+            print(f"Initialization Error: {e}")
         except Exception as e:
-            print(f"An error occurred: {e}", exc_info=True)
+            print(f"An unexpected error occurred during testing: {e}", exc_info=True)
 
     asyncio.run(main_test()) 
