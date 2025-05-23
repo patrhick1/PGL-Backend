@@ -1,3 +1,5 @@
+# podcast_outreach/services/media/podcast_fetcher.py
+
 import asyncio
 import argparse
 import uuid
@@ -6,25 +8,31 @@ import concurrent.futures
 import html
 import functools
 import logging
+ 
+# Import modular queries
+from podcast_outreach.database.queries import campaigns as campaign_queries
+from podcast_outreach.database.queries import media as media_queries
+from podcast_outreach.database.queries import match_suggestions as match_queries
+from podcast_outreach.database.queries import review_tasks as review_tasks_queries
+from podcast_outreach.database.connection import get_db_pool, close_db_pool # For main function
 
-import db_service_pg
-from src.openai_service import OpenAIService
+from src.openai_service import OpenAIService # Still from src, needs to be moved
 from src.external_api_service import ListenNotesAPIClient, PodscanAPIClient, APIClientError, RateLimitError
-from src.mipr_podcast import generate_genre_ids
-from src.data_processor import parse_date
-
+from src.mipr_podcast import generate_genre_ids # Still from src, needs to be moved
+from src.data_processor import parse_date # Still from src, needs to be moved
+ 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
-
+ 
 # --- Constants ---
 LISTENNOTES_PAGE_SIZE = 10
 PODSCAN_PAGE_SIZE = 20
 API_CALL_DELAY = 1.2
 KEYWORD_PROCESSING_DELAY = 2
-
-
+ 
+ 
 def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[Any]:
     """Convert strings like '10%' or 'N/A' to numbers."""
     if value is None:
@@ -39,23 +47,23 @@ def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[
     except ValueError:
         logger.warning("Could not convert sanitized string '%s' to %s", s_value, target_type)
         return None
-
-
+ 
+ 
 class MediaFetcher:
     """Fetch podcasts from external APIs and store them in PostgreSQL."""
-
+ 
     def __init__(self) -> None:
         self.openai_service = OpenAIService()
         self.listennotes_client = ListenNotesAPIClient()
         self.podscan_client = PodscanAPIClient()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         logger.info("MediaFetcher services initialized")
-
+ 
     async def _run_in_executor(self, func, *args, **kwargs):
         loop = asyncio.get_running_loop()
         func_with_args = functools.partial(func, *args, **kwargs)
         return await loop.run_in_executor(self.executor, func_with_args)
-
+ 
     async def _generate_genre_ids_async(self, keyword: str, campaign_id_str: str) -> Optional[str]:
         try:
             logger.info("Generating ListenNotes genre IDs for '%s'", keyword)
@@ -68,7 +76,7 @@ class MediaFetcher:
         except Exception as e:  # pragma: no cover - network errors
             logger.error("Error generating genre IDs for '%s': %s", keyword, e, exc_info=True)
         return None
-
+ 
     def _extract_social_links(self, socials: List[Dict[str, str]]) -> Dict[str, Optional[str]]:
         social_map: Dict[str, Optional[str]] = {}
         for item in socials or []:
@@ -89,7 +97,7 @@ class MediaFetcher:
             else:
                 social_map.setdefault('podcast_other_social_url', url)
         return social_map
-
+ 
     async def _enrich_podcast_data(self, initial_data: Dict[str, Any], source_api: str) -> Dict[str, Any]:
         enriched = initial_data.copy()
         enriched['source_api'] = source_api
@@ -134,7 +142,7 @@ class MediaFetcher:
                 enriched[k] = v
             if initial_data.get('podcast_categories'):
                 enriched['category'] = initial_data['podcast_categories'][0].get('category_name')
-
+ 
         # cross enrich using opposite API
         rss = enriched.get('rss_url')
         itunes_id = _sanitize_numeric_string(enriched.get('itunes_id'), int)
@@ -193,7 +201,7 @@ class MediaFetcher:
         except Exception as e:  # pragma: no cover - network errors
             logger.warning("Unexpected error during enrichment for %s: %s", enriched.get('name'), e, exc_info=True)
         return enriched
-
+ 
     async def merge_and_upsert_media(self, podcast_data: Dict[str, Any], source_api: str,
                                      campaign_uuid: uuid.UUID, keyword: str) -> Optional[int]:
         contact_email = podcast_data.get('contact_email')
@@ -245,16 +253,16 @@ class MediaFetcher:
             logger.warning("Skipping upsert for %s, both RSS and website missing", cleaned.get('name'))
             return None
         try:
-            media = await db_service_pg.upsert_media_in_db(cleaned)
+            media = await media_queries.upsert_media_in_db(cleaned) # Use modular query
             if media and media.get('media_id'):
                 return media['media_id']
         except Exception as e:  # pragma: no cover - DB errors
             logger.error("DB error during upsert for %s: %s", cleaned.get('name'), e, exc_info=True)
         return None
-
+ 
     async def create_match_suggestions(self, media_id: int, campaign_uuid: uuid.UUID, keyword: str) -> None:
         try:
-            existing = await db_service_pg.get_match_suggestion_by_campaign_and_media_ids(campaign_uuid, media_id)
+            existing = await match_queries.get_match_suggestion_by_campaign_and_media_ids(campaign_uuid, media_id) # Use modular query
             if existing:
                 logger.info("MatchSuggestion already exists for media %s and campaign %s", media_id, campaign_uuid)
                 return
@@ -264,7 +272,7 @@ class MediaFetcher:
                 'matched_keywords': [keyword],
                 'status': 'pending',
             }
-            created = await db_service_pg.create_match_suggestion_in_db(suggestion)
+            created = await match_queries.create_match_suggestion_in_db(suggestion) # Use modular query
             if created and created.get('match_id'):
                 review_task = {
                     'task_type': 'match_suggestion',
@@ -272,13 +280,13 @@ class MediaFetcher:
                     'campaign_id': campaign_uuid,
                     'status': 'pending',
                 }
-                await db_service_pg.create_review_task_in_db(review_task)
+                await review_tasks_queries.create_review_task_in_db(review_task) # Use modular query
                 logger.info("Created ReviewTask for MatchSuggestion %s", created['match_id'])
             else:
                 logger.warning("Could not create ReviewTask for media %s", media_id)
         except Exception as e:  # pragma: no cover - DB errors
             logger.error("Error creating match suggestion for media %s: %s", media_id, e, exc_info=True)
-
+ 
     async def search_listen_notes(self, keyword: str, genre_ids: Optional[str], campaign_uuid: uuid.UUID, processed_ids: set) -> None:
         if not genre_ids:
             logger.warning("ListenNotes: No genres for '%s', skipping", keyword)
@@ -322,7 +330,7 @@ class MediaFetcher:
             except Exception as e:
                 logger.error("ListenNotes error for '%s': %s", keyword, e, exc_info=True)
                 ln_has_more = False
-
+ 
     async def search_podscan(self, keyword: str, campaign_uuid: uuid.UUID, processed_ids: set) -> None:
         ps_page = 1
         ps_has_more = True
@@ -362,7 +370,7 @@ class MediaFetcher:
             except Exception as e:
                 logger.error("PodscanFM error for '%s': %s", keyword, e, exc_info=True)
                 ps_has_more = False
-
+ 
     async def fetch_podcasts_for_campaign(self, campaign_id_str: str) -> None:
         logger.info("Starting podcast fetch for campaign %s", campaign_id_str)
         try:
@@ -370,7 +378,7 @@ class MediaFetcher:
         except ValueError:
             logger.error("Invalid campaign ID: %s", campaign_id_str)
             return
-        campaign = await db_service_pg.get_campaign_by_id(campaign_uuid)
+        campaign = await campaign_queries.get_campaign_by_id(campaign_uuid) # Use modular query
         if not campaign:
             logger.error("Campaign %s not found", campaign_uuid)
             return
@@ -389,30 +397,30 @@ class MediaFetcher:
             logger.info("Finished keyword '%s'", kw)
             await asyncio.sleep(KEYWORD_PROCESSING_DELAY)
         logger.info("Batch podcast fetching COMPLETED for %s", campaign_uuid)
-
+ 
     def cleanup(self) -> None:
         if self.executor:
             self.executor.shutdown(wait=True)
             logger.info("MediaFetcher executor shut down")
-
-
+ 
+ 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch & store podcasts for a campaign")
     parser.add_argument("campaign_id", help="PostgreSQL Campaign UUID")
     args = parser.parse_args()
-
+ 
     async def run():
-        await db_service_pg.init_db_pool()
+        await get_db_pool() # Use modular connection
         fetcher = MediaFetcher()
         try:
             await fetcher.fetch_podcasts_for_campaign(args.campaign_id)
         finally:
             fetcher.cleanup()
-            await db_service_pg.close_db_pool()
+            await close_db_pool() # Use modular connection
             logger.info("Script finished for Campaign ID: %s", args.campaign_id)
-
+ 
     asyncio.run(run())
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
