@@ -39,15 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks, ai_usage # Added ai_usage router
-
-# --- Legacy Script Imports (to be phased out - REMOVED from here) ---
-# All direct calls to legacy scripts like webhook_handler, summary_guest_identification_optimized,
-# determine_fit_optimized, pitch_episode_selection_optimized, pitch_writer_optimized,
-# send_pitch_to_instantly, instantly_email_sent, instantly_response, fetch_episodes,
-# podcast_note_transcriber, free_tier_episode_transcriber are REMOVED from main.py.
-# Their functionalities are now exposed via the new modular routers or background scripts.
-# --- End Legacy Script Imports ---
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks, ai_usage 
 
 
 setup_logging()
@@ -162,7 +154,7 @@ app.include_router(pitches.router)
 app.include_router(tasks.router)
 app.include_router(auth.router)
 app.include_router(webhooks.router) 
-app.include_router(ai_usage.router) # Include the new AI usage router
+app.include_router(ai_usage.router)
 
 
 @app.get("/login")
@@ -236,20 +228,6 @@ def api_status():
     This endpoint is public.
     """
     return {"message": "PGL Automation API is running (FastAPI version)!"}
-
-
-# --- REMOVED: The /trigger_automation endpoint and its associated legacy wrappers ---
-# All automation triggers are now handled by specific endpoints in podcast_outreach/api/routers/tasks.py
-# or other domain-specific routers (e.g., /campaigns/{id}/generate-angles-bio).
-# The direct imports from 'src/' are also removed from here.
-
-
-# --- REMOVED: AI Usage & Cost Endpoints from main.py ---
-# These are now in podcast_outreach/api/routers/ai_usage.py
-
-
-# --- REMOVED: Webhook Endpoints from main.py ---
-# These are now in podcast_outreach/api/routers/webhooks.py
 
 
 @app.get("/admin")
