@@ -13,10 +13,18 @@ import db_service_pg # Original path, adjust if moved to database/queries/
 
 # Import dependencies (for user auth)
 from api.dependencies import get_current_user, get_admin_user
+from podcast_outreach.services.enrichment.discovery import DiscoveryService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/match-suggestions", tags=["Match Suggestions"])
+
+@router.post("/campaigns/{campaign_id}/discover", response_model=List[MatchSuggestionInDB], summary="Discover podcasts for a campaign")
+async def discover_matches_for_campaign(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
+    """Search for podcasts and create match suggestions with review tasks."""
+    service = DiscoveryService()
+    suggestions = await service.discover_for_campaign(str(campaign_id))
+    return [MatchSuggestionInDB(**s) for s in suggestions]
 
 @router.post("/", response_model=MatchSuggestionInDB, status_code=201, summary="Create New Match Suggestion")
 async def create_match_suggestion_api(suggestion_data: MatchSuggestionCreate, user: dict = Depends(get_current_user)):
