@@ -473,3 +473,190 @@ podcast_outreach/
 - **Team specialization** - Team members can focus on their expertise areas
 
 This migration plan provides a clear roadmap from your current complex structure to a clean, maintainable PostgreSQL-based system that will serve your team well as the project grows.
+
+# 🎯 End-to-End Refactor Action Plan
+
+## ✅ PHASE 1: Podcast Discovery & Matching
+
+### 🧩 Goals:
+- Cleanly discover podcasts from ListenNotes, Podscan
+- Insert into media
+- Create match_suggestions
+- Queue a review_task
+
+### 🛠 Steps:
+1. **Move batch_podcast_fetcher_pg.py**
+   - Target: `services/media/fetcher.py`
+   - Split logic:
+     - `search_listen_notes()`
+     - `search_podscan()`
+     - `merge_and_upsert_media()`
+     - `create_match_suggestions()`
+
+2. **Move enrichment logic**
+   - From: `enrichment_orchestrator.py`
+   - Target: `services/enrichment/discovery.py`
+
+3. **Move enrichment outputs into database**
+   - Target: `queries/media.py`, `queries/match_suggestions.py`
+
+4. **Move API call to fetch into api/routers/matches.py**
+   - Create endpoint: `POST /campaigns/{campaign_id}/discover`
+
+5. **Trigger review_tasks creation**
+   - Add to `queries/review_tasks.py`
+
+## ✅ PHASE 2: Match Review
+
+### 🧩 Goals:
+- Let the client approve match suggestions
+- Upon approval, trigger pitch process
+
+### 🛠 Steps:
+1. **Build review match API**
+   - In `api/routers/matches.py`
+   - Endpoint: `PATCH /match_suggestions/{match_id}/approve`
+   - Update `match_suggestions.status` + `client_approved = TRUE`
+   - In `queries/match_suggestions.py`
+
+2. **Create review_task for pitch**
+   - Type: `pitch_review`, status: `pending`
+
+3. **(Optional) Notify internal team via Slack/email**
+   - (Optional, but future-proof)
+
+## ✅ PHASE 3: Episode Fetching & Processing
+
+### 🧩 Goals:
+- Fetch new episodes
+- Cap at 10 per media
+- Flag 4 most recent for transcription
+
+### 🛠 Steps:
+1. **Move logic from fetch_episodes_to_pg.py**
+   - Target: `services/media/fetcher.py` → `sync_episodes_for_media(media_id)`
+
+2. **Add queries/episodes.py**
+   - `insert_episode()`
+   - `delete_oldest_episodes()`
+   - `flag_recent_episodes_for_transcription()`
+
+3. **Create a batch runner script**
+   - `scripts/sync_episodes.py` → iterate over all media where `last_fetched_at IS NULL` or stale
+
+## ✅ PHASE 4: Transcription & Summary
+
+### 🧩 Goals:
+- Download audio
+- Transcribe with Gemini
+- Update transcript + ai_episode_summary
+
+### 🛠 Steps:
+1. **Move podcast_note_transcriber.py & free_tier_episode_transcriber.py**
+   - Target: `services/media/transcriber.py`
+   - Merge logic:
+     - `download_audio()`
+     - `transcribe_audio()`
+     - `summarize_transcript()`
+
+2. **Create background task runner**
+   - `scripts/transcribe_episodes.py`
+   - Fetch episodes WHERE `transcribe = TRUE AND transcript IS NULL`
+
+3. **Update episodes table**
+   - Fields: `transcript`, `ai_episode_summary`, `embedding`
+
+## ✅ PHASE 5: Pitch Generation
+
+### 🧩 Goals:
+- Pick best episode
+- Score similarity
+- Generate pitch using AI template
+- Save into pitch_generations and pitches
+
+### 🛠 Steps:
+1. **Move pitch_writer_optimized.py**
+   - Target: `services/pitches/generator.py`
+   - Split into:
+     - `select_best_episode()`
+     - `compute_match_score()`
+     - `generate_pitch_from_template()`
+
+2. **Create pitch template loading system**
+   - Target: `services/ai/prompts/pitch/`
+   - Loader in `services/ai/templates.py`
+
+3. **Insert into:**
+   - `pitch_generations` → `queries/pitch_generations.py`
+   - `pitches` → `queries/pitches.py`
+
+4. **Create pitch review task**
+   - `review_tasks.task_type = 'pitch_review'`
+
+## ✅ PHASE 6: Pitch Review & Send
+
+### 🧩 Goals:
+- Internal team reviews pitch
+- Upon approval, send via Instantly
+
+### 🛠 Steps:
+1. **Build PATCH /pitch_generations/{id}/approve**
+   - Target: `api/routers/pitches.py`
+   - Updates:
+     - `review_tasks.status = approved`
+     - `pitch_generations.send_ready_bool = TRUE`
+
+2. **Move send logic from send_pitch_to_instantly.py**
+   - Target: `services/pitches/sender.py`
+   - Extract:
+     - `send_to_instantly()`
+     - `record_response()`
+
+3. **Webhook processors**
+   - Move from `attio_email_sent.py`, `attio_response.py`
+   - Target: `integrations/attio.py`
+   - Optionally: Add `webhook/` FastAPI route
+
+## ✅ PHASE 7: Monitoring & Reporting
+
+### 🧩 Goals:
+- Track campaign performance
+- Track AI cost + token usage
+- Generate status reports
+
+### 🛠 Steps:
+1. **Move generate_ai_usage_report.py**
+   - Target: `scripts/generate_reports.py`
+
+2. **Add AI cost logging to services/ai/tracker.py**
+   - Add: log to DB, not just CSV
+
+3. **Move campaign_status_tracker.py**
+   - Target: `scripts/generate_reports.py`
+   - Switch data source from Airtable → Postgres
+
+4. **Build frontend report UI**
+   - Template: `templates/podcast_cost.html`
+
+---
+
+## ✅ Final Notes
+
+### Tools to Help:
+- ✅ `scripts/` = all batch runners
+- ✅ `api/routers/` = interactive API usage
+- ✅ `background_tasks` (optional later) = for async triggers
+
+---
+
+## 🧩 Summary Table (Milestone View)
+
+| Phase | Feature | Source | Target |
+|-------|---------|--------|--------|
+| 1 | Discover Podcasts | `batch_podcast_fetcher_pg.py` | `services/media/fetcher.py` |
+| 2 | Review Matches | `internal_dashboard_api.py` | `api/routers/matches.py` |
+| 3 | Fetch Episodes | `fetch_episodes_to_pg.py` | `services/media/fetcher.py` |
+| 4 | Transcribe | `podcast_note_transcriber.py` | `services/media/transcriber.py` |
+| 5 | Generate Pitch | `pitch_writer_optimized.py` | `services/pitches/generator.py` |
+| 6 | Review & Send | `send_pitch_to_instantly.py` | `services/pitches/sender.py` |
+| 7 | Reporting | `campaign_status_tracker.py`, `generate_ai_usage_report.py` | `scripts/generate_reports.py` |
