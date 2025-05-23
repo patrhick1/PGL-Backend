@@ -58,7 +58,8 @@ podcast_outreach/
 │   │   ├── enrichment_orchestrator.py
 │   │   └── summary_builder.py
 │   ├── media/
-│   │   ├── fetcher.py
+│   │   ├── podcast_fetcher.py
+│   │   ├── episode_sync.py
 │   │   ├── analyzer.py
 │   │   └── transcriber.py
 │   ├── matches/
