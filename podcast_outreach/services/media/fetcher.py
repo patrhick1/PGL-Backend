@@ -1,21 +1,45 @@
 import logging
-from typing import Any, Dict, List
+import asyncio
+from typing import Any, Dict, List, Optional, Set
+from datetime import datetime
 
 from podcast_outreach.database.queries import media as media_queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
+from podcast_outreach.database.queries import episodes as episode_queries
+
+import aiohttp
+from bs4 import BeautifulSoup
+from email.utils import parsedate_to_datetime
+from datetime import timezone
+
+import db_service_pg
+from src.external_api_service import PodscanAPIClient, APIClientError
+from src.data_processor import parse_date as fallback_parse_date
 
 logger = logging.getLogger(__name__)
 
+RSS_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+}
+HTTP_REQUEST_TIMEOUT = 20
+
 class MediaFetcher:
-    """Stub service for podcast discovery and storage."""
+    """Service for podcast discovery and episode syncing."""
+
+    def __init__(self) -> None:
+        self.podscan_client = None
+        try:
+            self.podscan_client = PodscanAPIClient()
+        except Exception as e:  # pragma: no cover - env issues
+            logger.warning("Podscan client could not be initialized: %s", e)
 
     async def search_listen_notes(self, campaign_id: str) -> List[Dict[str, Any]]:
         logger.info("Searching ListenNotes for campaign %s", campaign_id)
-        return []  # Placeholder for API call
+        return []  # Placeholder
 
     async def search_podscan(self, campaign_id: str) -> List[Dict[str, Any]]:
         logger.info("Searching Podscan for campaign %s", campaign_id)
-        return []  # Placeholder for API call
+        return []  # Placeholder
 
     async def merge_and_upsert_media(
         self, listen_results: List[Dict[str, Any]], podscan_results: List[Dict[str, Any]]
@@ -33,428 +57,147 @@ class MediaFetcher:
     ) -> List[Dict[str, Any]]:
         suggestions = []
         for media in media_records:
-            suggestion = await match_queries.create_match_suggestion_in_db(
-                {"campaign_id": campaign_id, "media_id": media["media_id"]}
-            )
+            suggestion = await match_queries.create_match_suggestion_in_db({"campaign_id": campaign_id, "media_id": media["media_id"]})
             if suggestion:
                 suggestions.append(suggestion)
         return suggestions
-=======
-import asyncio
-import argparse
-import uuid
-from typing import Optional, List, Dict, Any
-import concurrent.futures
-import html
-import functools
 
-import db_service_pg
-from src.openai_service import OpenAIService
-from src.external_api_service import ListenNotesAPIClient, PodscanAPIClient, APIClientError, RateLimitError
-from src.mipr_podcast import generate_genre_ids
-from src.data_processor import parse_date
-
-# --- Configuration ---
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s [%(levelname)s] %(name)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# --- Constants ---
-LISTENNOTES_PAGE_SIZE = 10
-PODSCAN_PAGE_SIZE = 20
-API_CALL_DELAY = 1.2
-KEYWORD_PROCESSING_DELAY = 2
-
-
-def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[Any]:
-    """Convert strings like '10%' or 'N/A' to numbers."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return int(value) if target_type == int else value
-    s_value = str(value).strip().replace('%', '').replace(',', '')
-    if not s_value or s_value.lower() == 'n/a':
-        return None
-    try:
-        return int(float(s_value)) if target_type == int else float(s_value)
-    except ValueError:
-        logger.warning("Could not convert sanitized string '%s' to %s", s_value, target_type)
-        return None
-
-
-class MediaFetcher:
-    """Fetch podcasts from external APIs and store them in PostgreSQL."""
-
-    def __init__(self) -> None:
-        self.openai_service = OpenAIService()
-        self.listennotes_client = ListenNotesAPIClient()
-        self.podscan_client = PodscanAPIClient()
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-        logger.info("MediaFetcher services initialized")
-
-    async def _run_in_executor(self, func, *args, **kwargs):
-        loop = asyncio.get_running_loop()
-        func_with_args = functools.partial(func, *args, **kwargs)
-        return await loop.run_in_executor(self.executor, func_with_args)
-
-    async def _generate_genre_ids_async(self, keyword: str, campaign_id_str: str) -> Optional[str]:
-        try:
-            logger.info("Generating ListenNotes genre IDs for '%s'", keyword)
-            genre_ids_output = await self._run_in_executor(generate_genre_ids, self.openai_service, keyword, campaign_id_str)
-            if isinstance(genre_ids_output, list):
-                return ",".join(map(str, genre_ids_output))
-            if isinstance(genre_ids_output, str):
-                return genre_ids_output
-            logger.warning("Unexpected type from generate_genre_ids: %s", type(genre_ids_output))
-        except Exception as e:  # pragma: no cover - network errors
-            logger.error("Error generating genre IDs for '%s': %s", keyword, e, exc_info=True)
-        return None
-
-    def _extract_social_links(self, socials: List[Dict[str, str]]) -> Dict[str, Optional[str]]:
-        social_map: Dict[str, Optional[str]] = {}
-        for item in socials or []:
-            platform = item.get('platform')
-            url = item.get('url')
-            if not platform or not url:
-                continue
-            key = {
-                'twitter': 'podcast_twitter_url',
-                'linkedin': 'podcast_linkedin_url',
-                'instagram': 'podcast_instagram_url',
-                'facebook': 'podcast_facebook_url',
-                'youtube': 'podcast_youtube_url',
-                'tiktok': 'podcast_tiktok_url',
-            }.get(platform)
-            if key:
-                social_map[key] = url
-            else:
-                social_map.setdefault('podcast_other_social_url', url)
-        return social_map
-
-    async def _enrich_podcast_data(self, initial_data: Dict[str, Any], source_api: str) -> Dict[str, Any]:
-        enriched = initial_data.copy()
-        enriched['source_api'] = source_api
-        if source_api == "ListenNotes":
-            enriched['api_id'] = str(initial_data.get('id', '')).strip()
-            enriched['name'] = html.unescape(str(initial_data.get('title_original', ''))).strip()
-            enriched['description'] = html.unescape(str(initial_data.get('description_original', ''))).strip() or None
-            enriched['rss_url'] = initial_data.get('rss')
-            enriched['itunes_id'] = str(initial_data.get('itunes_id', '')).strip() or None
-            enriched['website'] = initial_data.get('website')
-            enriched['image_url'] = initial_data.get('image')
-            enriched['contact_email'] = initial_data.get('email')
-            enriched['language'] = initial_data.get('language')
-            enriched['total_episodes'] = initial_data.get('total_episodes')
-            enriched['listen_score'] = _sanitize_numeric_string(initial_data.get('listen_score'), int)
-            enriched['listen_score_global_rank'] = _sanitize_numeric_string(initial_data.get('listen_score_global_rank'), int)
-            enriched['last_posted_at'] = parse_date(initial_data.get('latest_pub_date_ms'))
-            if isinstance(initial_data.get('genres'), list) and initial_data['genres']:
-                enriched['category'] = initial_data['genres'][0]
-        else:  # PodscanFM
-            enriched['api_id'] = str(initial_data.get('podcast_id', '')).strip()
-            enriched['name'] = html.unescape(str(initial_data.get('podcast_name', ''))).strip()
-            enriched['description'] = html.unescape(str(initial_data.get('podcast_description', ''))).strip() or None
-            enriched['rss_url'] = initial_data.get('rss_url')
-            enriched['itunes_id'] = str(initial_data.get('podcast_itunes_id', '')).strip() or None
-            enriched['website'] = initial_data.get('podcast_url')
-            enriched['image_url'] = initial_data.get('podcast_image_url')
-            reach = initial_data.get('reach') or {}
-            enriched['contact_email'] = reach.get('email')
-            enriched['language'] = initial_data.get('language', 'English')
-            enriched['total_episodes'] = _sanitize_numeric_string(initial_data.get('episode_count'), int)
-            enriched['last_posted_at'] = parse_date(initial_data.get('last_posted_at'))
-            enriched['podcast_spotify_id'] = initial_data.get('podcast_spotify_id')
-            enriched['audience_size'] = _sanitize_numeric_string(reach.get('audience_size'), int)
-            if reach.get('itunes'):
-                enriched['itunes_rating_average'] = _sanitize_numeric_string(reach['itunes'].get('itunes_rating_average'), float)
-                enriched['itunes_rating_count'] = _sanitize_numeric_string(reach['itunes'].get('itunes_rating_count'), int)
-            if reach.get('spotify'):
-                enriched['spotify_rating_average'] = _sanitize_numeric_string(reach['spotify'].get('spotify_rating_average'), float)
-                enriched['spotify_rating_count'] = _sanitize_numeric_string(reach['spotify'].get('spotify_rating_count'), int)
-            for k, v in self._extract_social_links(reach.get('social_links', [])).items():
-                enriched[k] = v
-            if initial_data.get('podcast_categories'):
-                enriched['category'] = initial_data['podcast_categories'][0].get('category_name')
-
-        # cross enrich using opposite API
-        rss = enriched.get('rss_url')
-        itunes_id = _sanitize_numeric_string(enriched.get('itunes_id'), int)
-        try:
-            if source_api == "ListenNotes":
-                match = None
-                if itunes_id:
-                    await asyncio.sleep(API_CALL_DELAY/2)
-                    match = await self._run_in_executor(self.podscan_client.search_podcast_by_itunes_id, itunes_id)
-                if not match and rss:
-                    await asyncio.sleep(API_CALL_DELAY/2)
-                    match = await self._run_in_executor(self.podscan_client.search_podcast_by_rss, rss)
-                if match:
-                    enriched.setdefault('website', match.get('podcast_url'))
-                    enriched.setdefault('podcast_spotify_id', match.get('podcast_spotify_id'))
-                    reach = match.get('reach') or {}
-                    enriched.setdefault('audience_size', _sanitize_numeric_string(reach.get('audience_size'), int))
-                    if reach.get('email'):
-                        enriched['contact_email'] = reach.get('email')
-                    for k, v in self._extract_social_links(reach.get('social_links', [])).items():
-                        enriched.setdefault(k, v)
-                    if parse_date(match.get('last_posted_at')):
-                        enriched['last_posted_at'] = parse_date(match.get('last_posted_at'))
-                    enriched.setdefault('image_url', match.get('podcast_image_url') or enriched.get('image_url'))
-                    if match.get('podcast_itunes_id'):
-                        enriched['itunes_id'] = str(match.get('podcast_itunes_id')).strip()
-                    if match.get('podcast_description'):
-                        enriched['description'] = html.unescape(match['podcast_description'])
-            else:  # PodscanFM -> enrich with ListenNotes
-                match = None
-                if itunes_id:
-                    await asyncio.sleep(API_CALL_DELAY/2)
-                    match = await self._run_in_executor(self.listennotes_client.lookup_podcast_by_itunes_id, itunes_id)
-                if not match and rss:
-                    await asyncio.sleep(API_CALL_DELAY/2)
-                    match = await self._run_in_executor(self.listennotes_client.lookup_podcast_by_rss, rss)
-                if match:
-                    enriched.setdefault('listen_score', _sanitize_numeric_string(match.get('listen_score'), int))
-                    enriched.setdefault('listen_score_global_rank', _sanitize_numeric_string(match.get('listen_score_global_rank'), int))
-                    if match.get('description_original'):
-                        enriched['description'] = html.unescape(match['description_original'])
-                    enriched.setdefault('language', match.get('language') or enriched.get('language'))
-                    enriched.setdefault('total_episodes', match.get('total_episodes'))
-                    enriched.setdefault('image_url', match.get('image') or enriched.get('image_url'))
-                    if match.get('genres'):
-                        enriched.setdefault('category', match['genres'][0])
-                    if match.get('email'):
-                        enriched['contact_email'] = match.get('email')
-                    if match.get('latest_pub_date_ms'):
-                        enriched['last_posted_at'] = parse_date(match.get('latest_pub_date_ms'))
-                    if match.get('itunes_id'):
-                        enriched['itunes_id'] = str(match.get('itunes_id')).strip()
-                    enriched.setdefault('website', match.get('website') or enriched.get('website'))
-        except APIClientError as e:  # pragma: no cover - network errors
-            logger.warning("API client error during enrichment for %s: %s", enriched.get('name'), e)
-        except Exception as e:  # pragma: no cover - network errors
-            logger.warning("Unexpected error during enrichment for %s: %s", enriched.get('name'), e, exc_info=True)
-        return enriched
-
-    async def merge_and_upsert_media(self, podcast_data: Dict[str, Any], source_api: str,
-                                     campaign_uuid: uuid.UUID, keyword: str) -> Optional[int]:
-        contact_email = podcast_data.get('contact_email')
-        if not contact_email:
-            logger.debug("Skipping %s, no contact email", podcast_data.get('name'))
-            return None
-        name_val = str(podcast_data.get('name', '')).strip()
-        if not name_val:
-            logger.warning("Skipping upsert, media name is empty from %s", source_api)
-            return None
-        description_text = podcast_data.get('description')
-        final_description = html.unescape(str(description_text)) if isinstance(description_text, str) else ''
-        payload = {
-            'name': name_val,
-            'title': html.unescape(str(podcast_data.get('title', name_val) or '')).strip(),
-            'rss_url': podcast_data.get('rss_url'),
-            'rss_feed_url': podcast_data.get('rss_feed_url') or podcast_data.get('rss_url'),
-            'website': podcast_data.get('website'),
-            'description': final_description,
-            'contact_email': contact_email,
-            'language': podcast_data.get('language'),
-            'category': podcast_data.get('category'),
-            'avg_downloads': None,
-            'image_url': podcast_data.get('image_url'),
-            'source_api': source_api,
-            'api_id': podcast_data.get('api_id'),
-            'itunes_id': podcast_data.get('itunes_id'),
-            'podcast_spotify_id': podcast_data.get('podcast_spotify_id'),
-            'total_episodes': _sanitize_numeric_string(podcast_data.get('total_episodes'), int),
-            'last_posted_at': podcast_data.get('last_posted_at'),
-            'listen_score': _sanitize_numeric_string(podcast_data.get('listen_score'), int),
-            'listen_score_global_rank': _sanitize_numeric_string(podcast_data.get('listen_score_global_rank'), int),
-            'audience_size': _sanitize_numeric_string(podcast_data.get('audience_size'), int),
-            'itunes_rating_average': _sanitize_numeric_string(podcast_data.get('itunes_rating_average'), float),
-            'itunes_rating_count': _sanitize_numeric_string(podcast_data.get('itunes_rating_count'), int),
-            'spotify_rating_average': _sanitize_numeric_string(podcast_data.get('spotify_rating_average'), float),
-            'spotify_rating_count': _sanitize_numeric_string(podcast_data.get('spotify_rating_count'), int),
-            'podcast_twitter_url': podcast_data.get('podcast_twitter_url'),
-            'podcast_linkedin_url': podcast_data.get('podcast_linkedin_url'),
-            'podcast_instagram_url': podcast_data.get('podcast_instagram_url'),
-            'podcast_facebook_url': podcast_data.get('podcast_facebook_url'),
-            'podcast_youtube_url': podcast_data.get('podcast_youtube_url'),
-            'podcast_tiktok_url': podcast_data.get('podcast_tiktok_url'),
-            'podcast_other_social_url': podcast_data.get('podcast_other_social_url'),
-            'fetched_episodes': podcast_data.get('fetched_episodes', False),
-        }
-        cleaned = {k: v.strip() if isinstance(v, str) else v for k, v in payload.items() if v is not None and (not isinstance(v, str) or v.strip())}
-        if not cleaned.get('rss_url') and not cleaned.get('website'):
-            logger.warning("Skipping upsert for %s, both RSS and website missing", cleaned.get('name'))
+    def _parse_rss_date(self, date_string: Optional[str]) -> Optional[datetime]:
+        if not date_string:
             return None
         try:
-            media = await db_service_pg.upsert_media_in_db(cleaned)
-            if media and media.get('media_id'):
-                return media['media_id']
-        except Exception as e:  # pragma: no cover - DB errors
-            logger.error("DB error during upsert for %s: %s", cleaned.get('name'), e, exc_info=True)
+            dt = parsedate_to_datetime(date_string)
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            try:
+                dt = fallback_parse_date(date_string)
+                if dt:
+                    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                        return dt.replace(tzinfo=timezone.utc)
+                    return dt.astimezone(timezone.utc)
+            except Exception as e:  # pragma: no cover - parsing errors
+                logger.debug("Fallback date parsing failed for %s: %s", date_string, e)
         return None
 
-    async def create_match_suggestions(self, media_id: int, campaign_uuid: uuid.UUID, keyword: str) -> None:
+    async def _fetch_episodes_from_rss(self, rss_url: str, session: aiohttp.ClientSession, limit: int = 20) -> List[Dict[str, Any]]:
+        raw: List[Dict[str, Any]] = []
         try:
-            existing = await db_service_pg.get_match_suggestion_by_campaign_and_media_ids(campaign_uuid, media_id)
-            if existing:
-                logger.info("MatchSuggestion already exists for media %s and campaign %s", media_id, campaign_uuid)
+            async with session.get(rss_url, headers=RSS_FETCH_HEADERS, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                response.raise_for_status()
+                text = await response.text()
+            loop = asyncio.get_running_loop()
+            soup = await loop.run_in_executor(None, BeautifulSoup, text, 'xml')
+            items = soup.find_all('item')
+            for item in items[: limit * 2]:
+                pub = self._parse_rss_date(item.findtext('pubDate'))
+                if not pub:
+                    continue
+                audio_url = None
+                enclosure = item.find('enclosure')
+                if enclosure and enclosure.get('url'):
+                    audio_url = enclosure['url']
+                elif item.find('guid') and item.findtext('guid', '').startswith(('http://', 'https://')):
+                    guid_text = item.findtext('guid')
+                    if any(guid_text.lower().endswith(ext) for ext in ['.mp3', '.m4a', '.ogg', '.wav', '.aac']):
+                        audio_url = guid_text
+                if not audio_url:
+                    continue
+                desc = item.findtext('description') or item.findtext('content:encoded') or item.findtext('itunes:summary')
+                if desc:
+                    d_soup = BeautifulSoup(desc, 'html.parser')
+                    desc = d_soup.get_text(separator='\n', strip=True)
+                raw.append({
+                    "title": item.findtext('title') or 'No Title',
+                    "publish_date": pub,
+                    "episode_url": audio_url,
+                    "episode_summary": desc,
+                    "transcript": None,
+                    "downloaded": False,
+                    "api_episode_id": item.findtext('guid'),
+                    "duration_sec": None,
+                    "guest_names": None,
+                })
+            raw.sort(key=lambda x: x["publish_date"], reverse=True)
+            return raw[:limit]
+        except Exception as e:
+            logger.warning("Error fetching RSS %s: %s", rss_url, e)
+        return []
+
+    async def sync_episodes_for_media(self, media_id: int) -> None:
+        media = await db_service_pg.get_media_by_id_from_db(media_id)
+        if not media:
+            logger.warning("Media %s not found", media_id)
+            return
+
+        rss_url = media.get("rss_url")
+        podscan_id = media.get("api_id") if media.get("source_api") == "PodscanFM" else None
+        media_name = media.get("name", f"Media {media_id}")
+
+        async with aiohttp.ClientSession() as session:
+            episodes: List[Dict[str, Any]] = []
+            source = "None"
+            if podscan_id and self.podscan_client:
+                try:
+                    loop = asyncio.get_running_loop()
+                    data = await loop.run_in_executor(None, self.podscan_client.get_podcast_episodes, podscan_id, per_page=20)
+                    for ep in data:
+                        pub = self._parse_rss_date(ep.get("posted_at"))
+                        if not pub:
+                            continue
+                        episodes.append({
+                            "title": ep.get("episode_title"),
+                            "publish_date": pub,
+                            "episode_url": ep.get("episode_audio_url"),
+                            "episode_summary": ep.get("episode_description"),
+                            "transcript": ep.get("episode_transcript"),
+                            "downloaded": bool(ep.get("episode_transcript")),
+                            "api_episode_id": ep.get("episode_id"),
+                            "duration_sec": None,
+                            "guest_names": None,
+                        })
+                    source = "Podscan"
+                except APIClientError as e:
+                    logger.warning("Podscan error for %s: %s", media_name, e)
+                except Exception as e:
+                    logger.warning("Podscan fetch failed for %s: %s", media_name, e)
+            if not episodes and rss_url:
+                rss_eps = await self._fetch_episodes_from_rss(rss_url, session)
+                if rss_eps:
+                    episodes = rss_eps
+                    source = "RSS"
+
+            if not episodes:
+                await db_service_pg.update_media_after_sync(media_id)
+                logger.info("%s: no episodes found", media_name)
                 return
-            suggestion = {
-                'campaign_id': campaign_uuid,
-                'media_id': media_id,
-                'matched_keywords': [keyword],
-                'status': 'pending',
-            }
-            created = await db_service_pg.create_match_suggestion_in_db(suggestion)
-            if created and created.get('match_id'):
-                review_task = {
-                    'task_type': 'match_suggestion',
-                    'related_id': created['match_id'],
-                    'campaign_id': campaign_uuid,
-                    'status': 'pending',
-                }
-                await db_service_pg.create_review_task_in_db(review_task)
-                logger.info("Created ReviewTask for MatchSuggestion %s", created['match_id'])
-            else:
-                logger.warning("Could not create ReviewTask for media %s", media_id)
-        except Exception as e:  # pragma: no cover - DB errors
-            logger.error("Error creating match suggestion for media %s: %s", media_id, e, exc_info=True)
 
-    async def search_listen_notes(self, keyword: str, genre_ids: Optional[str], campaign_uuid: uuid.UUID, processed_ids: set) -> None:
-        if not genre_ids:
-            logger.warning("ListenNotes: No genres for '%s', skipping", keyword)
-            return
-        ln_offset = 0
-        ln_has_more = True
-        while ln_has_more:
-            try:
-                logger.info("ListenNotes: Searching '%s' offset %s", keyword, ln_offset)
-                response = await self._run_in_executor(
-                    self.listennotes_client.search_podcasts,
-                    keyword,
-                    genre_ids=genre_ids,
-                    offset=ln_offset,
-                    page_size=LISTENNOTES_PAGE_SIZE,
-                )
-                results = response.get('results', []) if isinstance(response, dict) else []
-                if results:
-                    for item in results:
-                        unique_id = item.get('rss') or item.get('id')
-                        if unique_id and unique_id in processed_ids:
-                            continue
-                        enriched = await self._enrich_podcast_data(item, "ListenNotes")
-                        media_id = await self.merge_and_upsert_media(enriched, "ListenNotes", campaign_uuid, keyword)
-                        if media_id:
-                            await self.create_match_suggestions(media_id, campaign_uuid, keyword)
-                            if unique_id:
-                                processed_ids.add(unique_id)
-                    ln_has_more = response.get('has_next', False)
-                    ln_offset = response.get('next_offset', ln_offset + LISTENNOTES_PAGE_SIZE) if ln_has_more else ln_offset
-                    if ln_has_more:
-                        await asyncio.sleep(API_CALL_DELAY)
-                else:
-                    ln_has_more = False
-            except RateLimitError as rle:
-                logger.warning("ListenNotes rate limit for '%s': %s", keyword, rle)
-                await asyncio.sleep(60)
-            except APIClientError as apie:
-                logger.error("ListenNotes API error for '%s': %s", keyword, apie)
-                ln_has_more = False
-            except Exception as e:
-                logger.error("ListenNotes error for '%s': %s", keyword, e, exc_info=True)
-                ln_has_more = False
-
-    async def search_podscan(self, keyword: str, campaign_uuid: uuid.UUID, processed_ids: set) -> None:
-        ps_page = 1
-        ps_has_more = True
-        while ps_has_more:
-            try:
-                logger.info("PodscanFM: Searching '%s' page %s", keyword, ps_page)
-                response = await self._run_in_executor(
-                    self.podscan_client.search_podcasts,
-                    keyword,
-                    page=ps_page,
-                    per_page=PODSCAN_PAGE_SIZE,
-                )
-                results = response.get('podcasts', []) if isinstance(response, dict) else []
-                if results:
-                    for item in results:
-                        unique_id = item.get('rss_url') or item.get('podcast_id')
-                        if unique_id and unique_id in processed_ids:
-                            continue
-                        enriched = await self._enrich_podcast_data(item, "PodscanFM")
-                        media_id = await self.merge_and_upsert_media(enriched, "PodscanFM", campaign_uuid, keyword)
-                        if media_id:
-                            await self.create_match_suggestions(media_id, campaign_uuid, keyword)
-                            if unique_id:
-                                processed_ids.add(unique_id)
-                    ps_has_more = len(results) >= PODSCAN_PAGE_SIZE
-                    if ps_has_more:
-                        ps_page += 1
-                        await asyncio.sleep(API_CALL_DELAY)
-                else:
-                    ps_has_more = False
-            except RateLimitError as rle:
-                logger.warning("PodscanFM rate limit for '%s': %s", keyword, rle)
-                await asyncio.sleep(60)
-            except APIClientError as apie:
-                logger.error("PodscanFM API error for '%s': %s", keyword, apie)
-                ps_has_more = False
-            except Exception as e:
-                logger.error("PodscanFM error for '%s': %s", keyword, e, exc_info=True)
-                ps_has_more = False
-
-    async def fetch_podcasts_for_campaign(self, campaign_id_str: str) -> None:
-        logger.info("Starting podcast fetch for campaign %s", campaign_id_str)
-        try:
-            campaign_uuid = uuid.UUID(campaign_id_str)
-        except ValueError:
-            logger.error("Invalid campaign ID: %s", campaign_id_str)
-            return
-        campaign = await db_service_pg.get_campaign_by_id(campaign_uuid)
-        if not campaign:
-            logger.error("Campaign %s not found", campaign_uuid)
-            return
-        keywords: List[str] = campaign.get('campaign_keywords', [])
-        if not keywords:
-            logger.warning("No keywords for campaign %s", campaign_uuid)
-            return
-        processed: set = set()
-        for kw in keywords:
-            kw = kw.strip()
-            if not kw:
-                continue
-            genre_ids = await self._generate_genre_ids_async(kw, campaign_id_str)
-            await self.search_listen_notes(kw, genre_ids, campaign_uuid, processed)
-            await self.search_podscan(kw, campaign_uuid, processed)
-            logger.info("Finished keyword '%s'", kw)
-            await asyncio.sleep(KEYWORD_PROCESSING_DELAY)
-        logger.info("Batch podcast fetching COMPLETED for %s", campaign_uuid)
-
-    def cleanup(self) -> None:
-        if self.executor:
-            self.executor.shutdown(wait=True)
-            logger.info("MediaFetcher executor shut down")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch & store podcasts for a campaign")
-    parser.add_argument("campaign_id", help="PostgreSQL Campaign UUID")
-    args = parser.parse_args()
-
-    async def run():
-        await db_service_pg.init_db_pool()
-        fetcher = MediaFetcher()
-        try:
-            await fetcher.fetch_podcasts_for_campaign(args.campaign_id)
-        finally:
-            fetcher.cleanup()
-            await db_service_pg.close_db_pool()
-            logger.info("Script finished for Campaign ID: %s", args.campaign_id)
-
-    asyncio.run(run())
-
-
-if __name__ == "__main__":
-    main()
-
+            episodes.sort(key=lambda x: x["publish_date"], reverse=True)
+            existing: Set[tuple[str, datetime.date]] = await db_service_pg.get_existing_episode_identifiers(media_id)
+            inserted = []
+            for ep in episodes:
+                ident = (ep["title"], ep["publish_date"].date())
+                if ident not in existing:
+                    payload = {
+                        "media_id": media_id,
+                        "title": ep["title"],
+                        "publish_date": ep["publish_date"],
+                        "duration_sec": ep.get("duration_sec"),
+                        "episode_summary": ep.get("episode_summary"),
+                        "episode_url": ep.get("episode_url"),
+                        "transcript": ep.get("transcript"),
+                        "downloaded": ep.get("downloaded", False),
+                        "guest_names": ep.get("guest_names"),
+                        "source_api": source,
+                        "api_episode_id": ep.get("api_episode_id"),
+                    }
+                    rec = await episode_queries.insert_episode(payload)
+                    if rec:
+                        inserted.append(rec)
+            logger.info("%s: inserted %s new episodes", media_name, len(inserted))
+            await episode_queries.delete_oldest_episodes(media_id, 10)
+            await episode_queries.flag_recent_episodes_for_transcription(media_id, 4)
+            await db_service_pg.update_media_after_sync(media_id)
+            await db_service_pg.update_media_latest_episode_date(media_id)
+            logger.info("%s: sync complete via %s", media_name, source)
