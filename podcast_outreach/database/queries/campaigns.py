@@ -1,6 +1,7 @@
 """Campaign related database queries."""
 from typing import Dict, Any, Optional, List
 import uuid
+from datetime import datetime
 
 from podcast_outreach.logging_config import get_logger
 from db_service_pg import get_db_pool
@@ -13,9 +14,9 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
         campaign_id, person_id, attio_client_id, campaign_name, campaign_type,
         campaign_bio, campaign_angles, campaign_keywords, compiled_social_posts,
         podcast_transcript_link, compiled_articles_link, mock_interview_trancript,
-        start_date, end_date, goal_note, media_kit_url
+        start_date, end_date, goal_note, media_kit_url, instantly_campaign_id
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -30,7 +31,8 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
                 campaign_data.get('compiled_social_posts'), campaign_data.get('podcast_transcript_link'),
                 campaign_data.get('compiled_articles_link'), campaign_data.get('mock_interview_trancript'),
                 campaign_data.get('start_date'), campaign_data.get('end_date'),
-                campaign_data.get('goal_note'), campaign_data.get('media_kit_url')
+                campaign_data.get('goal_note'), campaign_data.get('media_kit_url'),
+                campaign_data.get('instantly_campaign_id') # New field
             )
             logger.info(f"Campaign created: {campaign_data.get('campaign_id')}")
             return dict(row) if row else None
