@@ -125,6 +125,8 @@ podcast_outreach/
 │   ├── migrate_airtable.py
 │   ├── enrich_legacy_media.py
 │   ├── forward_instantly.py
+│   ├── sync_crm.py
+│   ├── process_webhooks.py
 │   └── generate_reports.py
 # ─────────────────────────────────────────────────────────────
 # 📁 Legacy (Temporary legacy scripts during refactor)

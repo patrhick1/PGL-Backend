@@ -24,7 +24,7 @@ This codebase represents a sophisticated B2B podcast guest placement automation 
 ### Migration & Database Management
 | File | Purpose | Migration Status |
 |------|---------|------------------|
-| `migrate_clients.py` | Migrate client/campaign data from Airtable to PostgreSQL | 🔄 Migration Tool |
+| `scripts/migrate_clients.py` | Migrate client/campaign data from Airtable to PostgreSQL | 🔄 Migration Tool |
 | `client_management_db.py` | Synchronous client management functions | 🔄 Transitional |
 | `instantly_leads_db.py` | Instantly.ai leads data backup/management | 🔄 Transitional |
 | `media_manager_db.py` | Legacy media tracking system | ❌ Legacy |
@@ -39,9 +39,9 @@ This codebase represents a sophisticated B2B podcast guest placement automation 
 ### External Integrations
 | File | Purpose | Migration Status |
 |------|---------|------------------|
-| `forward_instantly_emails.py` | Forward Instantly emails to master Gmail | ✅ Active |
-| `instantly_to_attio.py` | Sync Instantly leads to Attio CRM | ✅ Active |
-| `instantly_webhook_processor.py` | Process Instantly.ai webhooks | ✅ Active |
+| `scripts/forward_instantly.py` | Forward Instantly emails to master Gmail | ✅ Active |
+| `scripts/sync_crm.py` | Sync Instantly leads to Attio CRM | ✅ Active |
+| `scripts/process_webhooks.py` | Process Instantly.ai webhooks | ✅ Active |
 
 ### Documentation & Configuration
 | File | Purpose |
