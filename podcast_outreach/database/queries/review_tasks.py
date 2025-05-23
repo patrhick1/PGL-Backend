@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, Optional, List
 from datetime import datetime
 
-from db_service_pg import get_db_pool # Still importing from root db_service_pg for now
+from podcast_outreach.database.connection import get_db_pool
 from podcast_outreach.database.queries import match_suggestions # For process_match_suggestion_approval
 
 logger = logging.getLogger(__name__)

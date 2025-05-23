@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, List
 from datetime import datetime, date, timedelta
 import uuid
 
-from db_service_pg import get_db_pool
+from podcast_outreach.database.connection import get_db_pool
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from podcast_outreach.logging_config import get_logger
-from db_service_pg import get_db_pool
+from podcast_outreach.database.connection import get_db_pool
 
 logger = get_logger(__name__)
 
