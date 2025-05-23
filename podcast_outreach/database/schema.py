@@ -1,3 +1,5 @@
+# podcast_outreach/database/schema.py
+
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import DictCursor
@@ -288,7 +290,7 @@ def create_match_suggestions(conn):
         status VARCHAR(50) DEFAULT 'pending',  
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaignS_id);
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_media_id ON match_suggestions (media_id);
     """
     execute_sql(conn, sql_statement)
@@ -425,20 +427,46 @@ def create_review_tasks(conn):
     execute_sql(conn, sql_statement)
     print("Table REVIEW_TASKS created/ensured.")
 
+def create_ai_usage_logs_table(conn):
+    sql_statement = """
+    CREATE TABLE ai_usage_logs (
+        log_id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        workflow TEXT NOT NULL,
+        model TEXT NOT NULL,
+        tokens_in INTEGER NOT NULL,
+        tokens_out INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        cost NUMERIC(10, 6) NOT NULL, -- Cost in USD, up to 6 decimal places
+        execution_time_sec NUMERIC(10, 3), -- Execution time in seconds, up to 3 decimal places
+        endpoint TEXT,
+        related_pitch_gen_id INTEGER REFERENCES pitch_generations(pitch_gen_id) ON DELETE SET NULL, -- Link to pitch generation
+        related_campaign_id UUID REFERENCES campaigns(campaign_id) ON DELETE SET NULL, -- Link to campaign
+        related_media_id INTEGER REFERENCES media(media_id) ON DELETE SET NULL -- Link to media
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_workflow ON ai_usage_logs (workflow);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_model ON ai_usage_logs (model);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_pitch_gen_id ON ai_usage_logs (related_pitch_gen_id);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_campaign_id ON ai_usage_logs (related_campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_timestamp ON ai_usage_logs (timestamp);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table AI_USAGE_LOGS created/ensured.")
+
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
     # or essentially reverse of creation order. CASCADE should make the order less critical, but explicit order can help.
     table_names_in_drop_order = [
+        "AI_USAGE_LOGS", # New table, drop first if it references others
         "STATUS_HISTORY",       # FK to PLACEMENTS
         "PITCHES",            # FKs to CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         "PITCH_GENERATIONS",  # FKs to CAMPAIGNS, MEDIA, PITCH_TEMPLATES
         "PLACEMENTS",         # FKs to CAMPAIGNS, MEDIA
-        # PITCH_TEMPLATES is referenced by PITCH_GENERATIONS, so it must be dropped after PITCH_GENERATIONS or rely on CASCADE.
-        # If PITCH_GENERATIONS is dropped, PITCH_TEMPLATES is then free.
         "PITCH_TEMPLATES",
         "EPISODES",           # FK to MEDIA
         "MEDIA_PEOPLE",       # FKs to MEDIA, PEOPLE
+        "REVIEW_TASKS",       # FKs to CAMPAIGNS, PEOPLE
         "CAMPAIGNS",          # FK to PEOPLE
         "MEDIA",              # FK to COMPANIES
         "PEOPLE",             # FK to COMPANIES
@@ -453,13 +481,10 @@ def drop_all_tables(conn):
                 try:
                     print(f"  Executing: DROP TABLE IF EXISTS {table_name} CASCADE;")
                     cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE;").format(sql.Identifier(table_name)))
-                    # We can't be certain it dropped just because the command didn't error immediately,
-                    # as the previous logs showed. The real test is the subsequent CREATE.
                     print(f"  Command executed for: {table_name}")
                 except psycopg2.Error as e:
                     print(f"  ERROR explicitly trying to drop table {table_name}: {e}")
                     all_drops_attempted_successfully = False
-                    # Continue to attempt other drops to see all errors
             
             if all_drops_attempted_successfully:
                 conn.commit()
@@ -467,7 +492,6 @@ def drop_all_tables(conn):
             else:
                 conn.rollback()
                 print("Errors occurred during table drop commands. Transaction rolled back.")
-                # This exception will be caught by the outer try-except in create_all_tables
                 raise Exception("Failed to execute all DROP TABLE commands cleanly. Aborting schema creation.") 
 
     except psycopg2.Error as e: 
@@ -494,7 +518,8 @@ def create_all_tables():
 
     try:
         # Drop all tables first to ensure a clean slate
-        #drop_all_tables(conn)
+        # Uncomment the line below if you want to drop tables before creating them
+        # drop_all_tables(conn)
 
         # Create helper function for triggers first
         create_timestamp_update_trigger_function(conn)
@@ -513,6 +538,7 @@ def create_all_tables():
         create_placements_table(conn) # Depends on CAMPAIGNS, MEDIA
         create_pitches_table(conn) # Depends on CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         create_status_history_table(conn) # Depends on PLACEMENTS
+        create_ai_usage_logs_table(conn) # NEW: Depends on PITCH_GENERATIONS, CAMPAIGNS, MEDIA
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:
