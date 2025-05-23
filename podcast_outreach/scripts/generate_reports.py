@@ -15,7 +15,7 @@ from datetime import date, timedelta
 # Import the tracker from the new location
 from podcast_outreach.services.ai.tracker import tracker
 from podcast_outreach.logging_config import get_logger
-import db_service_pg # For DB pool initialization
+from podcast_outreach.database.connection import init_db_pool, close_db_pool # <--- UPDATED IMPORT
 
 # Import new DB query functions for campaign status
 from podcast_outreach.database.queries import campaigns as campaign_queries
