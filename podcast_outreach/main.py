@@ -26,7 +26,7 @@ from podcast_outreach.api.dependencies import (
     get_admin_user
 )
 from podcast_outreach.api.middleware import AuthMiddleware # Assuming AuthMiddleware is here
-import db_service_pg # For database connection pool management
+from podcast_outreach.database.connection import init_db_pool, close_db_pool  # <--
 
 # Import the AI usage tracker from its new location
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     logger.info("Application starting up...")
     
     # Initialize DB pool
-    await db_service_pg.init_db_pool()
+    await init_db_pool()
     logger.info("Database connection pool initialized.")
 
     if ENABLE_LLM_TEST_DASHBOARD:
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
             task_manager.cleanup()
         
         # Close any open database connections or services
-        await db_service_pg.close_db_pool() # Close DB pool
+        await close_db_pool()  # Close DB pool
         logger.info("Database connection pool closed.")
         
         # Allow some time for graceful cleanup
