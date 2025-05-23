@@ -1,26 +1,19 @@
+# podcast_outreach/database/queries/pitch_generations.py
+
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import uuid
 from datetime import datetime
 
-# Assuming db_service_pg.py is the central connection pool manager
-import db_service_pg
+from podcast_outreach.logging_config import get_logger
+from podcast_outreach.database.connection import get_db_pool
 from podcast_outreach.database.queries import review_tasks
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Inserts a new pitch generation record into the database.
-
-    Args:
-        pitch_gen_data: A dictionary containing data for the pitch_generations table.
-                        Expected keys: campaign_id (UUID), media_id (int), template_id (str),
-                        draft_text (str), ai_model_used (str), pitch_topic (str),
-                        temperature (float), generation_status (str), send_ready_bool (bool).
-
-    Returns:
-        The created pitch generation record as a dictionary, or None on failure.
     """
     query = """
     INSERT INTO pitch_generations (
@@ -31,7 +24,7 @@ async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optio
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
     ) RETURNING *;
     """
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
@@ -43,7 +36,7 @@ async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optio
                 pitch_gen_data.get('ai_model_used'),
                 pitch_gen_data.get('pitch_topic'),
                 pitch_gen_data.get('temperature'),
-                pitch_gen_data.get('generated_at', datetime.utcnow()), # Default to now if not provided
+                pitch_gen_data.get('generated_at', datetime.utcnow()),
                 pitch_gen_data.get('reviewer_id'),
                 pitch_gen_data.get('reviewed_at'),
                 pitch_gen_data.get('final_text'),
@@ -61,7 +54,7 @@ async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optio
 async def get_pitch_generation_by_id(pitch_gen_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a pitch generation record by its ID."""
     query = "SELECT * FROM pitch_generations WHERE pitch_gen_id = $1;"
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, pitch_gen_id)
@@ -92,7 +85,7 @@ async def update_pitch_generation_in_db(pitch_gen_id: int, update_data: Dict[str
     query = f"UPDATE pitch_generations SET {set_clause_str} WHERE pitch_gen_id = ${idx} RETURNING *;"
     values.append(pitch_gen_id)
 
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *values)
@@ -107,7 +100,7 @@ async def approve_pitch_generation(pitch_gen_id: int, reviewer_id: Optional[str]
     Approves a pitch generation, setting it as send-ready and updating its status.
     Also marks the associated review task as completed.
     """
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             try:
@@ -130,7 +123,6 @@ async def approve_pitch_generation(pitch_gen_id: int, reviewer_id: Optional[str]
                 logger.info(f"Pitch generation {pitch_gen_id} approved and marked send-ready.")
 
                 # 2. Find and update the associated review task
-                # Assuming there's a review task with task_type 'pitch_review' and related_id matching pitch_gen_id
                 review_task_query = """
                 SELECT review_task_id FROM review_tasks
                 WHERE task_type = 'pitch_review' AND related_id = $1 AND status = 'pending'
@@ -146,6 +138,7 @@ async def approve_pitch_generation(pitch_gen_id: int, reviewer_id: Optional[str]
                     logger.warning(f"No pending pitch_review task found for pitch_gen_id {pitch_gen_id}.")
 
                 # 3. Update the corresponding pitch record's approval status
+                # This assumes a pitch record already exists linked to this pitch_gen_id
                 pitch_record_query = """
                 UPDATE pitches
                 SET client_approval_status = 'approved',
@@ -164,3 +157,14 @@ async def approve_pitch_generation(pitch_gen_id: int, reviewer_id: Optional[str]
             except Exception as e:
                 logger.exception(f"Error approving pitch generation {pitch_gen_id}: {e}")
                 raise
+
+async def get_all_pitch_generations_from_db(skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+    query = "SELECT * FROM pitch_generations ORDER BY generated_at DESC OFFSET $1 LIMIT $2;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, skip, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching all pitch generations: {e}")
+            raise
