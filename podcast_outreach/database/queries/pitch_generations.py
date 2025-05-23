@@ -5,6 +5,7 @@ from datetime import datetime
 
 # Assuming db_service_pg.py is the central connection pool manager
 import db_service_pg
+from podcast_outreach.database.queries import review_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -100,3 +101,66 @@ async def update_pitch_generation_in_db(pitch_gen_id: int, update_data: Dict[str
         except Exception as e:
             logger.exception(f"Error updating pitch generation {pitch_gen_id}: {e}")
             raise
+
+async def approve_pitch_generation(pitch_gen_id: int, reviewer_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Approves a pitch generation, setting it as send-ready and updating its status.
+    Also marks the associated review task as completed.
+    """
+    pool = await db_service_pg.get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                # 1. Update pitch_generations record
+                update_query = """
+                UPDATE pitch_generations
+                SET send_ready_bool = TRUE,
+                    generation_status = 'approved',
+                    reviewed_at = NOW(),
+                    reviewer_id = COALESCE($1, reviewer_id)
+                WHERE pitch_gen_id = $2
+                RETURNING *;
+                """
+                updated_pitch_gen = await conn.fetchrow(update_query, reviewer_id, pitch_gen_id)
+                if not updated_pitch_gen:
+                    logger.warning(f"Pitch generation {pitch_gen_id} not found for approval.")
+                    return None
+                
+                updated_pitch_gen_dict = dict(updated_pitch_gen)
+                logger.info(f"Pitch generation {pitch_gen_id} approved and marked send-ready.")
+
+                # 2. Find and update the associated review task
+                # Assuming there's a review task with task_type 'pitch_review' and related_id matching pitch_gen_id
+                review_task_query = """
+                SELECT review_task_id FROM review_tasks
+                WHERE task_type = 'pitch_review' AND related_id = $1 AND status = 'pending'
+                LIMIT 1;
+                """
+                pending_review_task = await conn.fetchrow(review_task_query, pitch_gen_id)
+
+                if pending_review_task:
+                    review_task_id = pending_review_task['review_task_id']
+                    await review_tasks.update_review_task_status_in_db(review_task_id, 'completed', f"Pitch approved by {reviewer_id or 'system'}")
+                    logger.info(f"Associated review task {review_task_id} marked as completed.")
+                else:
+                    logger.warning(f"No pending pitch_review task found for pitch_gen_id {pitch_gen_id}.")
+
+                # 3. Update the corresponding pitch record's approval status
+                pitch_record_query = """
+                UPDATE pitches
+                SET client_approval_status = 'approved',
+                    pitch_state = 'ready_to_send'
+                WHERE pitch_gen_id = $1
+                RETURNING pitch_id;
+                """
+                updated_pitch_record = await conn.fetchrow(pitch_record_query, pitch_gen_id)
+                if updated_pitch_record:
+                    logger.info(f"Associated pitch record {updated_pitch_record['pitch_id']} updated to 'approved' and 'ready_to_send'.")
+                else:
+                    logger.warning(f"No associated pitch record found for pitch_gen_id {pitch_gen_id} to update approval status.")
+
+                return updated_pitch_gen_dict
+
+            except Exception as e:
+                logger.exception(f"Error approving pitch generation {pitch_gen_id}: {e}")
+                raise
