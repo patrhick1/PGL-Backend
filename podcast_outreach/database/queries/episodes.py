@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
+from datetime import datetime, date
 
 from db_service_pg import get_db_pool
 
@@ -11,8 +12,8 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
     INSERT INTO episodes (
         media_id, title, publish_date, duration_sec, episode_summary,
         episode_url, transcript, transcribe, downloaded, guest_names,
-        source_api, api_episode_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        source_api, api_episode_id, ai_episode_summary, embedding
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     RETURNING *;
     """
     pool = await get_db_pool()
@@ -32,6 +33,8 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
                 episode_data.get("guest_names"),
                 episode_data.get("source_api"),
                 episode_data.get("api_episode_id"),
+                episode_data.get("ai_episode_summary"), # Added
+                episode_data.get("embedding"), # Added
             )
             return dict(row) if row else None
         except Exception as e:
@@ -162,3 +165,23 @@ async def update_episode_transcription(
         except Exception as e:
             logger.exception("Error updating transcription for episode %s: %s", episode_id, e)
             return None
+
+async def get_episodes_for_media_with_content(media_id: int) -> List[Dict[str, Any]]:
+    """
+    Fetches episodes for a given media_id that have either an AI summary or a transcript,
+    and their embeddings if available.
+    """
+    query = """
+    SELECT episode_id, title, publish_date, episode_summary, ai_episode_summary, transcript, embedding
+    FROM episodes
+    WHERE media_id = $1 AND (ai_episode_summary IS NOT NULL OR transcript IS NOT NULL)
+    ORDER BY publish_date DESC;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_id)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching episodes with content for media_id {media_id}: {e}")
+            return []
