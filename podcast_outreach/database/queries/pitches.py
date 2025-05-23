@@ -122,3 +122,15 @@ async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dic
         except Exception as e:
             logger.exception(f"Error fetching pitch by Instantly Lead ID {instantly_lead_id}: {e}")
             raise
+
+async def get_pitch_by_pitch_gen_id(pitch_gen_id: int) -> Optional[Dict[str, Any]]:
+    """Fetches a pitch record by its associated pitch_gen_id."""
+    query = "SELECT * FROM pitches WHERE pitch_gen_id = $1;"
+    pool = await db_service_pg.get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, pitch_gen_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching pitch by pitch_gen_id {pitch_gen_id}: {e}")
+            raise
