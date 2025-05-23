@@ -1,14 +1,34 @@
 import logging
 import sys
-from podcast_outreach.config import LOG_LEVEL # Assuming LOG_LEVEL is defined in config.py
+from logging.config import dictConfig
 
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+from podcast_outreach.config import LOG_LEVEL
 
-def get_logger(name):
-    return logging.getLogger(name) 
+LOGGING_CONFIG = {
+    "version": 1,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        }
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "stream": sys.stdout
+        }
+    },
+    "root": {
+        "level": LOG_LEVEL,
+        "handlers": ["console"]
+    }
+}
+
+def setup_logging() -> None:
+    """Apply logging configuration using LOGGING_CONFIG."""
+    dictConfig(LOGGING_CONFIG)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Convenience wrapper to get a named logger."""
+    return logging.getLogger(name)
