@@ -1,9 +1,13 @@
+# podcast_outreach/integrations/attio.py
+
 import requests
 import os
 import time
 import logging
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
+import html
+import re
 
 # Assuming src.exceptions is still valid or moved
 from src.exceptions import APIClientError 
@@ -219,22 +223,27 @@ class AttioClient:
 
 # --- Attio Webhook Processors (Moved from src/attio_email_sent.py and src/attio_response.py) ---
 
+# Initialize AttioClient globally for webhook functions
+attio_client_for_webhooks = AttioClient() 
 ATTIO_PODCAST_OBJECT_SLUG = "podcast" # Assuming this is the correct object slug in Attio
 
 async def update_attio_when_email_sent(data: Dict[str, Any]):
     """
     Updates Attio record when an email is sent via Instantly webhook.
     This function is designed to be called by a FastAPI webhook endpoint.
-    """
-    attio_client = AttioClient() # Initialize client per call or use a global/dependency
     
+    Args:
+        data: The JSON payload from Instantly.ai webhook.
+              Expected to contain 'attio_record_id', 'timestamp', 'event_type', 'personalization'.
+              The 'attio_record_id' should be the ID of the Attio 'podcast' record.
+    """
     attio_record_id = data.get('attio_record_id') # This is expected to be the Attio record_id for the podcast object
     if not attio_record_id:
         logger.warning("attio_record_id not provided in webhook data for email sent event.")
         return {"success": False, "message": "attio_record_id missing."}
 
     try:
-        podcast_record_response = attio_client.get_record(ATTIO_PODCAST_OBJECT_SLUG, attio_record_id)
+        podcast_record_response = attio_client_for_webhooks.get_record(ATTIO_PODCAST_OBJECT_SLUG, attio_record_id)
         
         if not podcast_record_response or 'data' not in podcast_record_response:
             logger.warning(f"No Attio record found with id {attio_record_id} or error in response for email sent event.")
@@ -248,4 +257,116 @@ async def update_attio_when_email_sent(data: Dict[str, Any]):
         # Assuming 'outreach_date' is the slug for the date field
         existing_outreach_date = current_attributes.get('outreach_date') 
 
-        timestamp = data.get('timestamp', datetime
+        timestamp_str = data.get('timestamp', datetime.now().isoformat())
+        event_type = data.get('event_type', 'EMAIL_SENT') # Default to EMAIL_SENT
+        personalization = data.get('personalization', 'No message content provided.') # Message content or summary
+
+        # Append new correspondence entry
+        # Ensure a clean separation for new entries
+        new_entry_header = f"\n\n--- Entry: {timestamp_str} ---\nEvent Type: {event_type}\n"
+        new_correspondence_detail = f"Message: {personalization}"
+        
+        # Check if current_description is a list (if it's a rich text field or similar) or string
+        if isinstance(current_description, list):
+            # Handle case where description might be structured (e.g., from rich text)
+            # This example converts it to a string. Adjust if Attio returns structured text.
+            current_description_text = "\n".join(current_description)
+        else:
+            current_description_text = current_description or ''
+
+        updated_description = current_description_text + new_entry_header + new_correspondence_detail
+
+        # Prepare fields to update
+        today_date = datetime.now().strftime('%Y-%m-%d')
+        attributes_to_update = {
+            'description': updated_description,
+            'outreach_date': today_date  # Set/update the outreach date
+        }
+
+        # If 'outreach_date' was not previously set, set 'relationship_stage' to 'Outreached'
+        # Attio's 'get_record' returns actual values, so check if existing_outreach_date was None or empty
+        if not existing_outreach_date:
+            attributes_to_update['relationship_stage'] = 'Outreached' # Assuming 'relationship_stage' is the slug
+
+        # Update the record in Attio
+        updated_record = attio_client_for_webhooks.update_record(
+            object_type=ATTIO_PODCAST_OBJECT_SLUG,
+            record_id=attio_record_id,
+            attributes=attributes_to_update
+        )
+
+        if updated_record:
+            logger.info(f"Attio record {attio_record_id} updated successfully for email sent event.")
+            return {"success": True, "message": f"Attio record {attio_record_id} updated."}
+        else:
+            logger.error(f"Failed to update Attio record {attio_record_id} for email sent event. Check AttioClient logs for details.")
+            return {"success": False, "message": f"Failed to update Attio record {attio_record_id}."}
+
+    except Exception as e:
+        logger.exception(f"An error occurred while updating Attio record {attio_record_id} for email sent event: {str(e)}")
+        raise # Re-raise for the webhook router to catch
+
+async def update_correspondent_on_attio(data: Dict[str, Any]):
+    """
+    Updates the correspondence field and relationship stage in Attio when an email reply is received.
+    
+    Args:
+        data: The JSON payload from Instantly.ai webhook.
+              Expected to contain 'attio_record_id', 'timestamp', 'reply_text_snippet'.
+              The 'attio_record_id' should be the ID of the Attio 'podcast' record.
+    """
+    attio_record_id = data.get('attio_record_id') # Expected to be the Attio record_id
+    timestamp_str = data.get('timestamp', datetime.now().isoformat())
+    reply_text_snippet = data.get('reply_text_snippet')
+
+    # Validate required fields
+    if not attio_record_id or not reply_text_snippet:
+        logger.warning("Webhook data missing required fields (attio_record_id or reply_text_snippet) for reply received event.")
+        return {"success": False, "message": "Missing required fields."}
+
+    try:
+        # Fetch current record from Attio
+        podcast_record_response = attio_client_for_webhooks.get_record(ATTIO_PODCAST_OBJECT_SLUG, attio_record_id)
+        if not podcast_record_response or 'data' not in podcast_record_response:
+            logger.warning(f"Attio Record with ID {attio_record_id} not found or error in response for reply received event.")
+            return {"success": False, "message": f"Attio record {attio_record_id} not found."}
+
+        podcast_data = podcast_record_response['data']
+        current_attributes = podcast_data.get('values', {})
+        existing_description = current_attributes.get('description', '') # Map to 'description'
+
+        # Append new correspondence
+        new_entry_header = f"\n\n--- Reply Received: {timestamp_str} ---"
+        new_reply_detail = f"Reply Snippet: {reply_text_snippet}"
+        
+        # Handle potential list format for description
+        if isinstance(existing_description, list):
+            existing_description_text = "\n".join(existing_description)
+        else:
+            existing_description_text = existing_description or ''
+            
+        new_description = existing_description_text + new_entry_header + new_reply_detail
+
+        # Prepare fields to update
+        attributes_to_update = {
+            'description': new_description,
+            'relationship_stage': 'Responded' # Update relationship stage
+        }
+
+        # Update the record in Attio
+        updated_record = attio_client_for_webhooks.update_record(
+            object_type=ATTIO_PODCAST_OBJECT_SLUG,
+            record_id=attio_record_id,
+            attributes=attributes_to_update
+        )
+
+        if updated_record:
+            logger.info(f"Attio Record {attio_record_id} updated successfully with reply.")
+            return {"success": True, "message": f"Attio record {attio_record_id} updated with reply."}
+        else:
+            logger.error(f"Failed to update Attio record {attio_record_id} for reply received event. Check AttioClient logs.")
+            return {"success": False, "message": f"Failed to update Attio record {attio_record_id}."}
+
+    except Exception as e:
+        logger.exception(f"An error occurred while updating Attio record {attio_record_id} with reply: {str(e)}")
+        raise # Re-raise for the webhook router to catch
