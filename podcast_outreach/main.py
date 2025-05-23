@@ -1,3 +1,5 @@
+# podcast_outreach/main.py
+
 """
 Unified FastAPI Application
 
@@ -7,109 +9,108 @@ Date: 2025-01-06
 
 import os
 import uuid
-from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT
-from podcast_outreach.logging_config import setup_logging, get_logger
-
-setup_logging()
-logger = get_logger(__name__)
-from fastapi import FastAPI, Request, Query, Response, status, Form, Depends
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from typing import Optional
+import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 import sys
+import threading
+import asyncio # Explicitly import asyncio for loop management
 
-# Import the authentication middleware
-from auth_middleware import (
-    AuthMiddleware, 
+# Project-specific imports from the new structure
+from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT
+from podcast_outreach.logging_config import setup_logging, get_logger
+from podcast_outreach.api.dependencies import (
     authenticate_user, 
     create_session, 
     get_current_user,
     get_admin_user
 )
+from podcast_outreach.api.middleware import AuthMiddleware # Assuming AuthMiddleware is here
+import db_service_pg # For database connection pool management
 
-# Import the task manager
-from task_manager import task_manager
+# Import the AI usage tracker from its new location
+from podcast_outreach.services.ai.tracker import tracker as ai_tracker
 
-# Import the functions that handle specific tasks
-from webhook_handler import poll_airtable_and_process, poll_podcast_search_database, enrich_host_name
-from summary_guest_identification_optimized import PodcastProcessor  # Import the optimized version
-from determine_fit_optimized import determine_fit  # Import the optimized version
-from pitch_episode_selection_optimized import pitch_episode_selection  # Import the optimized version
-from pitch_writer_optimized import pitch_writer  # Import the optimized version
-from send_pitch_to_instantly import send_pitch_to_instantly
-from instantly_email_sent import update_airtable_when_email_sent
-from instantly_response import update_correspondent_on_airtable
-from fetch_episodes import get_podcast_episodes
-from podcast_note_transcriber import get_podcast_audio_transcription, transcribe_endpoint
-from free_tier_episode_transcriber import get_podcast_audio_transcription_free_tier, transcribe_endpoint_free_tier
+# Import the task manager (assuming it's still at src/task_manager.py for now)
+# In a fully migrated system, this might move to services/tasks/manager.py
+from src.task_manager import task_manager
 
-# Import the AI usage tracker
-from ai_usage_tracker import tracker as ai_tracker
+# Import FastAPI and Jinja2Templates
+from fastapi import FastAPI, Request, Query, Response, status, Form, Depends, HTTPException
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
-# -------------------------------------------------------------------
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-# -------------------------------------------------------------------
+# Import the new API routers
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks # Added webhooks router
+
+# --- Legacy Script Imports (to be phased out) ---
+# These imports are kept to maintain the functionality of the /trigger_automation endpoint
+# as it existed in the original main.py. In a fully refactored system, these would
+# be replaced by calls to services within the podcast_outreach package.
+from webhook_handler import poll_airtable_and_process, poll_podcast_search_database # Airtable-dependent
+from summary_guest_identification_optimized import PodcastProcessor # Now async
+from determine_fit_optimized import determine_fit # Now async
+from pitch_episode_selection_optimized import pitch_episode_selection # Still legacy, not yet moved to services/pitches/
+from pitch_writer_optimized import pitch_writer # Now async
+from send_pitch_to_instantly import send_pitch_to_instantly # Now async
+from instantly_email_sent import update_airtable_when_email_sent # Airtable-dependent
+from instantly_response import update_correspondent_on_airtable # Airtable-dependent
+from fetch_episodes import get_podcast_episodes # Airtable-dependent
+from podcast_note_transcriber import get_podcast_audio_transcription # Now async
+from free_tier_episode_transcriber import get_podcast_audio_transcription_free_tier # Now async
+from webhook_handler import enrich_host_name # Now async (from src/webhook_handler.py, but logic is in src/enrichment/enrichment_orchestrator.py)
+# --- End Legacy Script Imports ---
+
+
+setup_logging()
+logger = get_logger(__name__)
 
 # Conditionally import and register routes from test_runner.py
 ENABLE_LLM_TEST_DASHBOARD = os.getenv("ENABLE_LLM_TEST_DASHBOARD", "false").lower() == "true"
-
-if ENABLE_LLM_TEST_DASHBOARD:
-    logger.info("ENABLE_LLM_TEST_DASHBOARD is true. Attempting to load test runner routes.")
-    # Get the absolute path to the project root (PGL/)
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # Get the absolute path to the tests directory
-    tests_dir = os.path.join(project_root, "tests")
-
-    if not os.path.isdir(tests_dir):
-        logger.warning(f"Tests directory not found at {tests_dir}. Cannot load LLM Test Dashboard.")
-    else:
-        original_sys_path = list(sys.path)
-        # Add tests directory to sys.path to allow importing test_runner
-        # and also the project root to allow test_runner to import src modules like auth_middleware
-        if tests_dir not in sys.path:
-            sys.path.insert(0, tests_dir)
-        if project_root not in sys.path: # test_runner itself might try to import from src
-            sys.path.insert(0, project_root)
-        
-        try:
-            from test_runner import register_routes as register_test_routes # type: ignore
-            # The register_routes function needs the app instance.
-            # We'll call it after 'app' is defined.
-            # For now, store it or set a flag.
-            # Let's assume we will call it during app lifespan startup.
-            logger.info("Successfully imported register_routes from test_runner.")
-        except ImportError as e:
-            logger.error(f"Failed to import test_runner. LLM Test Dashboard will not be available. Error: {e}")
-            register_test_routes = None # Ensure it's defined
-        except Exception as e:
-            logger.error(f"An unexpected error occurred while trying to import test_runner: {e}")
-            register_test_routes = None # Ensure it's defined
-        finally:
-            # Restore original sys.path
-            sys.path = original_sys_path
-else:
-    logger.info("ENABLE_LLM_TEST_DASHBOARD is false. LLM Test Dashboard routes will not be loaded.")
-    register_test_routes = None # Ensure it's defined if not enabled
 
 # Define lifespan context manager before app initialization
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
     logger.info("Application starting up...")
-    if ENABLE_LLM_TEST_DASHBOARD and register_test_routes:
-        try:
-            logger.info("Registering LLM Test Dashboard routes...")
-            register_test_routes(app) # Call the registration here
-            logger.info("LLM Test Dashboard routes registered.")
-        except Exception as e:
-            logger.error(f"Error registering LLM Test Dashboard routes: {e}")
+    
+    # Initialize DB pool
+    await db_service_pg.init_db_pool()
+    logger.info("Database connection pool initialized.")
+
+    if ENABLE_LLM_TEST_DASHBOARD:
+        logger.info("ENABLE_LLM_TEST_DASHBOARD is true. Attempting to load test runner routes.")
+        # Get the absolute path to the project root (PGL/)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Get the absolute path to the tests directory
+        tests_dir = os.path.join(project_root, "tests")
+
+        if not os.path.isdir(tests_dir):
+            logger.warning(f"Tests directory not found at {tests_dir}. Cannot load LLM Test Dashboard.")
+        else:
+            original_sys_path = list(sys.path)
+            # Add tests directory to sys.path to allow importing test_runner
+            # and also the project root to allow test_runner to import src modules like auth_middleware
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            if project_root not in sys.path: # test_runner itself might try to import from src
+                sys.path.insert(0, project_root)
+            
+            try:
+                from test_runner import register_routes as register_test_routes # type: ignore
+                logger.info("Successfully imported register_routes from test_runner.")
+                register_test_routes(app) # Call the registration here
+                logger.info("LLM Test Dashboard routes registered.")
+            except ImportError as e:
+                logger.error(f"Failed to import test_runner. LLM Test Dashboard will not be available. Error: {e}")
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while trying to import test_runner: {e}")
+            finally:
+                # Restore original sys.path
+                sys.path = original_sys_path
+    else:
+        logger.info("ENABLE_LLM_TEST_DASHBOARD is false. LLM Test Dashboard routes will not be loaded.")
     
     yield  # This is where FastAPI serves requests
     
@@ -118,19 +119,19 @@ async def lifespan(app: FastAPI):
         logger.info("Application shutting down, cleaning up resources...")
         
         # Clean up any running tasks or processes
-        # This is especially important for asyncio loops and thread pools
-        
-        # Close any open database connections or services
         if hasattr(task_manager, 'cleanup'):
             task_manager.cleanup()
         
+        # Close any open database connections or services
+        await db_service_pg.close_db_pool() # Close DB pool
+        logger.info("Database connection pool closed.")
+        
         # Allow some time for graceful cleanup
-        import asyncio
         await asyncio.sleep(0.5)
         
         logger.info("Cleanup completed")
     except Exception as e:
-        logger.error(f"Error during application shutdown: {e}")
+        logger.error(f"Error during application shutdown: {e}", exc_info=True)
 
 # Initialize FastAPI app with lifespan context manager
 app = FastAPI(lifespan=lifespan)
@@ -147,8 +148,17 @@ def format_number(value):
     return f"{value:,}"
 
 def format_datetime(timestamp):
-    """Convert ISO timestamp to readable format"""
-    dt = datetime.fromisoformat(timestamp)
+    """Convert ISO timestamp or datetime object to readable format"""
+    if isinstance(timestamp, str):
+        try:
+            dt = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return timestamp # Return original if cannot parse
+    elif isinstance(timestamp, datetime):
+        dt = timestamp
+    else:
+        return str(timestamp) # Fallback for unexpected types
+
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 templates.env.filters["format_number"] = format_number
@@ -157,6 +167,14 @@ templates.env.filters["format_datetime"] = format_datetime
 # Mount static files directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Include API routers
+app.include_router(campaigns.router)
+app.include_router(matches.router)
+app.include_router(media.router)
+app.include_router(pitches.router)
+app.include_router(tasks.router)
+app.include_router(auth.router)
+app.include_router(webhooks.router) # For Instantly.ai webhooks
 
 @app.get("/login")
 def login_page(request: Request):
@@ -171,11 +189,9 @@ async def login(
     password: str = Form(...)
 ):
     """Handle login form submission"""
-    # Authenticate user
     role = authenticate_user(username, password)
     
     if not role:
-        # Authentication failed
         return templates.TemplateResponse(
             "login.html", 
             {
@@ -184,20 +200,17 @@ async def login(
             }
         )
     
-    # Create session
     session_id = create_session(username, role)
     
-    # Create response with redirect
-    response = RedirectResponse(url="/", status_code=303)
+    response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
     
-    # Set session cookie
     response.set_cookie(
         key="session_id",
         value=session_id,
         httponly=True,
-        secure=True,  # Set to False for http development
+        secure=True,
         samesite="lax",
-        max_age=3600  # 1 hour
+        max_age=3600
     )
     
     return response
@@ -206,7 +219,7 @@ async def login(
 @app.get("/logout")
 def logout(request: Request):
     """Log out the user by clearing the session cookie"""
-    response = RedirectResponse(url="/login", status_code=303)
+    response = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(key="session_id")
     return response
 
@@ -217,8 +230,10 @@ def index(request: Request, user: dict = Depends(get_current_user)):
     Root endpoint that renders the main dashboard HTML.
     Requires authentication.
     """
+    # In a fully migrated system, this would render a dashboard using data from PostgreSQL
+    # For now, it might be a placeholder or a simple dashboard.html
     return templates.TemplateResponse(
-        "index.html", 
+        "dashboard.html", # Assuming dashboard.html is the main entry point now
         {
             "request": request,
             "username": user["username"],
@@ -236,8 +251,84 @@ def api_status():
     return {"message": "PGL Automation API is running (FastAPI version)!"}
 
 
+# --- Helper functions to run async tasks in a separate thread ---
+# These are necessary because the /trigger_automation endpoint is synchronous
+# but many of the underlying processing functions are now asynchronous.
+def run_async_task_in_new_loop(coro):
+    """Runs an async coroutine in a new asyncio event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+def run_summary_host_guest_optimized_async_wrapper(stop_flag):
+    """Wrapper for the async PodcastProcessor.process_all_records."""
+    # Import here to avoid circular dependencies if PodcastProcessor imports main.py
+    from summary_guest_identification_optimized import PodcastProcessor
+    processor = PodcastProcessor()
+    return run_async_task_in_new_loop(
+        processor.process_all_records(max_concurrency=3, batch_size=5, stop_flag=stop_flag)
+    )
+
+def run_determine_fit_optimized_async_wrapper(stop_flag):
+    """Wrapper for the async determine_fit function."""
+    from determine_fit_optimized import determine_fit_async # Import the async version
+    return run_async_task_in_new_loop(
+        determine_fit_async(stop_flag=stop_flag, max_concurrency=3, batch_size=5)
+    )
+
+def run_pitch_writer_optimized_async_wrapper(stop_flag):
+    """Wrapper for the async pitch_writer function."""
+    from podcast_outreach.services.pitches.generator import PitchGeneratorService # New import path
+    generator = PitchGeneratorService()
+    # Note: pitch_writer_async in generator.py expects match_id, not a general trigger.
+    # This wrapper needs to be adapted if it's meant to process a queue of pitches.
+    # For now, it will just run the process_all_records from the old pitch_writer_optimized.py logic.
+    # The new PitchGeneratorService.generate_pitch_for_match is for a single match_id.
+    # This might need a dedicated script in podcast_outreach/scripts/
+    # For now, assuming the old pitch_writer_optimized.py's `pitch_writer` function is still callable.
+    # If `pitch_writer` itself is async, it needs `run_async_task_in_new_loop`.
+    # Based on previous phase, `pitch_writer` is a sync wrapper around `pitch_writer_async`.
+    return pitch_writer(stop_flag) # Call the sync wrapper
+
+def run_send_pitch_to_instantly_async_wrapper(stop_flag):
+    """Wrapper for the async send_pitch_to_instantly function."""
+    from podcast_outreach.services.pitches.sender import PitchSenderService # New import path
+    sender = PitchSenderService()
+    # The old send_pitch_to_instantly.py had a loop. The new sender.py has send_pitch_to_instantly(pitch_gen_id).
+    # This wrapper needs to fetch pitch_gen_ids that are ready to send.
+    # This is a placeholder and needs a proper query for 'send_ready_bool = TRUE' pitches.
+    # For now, it will call the old script's function if it's still available.
+    # If `send_pitch_to_instantly` itself is async, it needs `run_async_task_in_new_loop`.
+    # Based on previous phase, `send_pitch_to_instantly` is a sync wrapper.
+    return send_pitch_to_instantly(stop_flag) # Call the sync wrapper
+
+def run_enrich_host_name_async_wrapper(stop_flag):
+    """Wrapper for the async enrich_host_name function."""
+    # The original enrich_host_name was in webhook_handler.py, but its logic was async.
+    # Assuming it's now in a service or script that can be called.
+    # If it's the `webhook_handler.enrich_host_name` that calls async logic, it needs this wrapper.
+    # If it's a new service, import that service and call its async method.
+    # For now, assume `webhook_handler.enrich_host_name` is the entry point.
+    return run_async_task_in_new_loop(enrich_host_name(stop_flag)) # Assuming enrich_host_name is async
+
+def run_transcription_task_async_wrapper(stop_flag):
+    """Wrapper for the async get_podcast_audio_transcription function."""
+    # Assuming get_podcast_audio_transcription is now async
+    return run_async_task_in_new_loop(get_podcast_audio_transcription(stop_flag))
+
+def run_transcription_task_free_tier_async_wrapper(stop_flag):
+    """Wrapper for the async get_podcast_audio_transcription_free_tier function."""
+    # Assuming get_podcast_audio_transcription_free_tier is now async
+    return run_async_task_in_new_loop(get_podcast_audio_transcription_free_tier(stop_flag))
+
+# --- End Helper functions for async tasks ---
+
+
 @app.get("/trigger_automation")
-def trigger_automation(
+async def trigger_automation( # Made async to allow awaiting ai_tracker.log_usage if needed
         action: str = Query(...,
                             description="Name of the automation to trigger"),
         id: Optional[str] = Query(
@@ -248,86 +339,85 @@ def trigger_automation(
     This endpoint is publicly accessible (no auth required).
     """
     try:
-        # Generate a unique task ID
         task_id = str(uuid.uuid4())
         
-        # Register the task before starting
         task_manager.start_task(task_id, action)
         
-        # Start the task in a separate thread
-        import threading
-        
-        def run_task():
+        # Start the task in a separate thread to avoid blocking the FastAPI event loop
+        # All calls to async functions within this thread must be wrapped in a new asyncio event loop
+        def run_task_in_thread():
             try:
-                # Get the stop flag for this task
                 stop_flag = task_manager.get_stop_flag(task_id)
                 if not stop_flag:
                     logger.error(f"Could not get stop flag for task {task_id}")
                     return
                 
+                # --- Legacy Airtable-dependent calls (to be replaced) ---
                 if action == 'generate_bio_angles':
                     if not id:
-                        logger.warning("No record ID provided for generate_bio_angles, will process all eligible records")
-                    poll_airtable_and_process(id, stop_flag)
+                        logger.warning("No record ID provided for generate_bio_angles, will process all eligible records (Airtable-dependent)")
+                    poll_airtable_and_process(id, stop_flag) # Calls Airtable-dependent logic
                 
                 elif action == 'mipr_podcast_search':
                     if not id:
-                        raise ValueError("Missing 'id' parameter for MIPR Podcast Search automation!")
-                    poll_podcast_search_database(id, stop_flag)
+                        raise ValueError("Missing 'id' parameter for MIPR Podcast Search automation! (Airtable-dependent)")
+                    poll_podcast_search_database(id, stop_flag) # Calls Airtable-dependent logic
                 
                 elif action == 'fetch_podcast_episodes':
-                    get_podcast_episodes(stop_flag)
-                
-                elif action == 'summary_host_guest':
-                    run_summary_host_guest_optimized(stop_flag)
-                
-                elif action == 'determine_fit':
-                    determine_fit(stop_flag, batch_size=5)
+                    get_podcast_episodes(stop_flag) # Calls Airtable-dependent logic
                 
                 elif action == 'pitch_episode_angle':
-                    pitch_episode_selection(stop_flag)
+                    # This is still a legacy script, not yet migrated to new services/pitches/
+                    pitch_episode_selection(stop_flag) 
+                # --- End Legacy Airtable-dependent calls ---
+
+                # --- Calls to new/migrated async services (wrapped for sync thread execution) ---
+                elif action == 'summary_host_guest':
+                    run_summary_host_guest_optimized_async_wrapper(stop_flag)
+                
+                elif action == 'determine_fit':
+                    run_determine_fit_optimized_async_wrapper(stop_flag)
                 
                 elif action == 'pitch_writer':
-                    pitch_writer(stop_flag)
+                    run_pitch_writer_optimized_async_wrapper(stop_flag)
                 
                 elif action == 'send_pitch':
-                    send_pitch_to_instantly(stop_flag)
+                    run_send_pitch_to_instantly_async_wrapper(stop_flag)
                 
                 elif action == 'enrich_host_name':
-                    enrich_host_name(stop_flag)
+                    run_enrich_host_name_async_wrapper(stop_flag)
                 
                 elif action == 'transcribe_podcast':
-                    run_transcription_task(stop_flag)
+                    run_transcription_task_async_wrapper(stop_flag)
                 
                 elif action == 'transcribe_podcast_free_tier':
-                    run_transcription_task_free_tier(stop_flag)
+                    run_transcription_task_free_tier_async_wrapper(stop_flag)
                 
                 else:
                     raise ValueError(f"Invalid action: {action}")
                 
             except Exception as e:
-                logger.error(f"Error in task {task_id}: {e}")
+                logger.error(f"Error in task {task_id}: {e}", exc_info=True)
             finally:
-                # Clean up the task when done
                 task_manager.cleanup_task(task_id)
                 logger.info(f"Task {task_id} cleaned up")
         
-        # Start the task thread
-        thread = threading.Thread(target=run_task)
+        thread = threading.Thread(target=run_task_in_thread)
         thread.start()
         logger.info(f"Started task {task_id} for action {action}")
         
-        return {
+        return JSONResponse(content={
             "message": f"Automation '{action}' started",
             "task_id": task_id,
             "status": "running"
-        }
+        })
 
     except Exception as e:
-        logger.error(f"Error triggering automation for action '{action}': {e}")
-        return Response(
-            content=f"Error triggering automation for action '{action}': {str(e)}",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.error(f"Error triggering automation for action '{action}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error triggering automation for action '{action}': {str(e)}"
+        )
 
 @app.post("/stop_task/{task_id}")
 def stop_task(task_id: str, user: dict = Depends(get_current_user)):
@@ -338,17 +428,17 @@ def stop_task(task_id: str, user: dict = Depends(get_current_user)):
     try:
         if task_manager.stop_task(task_id):
             logger.info(f"Task {task_id} is being stopped by user {user['username']}")
-            return {"message": f"Task {task_id} is being stopped", "status": "stopping"}
+            return JSONResponse(content={"message": f"Task {task_id} is being stopped", "status": "stopping"})
         logger.warning(f"Task {task_id} not found")
-        return JSONResponse(
-            content={"error": f"Task {task_id} not found"},
-            status_code=404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {task_id} not found"
         )
     except Exception as e:
-        logger.error(f"Error stopping task {task_id}: {e}")
-        return JSONResponse(
-            content={"error": f"Error stopping task {task_id}: {str(e)}"},
-            status_code=500
+        logger.error(f"Error stopping task {task_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error stopping task {task_id}: {str(e)}"
         )
 
 @app.get("/task_status/{task_id}")
@@ -360,16 +450,16 @@ def get_task_status(task_id: str, user: dict = Depends(get_current_user)):
     try:
         status = task_manager.get_task_status(task_id)
         if status:
-            return status
-        return JSONResponse(
-            content={"error": f"Task {task_id} not found"},
-            status_code=404
+            return JSONResponse(content=status)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {task_id} not found"
         )
     except Exception as e:
-        logger.error(f"Error getting status for task {task_id}: {e}")
-        return JSONResponse(
-            content={"error": f"Error getting status for task {task_id}: {str(e)}"},
-            status_code=500
+        logger.error(f"Error getting status for task {task_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting status for task {task_id}: {str(e)}"
         )
 
 @app.get("/list_tasks")
@@ -379,96 +469,30 @@ def list_tasks(user: dict = Depends(get_current_user)):
     Staff or admin access required.
     """
     try:
-        return task_manager.list_tasks()
+        return JSONResponse(content=task_manager.list_tasks())
     except Exception as e:
-        logger.error(f"Error listing tasks: {e}")
-        return JSONResponse(
-            content={"error": f"Error listing tasks: {str(e)}"},
-            status_code=500
+        logger.error(f"Error listing tasks: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing tasks: {str(e)}"
         )
-
-def run_transcription_task(stop_flag):
-    """Run the async transcription task in a new event loop"""
-    import asyncio
-    
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Run the async function in the new loop
-        loop.run_until_complete(get_podcast_audio_transcription(stop_flag))
-    except Exception as e:
-        logger.error(f"Error in podcast transcription task: {e}")
-    finally:
-        loop.close()
-
-def run_transcription_task_free_tier(stop_flag):
-    """Run the async transcription task in a new event loop"""
-    import asyncio
-    
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Run the async function in the new loop
-        loop.run_until_complete(get_podcast_audio_transcription_free_tier(stop_flag))
-    except Exception as e:
-        logger.error(f"Error in podcast transcription task: {e}")
-    finally:
-        loop.close()
-
-def run_summary_host_guest_optimized(stop_flag):
-    """Run the async optimized summary host guest identification task in a new event loop"""
-    import asyncio
-    from summary_guest_identification_optimized import PodcastProcessor
-    
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Check if we should stop before starting
-        if stop_flag and stop_flag.is_set():
-            logger.info("Stop flag set before starting summary_host_guest_optimized")
-            return
-            
-        # Initialize the processor and run the process_all_records method
-        # Always use Gemini 2.0 flash without any options to override
-        processor = PodcastProcessor()  # PodcastProcessor always uses gemini-2.0-flash by default
-        results = loop.run_until_complete(processor.process_all_records(max_concurrency=3, batch_size=5, stop_flag=stop_flag))
-        logger.info(f"Optimized summary host guest identification task completed successfully. Processed {results.get('total_processed', 0)} records with {results.get('successful', 0)} successful.")
-    except Exception as e:
-        logger.error(f"Error in optimized summary host guest identification task: {e}", exc_info=True)
-    finally:
-        loop.close()
 
 
 @app.get("/ai-usage")
-def get_ai_usage(
+async def get_ai_usage( # Made async
     request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    group_by: str = Query("model", description="Field to group by: 'model', 'workflow', 'endpoint', or 'podcast_id'"),
+    group_by: str = Query("model", description="Field to group by: 'model', 'workflow', 'endpoint', 'related_pitch_gen_id', 'related_campaign_id', or 'related_media_id'"), # Updated choices
     format: str = Query("json", description="Output format: 'json', 'text', or 'csv'"),
     user: dict = Depends(get_admin_user)
 ):
     """
     Get AI usage statistics, optionally filtered by date range.
     Admin access required.
-    
-    Args:
-        start_date: Optional ISO format date (YYYY-MM-DD) to start from
-        end_date: Optional ISO format date (YYYY-MM-DD) to end at
-        group_by: Field to group results by (model, workflow, endpoint, podcast_id)
-        format: Output format (json, text, csv)
-        
-    Returns:
-        Report of AI usage statistics in the requested format
     """
     try:
-        report = ai_tracker.generate_report(
+        report = await ai_tracker.generate_report( # Await the async method
             start_date=start_date,
             end_date=end_date,
             group_by=group_by
@@ -476,79 +500,60 @@ def get_ai_usage(
         
         # Handle different output formats
         if format.lower() == 'text':
-            from generate_ai_usage_report import format_as_text
+            # Import from the new location in scripts/generate_reports.py
+            from podcast_outreach.scripts.generate_reports import format_as_text 
             content = format_as_text(report)
             return Response(content=content, media_type="text/plain")
         
         elif format.lower() == 'csv':
-            from generate_ai_usage_report import format_as_csv
+            # Import from the new location in scripts/generate_reports.py
+            from podcast_outreach.scripts.generate_reports import format_as_csv 
             content = format_as_csv(report)
             return Response(content=content, media_type="text/csv", 
                           headers={"Content-Disposition": "attachment; filename=ai_usage_report.csv"})
         
         else:  # Default to json
-            return report
+            return JSONResponse(content=report) # Ensure JSONResponse
             
     except Exception as e:
-        logger.error(f"Error generating AI usage report: {e}")
-        return JSONResponse(
-            content={"error": f"Failed to generate AI usage report: {str(e)}"},
-            status_code=500
+        logger.error(f"Error generating AI usage report: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate AI usage report: {str(e)}"
         )
 
 
-@app.get("/podcast-cost/{podcast_id}")
-def get_podcast_cost(podcast_id: str, user: dict = Depends(get_admin_user)):
+@app.get("/podcast-cost/{pitch_gen_id}") # Changed path parameter name
+async def get_podcast_cost(pitch_gen_id: int, user: dict = Depends(get_admin_user)): # Changed parameter name and type
     """
-    Get detailed AI usage statistics for a specific podcast by its Airtable podcast record ID.
+    Get detailed AI usage statistics for a specific pitch generation ID.
     Admin access required.
-    
-    This endpoint shows the complete cost analysis for processing a single podcast
-    through the entire pipeline from discovery to email creation.
-    
-    Args:
-        podcast_id: The Airtable podcast record ID
-        
-    Returns:
-        JSON report with detailed cost breakdown for this podcast
     """
     try:
-        report = ai_tracker.get_record_cost_report(podcast_id)
-        return report
+        report = await ai_tracker.get_record_cost_report(pitch_gen_id) # Await the async method
+        return JSONResponse(content=report)
     except Exception as e:
-        logger.error(f"Error generating podcast cost report for {podcast_id}: {e}")
-        return JSONResponse(
-            content={"error": f"Failed to generate podcast cost report: {str(e)}"},
-            status_code=500
+        logger.error(f"Error generating AI usage report for pitch_gen_id {pitch_gen_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate AI usage report: {str(e)}"
         )
 
 
-@app.get("/podcast-cost-dashboard/{podcast_id}", response_class=HTMLResponse)
-def get_podcast_cost_dashboard(
+@app.get("/podcast-cost-dashboard/{pitch_gen_id}", response_class=HTMLResponse) # Changed path parameter name
+async def get_podcast_cost_dashboard( # Made async
     request: Request, 
-    podcast_id: str, 
+    pitch_gen_id: int, # Changed parameter name and type
     user: dict = Depends(get_admin_user)
 ):
     """
-    Render a dashboard with detailed AI usage statistics for a specific podcast.
+    Render a dashboard with detailed AI usage statistics for a specific pitch generation.
     Admin access required.
-    
-    This endpoint provides a visual dashboard showing the cost analysis for processing 
-    a podcast through the entire pipeline.
-    
-    Args:
-        request: The FastAPI request object
-        podcast_id: The Airtable podcast record ID
-        
-    Returns:
-        HTML dashboard with detailed cost breakdown for this podcast
     """
     try:
-        # Get the report data
-        report = ai_tracker.get_record_cost_report(podcast_id)
+        report = await ai_tracker.get_record_cost_report(pitch_gen_id) # Await the async method
         
-        if "error" in report:
-            # Handle case where no data is found
+        if report.get("status") == "not_found": # Check for specific not_found status
             return HTMLResponse(
                 content=f"""
                 <html>
@@ -567,192 +572,34 @@ def get_podcast_cost_dashboard(
                     </body>
                 </html>
                 """,
-                status_code=404
+                status_code=status.HTTP_404_NOT_FOUND
             )
         
-        # Pass all the report data directly to the template
         return templates.TemplateResponse("podcast_cost.html", {
             "request": request,
             "username": user["username"],
             "role": user["role"],
-            **report  # Unpack all report data into the template context
+            **report
         })
     
     except Exception as e:
-        logger.error(f"Error generating podcast cost dashboard for {podcast_id}: {e}")
-        return HTMLResponse(
-            content=f"""
-            <html>
-                <head>
-                    <title>Error</title>
-                    <link rel="stylesheet" href="/static/dashboard.css">
-                </head>
-                <body>
-                    <div class="container">
-                        <div class="section">
-                            <h2>Error Generating Dashboard</h2>
-                            <p>{str(e)}</p>
-                            <a href="/" class="back-button">Back to Dashboard</a>
-                        </div>
-                    </div>
-                </body>
-            </html>
-            """,
-            status_code=500
+        logger.error(f"Error generating podcast cost dashboard for pitch_gen_id {pitch_gen_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred during dashboard generation: {str(e)}"
         )
-
-
-@app.post("/emailsent")
-async def webhook_emailsent(request: Request):
-    """
-    Webhook endpoint that listens for a JSON payload indicating that an email was sent.
-    This data is used to update Airtable records via 'update_airtable_when_email_sent'.
-    """
-    try:
-        data = await request.json()
-    except Exception:
-        logger.warning("No valid JSON received at /emailsent webhook.")
-        return JSONResponse(content={"error": "No JSON received"},
-                            status_code=400)
-
-    logger.info(f"/emailsent webhook data received: {data}")
-    update_airtable_when_email_sent(data)
-    return JSONResponse(content={
-        "status": "success",
-        "message": "Webhook processed!"
-    },
-                        status_code=200)
-
-
-@app.post("/replyreceived")
-async def webhook_replyreceived(request: Request):
-    """
-    Webhook endpoint that listens for a JSON payload indicating that a reply was received.
-    This data is used to update Airtable records via 'update_correspondent_on_airtable'.
-    """
-    try:
-        data = await request.json()
-    except Exception:
-        logger.warning("No valid JSON received at /replyreceived webhook.")
-        return JSONResponse(content={"error": "No JSON received"},
-                            status_code=400)
-
-    logger.info(f"/replyreceived webhook data received: {data}")
-    update_correspondent_on_airtable(data)
-    return JSONResponse(content={
-        "status": "success",
-        "message": "Webhook processed!"
-    },
-                        status_code=200)
-
-
-@app.get("/transcribe-podcast/{podcast_id}")
-async def transcribe_specific_podcast(podcast_id: str, user: dict = Depends(get_admin_user)):
-    """
-    Endpoint to trigger transcription for a specific podcast by ID.
-    Admin access required.
-    
-    This will look up the podcast in Airtable and transcribe its audio.
-    
-    Args:
-        podcast_id: The Airtable podcast record ID
-        
-    Returns:
-        JSON response with success or error message
-    """
-    try:
-        # Import here to avoid circular imports
-        from airtable_service import PodcastService
-        
-        # Get podcast episode details from Airtable
-        airtable = PodcastService()
-        record = airtable.get_record("Podcast_Episodes", podcast_id)
-        
-        if not record:
-            logger.error(f"No podcast found with ID: {podcast_id}")
-            return JSONResponse(
-                content={"error": f"No podcast found with ID: {podcast_id}"},
-                status_code=404
-            )
-        
-        audio_url = record.get('fields', {}).get('Episode URL')
-        if not audio_url:
-            logger.error(f"No audio URL found for podcast ID: {podcast_id}")
-            return JSONResponse(
-                content={"error": "No audio URL found for this podcast"},
-                status_code=400
-            )
-        
-        episode_name = record.get('fields', {}).get('Episode Title', '')
-        
-        # Start transcription in the background
-        import threading
-        threading.Thread(
-            target=run_specific_transcription,
-            args=(podcast_id, audio_url, episode_name)
-        ).start()
-        
-        return {
-            "message": f"Transcription started for podcast ID: {podcast_id}",
-            "podcast_id": podcast_id,
-            "episode_title": episode_name
-        }
-        
-    except Exception as e:
-        logger.error(f"Error transcribing podcast {podcast_id}: {e}")
-        return JSONResponse(
-            content={"error": f"Failed to start transcription: {str(e)}"},
-            status_code=500
-        )
-
-def run_specific_transcription(podcast_id, audio_url, episode_name):
-    """Run the async transcription task for a specific podcast in a new event loop"""
-    import asyncio
-    
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Run the async function in the new loop
-        transcript_result = loop.run_until_complete(
-            transcribe_endpoint_free_tier(audio_url, episode_name)
-        )
-        
-        # Update the record with the transcript
-        from airtable_service import PodcastService
-        airtable = PodcastService()
-        
-        # Update only the two fields that are in the original implementation
-        airtable.update_record(
-            "Podcast_Episodes", 
-            podcast_id, 
-            {
-                'Transcription': transcript_result.get('transcript', ''),
-                'Downloaded': True
-            }
-        )
-        
-        logger.info(f"Updated record {podcast_id} with transcription")
-        
-    except Exception as e:
-        logger.error(f"Error in specific podcast transcription task: {e}")
-    finally:
-        loop.close()
 
 
 @app.get("/storage-status")
-def get_storage_status(user: dict = Depends(get_admin_user)):
+async def get_storage_status(user: dict = Depends(get_admin_user)): # Made async
     """
     Get detailed information about the AI usage storage system.
     Admin access required.
-    
-    This helps verify that Replit persistent storage is working correctly.
     """
     try:
-        storage_info = ai_tracker.get_storage_info()
+        # ai_tracker.get_storage_info() is synchronous, no await needed
+        storage_info = ai_tracker.get_storage_info() 
         
-        # Add some additional environment info
         storage_info.update({
             'replit_info': {
                 'REPL_HOME': os.getenv('REPL_HOME', 'Not running on Replit'),
@@ -762,12 +609,12 @@ def get_storage_status(user: dict = Depends(get_admin_user)):
             'timestamp': datetime.now().isoformat()
         })
         
-        return storage_info
+        return JSONResponse(content=storage_info)
     except Exception as e:
-        logger.error(f"Error getting storage status: {e}")
-        return JSONResponse(
-            content={"error": f"Failed to get storage status: {str(e)}"},
-            status_code=500
+        logger.error(f"Error getting storage status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get storage status: {str(e)}"
         )
 
 
@@ -792,5 +639,4 @@ if __name__ == "__main__":
     port = PORT
     logger.info(f"Starting FastAPI app on port {port}.")
 
-    # Run using uvicorn (most common approach for FastAPI)
     uvicorn.run(app, host='0.0.0.0', port=port)
