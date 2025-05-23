@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import uuid
 from datetime import datetime
 
@@ -17,7 +17,8 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
                     Expected keys: campaign_id (UUID), media_id (int), attempt_no (int),
                     match_score (float), matched_keywords (List[str]), outreach_type (str),
                     subject_line (str), body_snippet (str), pitch_gen_id (int),
-                    pitch_state (str), client_approval_status (str), created_by (str).
+                    pitch_state (str), client_approval_status (str), created_by (str),
+                    instantly_lead_id (Optional[str]).
 
     Returns:
         The created pitch record as a dictionary, or None on failure.
@@ -27,9 +28,10 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
         campaign_id, media_id, attempt_no, match_score, matched_keywords,
         score_evaluated_at, outreach_type, subject_line, body_snippet,
         send_ts, reply_bool, reply_ts, pitch_gen_id, placement_id,
-        pitch_state, client_approval_status, created_by, created_at
+        pitch_state, client_approval_status, created_by, created_at,
+        instantly_lead_id -- New column
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
     ) RETURNING *;
     """
     pool = await db_service_pg.get_db_pool()
@@ -54,7 +56,8 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
                 pitch_data.get('pitch_state', 'generated'),
                 pitch_data.get('client_approval_status', 'pending_review'),
                 pitch_data.get('created_by', 'system'),
-                pitch_data.get('created_at', datetime.utcnow())
+                pitch_data.get('created_at', datetime.utcnow()),
+                pitch_data.get('instantly_lead_id') # New value
             )
             if row:
                 logger.info(f"Pitch record created: {row['pitch_id']}")
@@ -106,4 +109,16 @@ async def update_pitch_in_db(pitch_id: int, update_data: Dict[str, Any]) -> Opti
             return dict(row) if row else None
         except Exception as e:
             logger.exception(f"Error updating pitch {pitch_id}: {e}")
+            raise
+
+async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dict[str, Any]]:
+    """Fetches a pitch record by its Instantly Lead ID."""
+    query = "SELECT * FROM pitches WHERE instantly_lead_id = $1;"
+    pool = await db_service_pg.get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, instantly_lead_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching pitch by Instantly Lead ID {instantly_lead_id}: {e}")
             raise
