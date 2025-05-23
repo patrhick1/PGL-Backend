@@ -7,38 +7,22 @@ import threading
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 
-# Import the task manager (moving it to services/tasks/manager.py first)
+# Import the task manager
 from podcast_outreach.services.tasks.manager import task_manager
 
 # Import dependencies for authentication
 from api.dependencies import get_current_user, get_admin_user
 
 # Import services/scripts that can be triggered (these should be async-ready)
-# NOTE: These imports assume the underlying services/scripts have been moved
-# and refactored to be callable directly and are async-compatible.
-# For example, 'angles_processor_pg' is now part of 'services.campaigns.angles_generator'.
-# 'fetch_episodes_to_pg' is now 'services.media.episode_sync'.
-# 'summary_guest_identification_optimized' is now 'services.media.analyzer'.
-# 'determine_fit_optimized' is now 'services.matches.scorer'.
-# 'pitch_writer_optimized' is now 'services.pitches.generator'.
-# 'send_pitch_to_instantly' is now 'services.pitches.sender'.
-# 'enrich_host_name' (from webhook_handler) is part of 'services.enrichment.enrichment_orchestrator'.
-# 'podcast_note_transcriber' and 'free_tier_episode_transcriber' are now 'services.media.transcriber'.
+from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG
+from podcast_outreach.services.media.episode_sync import MediaFetcher
+from podcast_outreach.services.media.transcriber import MediaTranscriber
+from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
+from podcast_outreach.services.pitches.generator import PitchGeneratorService
+from podcast_outreach.services.pitches.sender import PitchSenderService
 
-# For now, I'll import the services/scripts as they are in the new structure,
-# assuming their main execution functions are async and can be called.
-# If they still have synchronous wrappers, those wrappers should be called in asyncio.to_thread.
-
-from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG # Assuming this is the main entry
-from podcast_outreach.services.media.episode_sync import MediaFetcher # For episode sync
-from podcast_outreach.services.media.analyzer import PodcastAnalyzer # Assuming this is the new class
-from podcast_outreach.services.matches.scorer import MatchScorer # Assuming this is the new class
-from podcast_outreach.services.pitches.generator import PitchGeneratorService # For pitch generation
-from podcast_outreach.services.pitches.sender import PitchSenderService # For sending pitches
-from podcast_outreach.services.media.transcriber import MediaTranscriber # For transcription
-from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator # For host enrichment
-
-import db_service_pg # For DB pool init/close in background tasks
+# Import modular DB connection for background tasks
+from podcast_outreach.database.connection import init_db_pool, close_db_pool 
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +39,9 @@ def _run_async_task_in_new_loop(coro):
         loop.close()
 
 # Define wrappers for background tasks that need to run in a separate thread
-# These wrappers will initialize services and call their async methods.
-# This is a temporary pattern if FastAPI's background tasks or a proper queue (Celery)
-# are not yet fully integrated.
 def _run_angles_bio_generation_task(campaign_id_str: str, stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool() # Ensure DB pool is available in this thread
+        await init_db_pool() # Ensure DB pool is available in this thread
         processor = AnglesProcessorPG() # Re-initialize per thread/task
         try:
             logger.info(f"Background task: Generating angles/bio for campaign {campaign_id_str}")
@@ -70,124 +51,102 @@ def _run_angles_bio_generation_task(campaign_id_str: str, stop_flag: threading.E
             logger.error(f"Background task: Error generating angles/bio for {campaign_id_str}: {e}", exc_info=True)
         finally:
             processor.cleanup()
-            await db_service_pg.close_db_pool() # Close DB pool for this thread
+            await close_db_pool() # Close DB pool for this thread
     _run_async_task_in_new_loop(_task())
 
 def _run_episode_sync_task(stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool()
+        await init_db_pool()
         fetcher = MediaFetcher()
         try:
             logger.info("Background task: Running episode sync.")
-            # This should ideally call a method that fetches media to sync and processes them
-            # For now, it will call the main orchestrator from episode_sync.py
+            # This should call the main orchestrator from episode_sync.py
+            # which itself manages DB pool, but we ensure it's initialized for this thread.
             from podcast_outreach.services.media.episode_sync import main_episode_sync_orchestrator
-            await main_episode_sync_orchestrator() # This function already manages its own DB pool
+            await main_episode_sync_orchestrator() 
             logger.info("Background task: Episode sync completed.")
         except Exception as e:
             logger.error(f"Background task: Error during episode sync: {e}", exc_info=True)
         finally:
-            await db_service_pg.close_db_pool()
+            await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
 def _run_transcription_task(stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool()
+        await init_db_pool()
         transcriber = MediaTranscriber()
         try:
             logger.info("Background task: Running episode transcription.")
-            # This should call a method that fetches episodes to transcribe and processes them
+            # This should call the main orchestrator from transcribe_episodes.py
+            # which itself manages DB pool, but we ensure it's initialized for this thread.
             from podcast_outreach.scripts.transcribe_episodes import main as transcribe_main_script
-            await transcribe_main_script() # This function already manages its own DB pool
+            await transcribe_main_script() 
             logger.info("Background task: Episode transcription completed.")
         except Exception as e:
             logger.error(f"Background task: Error during episode transcription: {e}", exc_info=True)
         finally:
-            await db_service_pg.close_db_pool()
+            await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
-def _run_summary_host_guest_task(stop_flag: threading.Event):
+def _run_enrichment_orchestrator_task(stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool()
-        analyzer = PodcastAnalyzer() # Assuming PodcastAnalyzer is the new class
-        try:
-            logger.info("Background task: Running summary/host/guest analysis.")
-            # This should call a method that fetches records and processes them
-            # For now, assuming it processes all eligible records
-            await analyzer.process_all_records(stop_flag=stop_flag) # Assuming it takes stop_flag
-            logger.info("Background task: Summary/host/guest analysis completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during summary/host/guest analysis: {e}", exc_info=True)
-        finally:
-            await db_service_pg.close_db_pool()
-    _run_async_task_in_new_loop(_task())
+        await init_db_pool()
+        # The orchestrator itself takes services as args, so we need to initialize them here.
+        # This is a simplified initialization for a background task.
+        from podcast_outreach.services.ai.gemini_client import GeminiService # Assuming this is the new path
+        from podcast_outreach.services.enrichment.social_discovery_service import SocialDiscoveryService
+        from podcast_outreach.services.enrichment.data_merger_service import DataMergerService
+        from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
+        from podcast_outreach.services.enrichment.quality_service import QualityService
 
-def _run_determine_fit_task(stop_flag: threading.Event):
-    async def _task():
-        await db_service_pg.init_db_pool()
-        scorer = MatchScorer() # Assuming MatchScorer is the new class
         try:
-            logger.info("Background task: Running determine fit analysis.")
-            # This should call a method that fetches records and processes them
-            await scorer.process_all_records(stop_flag=stop_flag) # Assuming it takes stop_flag
-            logger.info("Background task: Determine fit analysis completed.")
+            gemini_service = GeminiService()
+            social_discovery_service = SocialDiscoveryService()
+            data_merger = DataMergerService()
+            enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
+            quality_service = QualityService()
+            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service)
+
+            logger.info("Background task: Running full enrichment pipeline.")
+            await orchestrator.run_pipeline_once() # This runs all enrichment steps
+            logger.info("Background task: Full enrichment pipeline completed.")
         except Exception as e:
-            logger.error(f"Background task: Error during determine fit analysis: {e}", exc_info=True)
+            logger.error(f"Background task: Error during full enrichment pipeline: {e}", exc_info=True)
         finally:
-            await db_service_pg.close_db_pool()
+            await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
 def _run_pitch_writer_task(stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool()
-        generator = PitchGeneratorService() # Assuming PitchGeneratorService is the new class
+        await init_db_pool()
+        generator = PitchGeneratorService()
         try:
-            logger.info("Background task: Running pitch writer.")
-            # This should call a method that fetches records and processes them
-            # The PitchGeneratorService.generate_pitch_for_match is for a single match_id.
-            # A dedicated script or orchestrator function is needed to find all matches needing pitches.
+            logger.info("Background task: Running pitch writer (generating pitches for pending matches).")
+            # This needs a method in PitchGeneratorService to find and process all pending matches
             # For now, this is a placeholder.
-            # If the old pitch_writer_optimized.py had a batch processing function, it should be moved here.
-            # Assuming a method like `generate_pitches_for_pending_matches` exists.
-            # await generator.generate_pitches_for_pending_matches(stop_flag=stop_flag)
+            # Example: await generator.generate_pitches_for_all_pending_matches(stop_flag=stop_flag)
             logger.warning("Pitch writer background task is a placeholder. Needs a method to find and process pending pitches.")
             logger.info("Background task: Pitch writer completed (placeholder).")
         except Exception as e:
             logger.error(f"Background task: Error during pitch writer: {e}", exc_info=True)
         finally:
-            await db_service_pg.close_db_pool()
+            await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
 def _run_send_pitch_task(stop_flag: threading.Event):
     async def _task():
-        await db_service_pg.init_db_pool()
-        sender = PitchSenderService() # Assuming PitchSenderService is the new class
+        await init_db_pool()
+        sender = PitchSenderService()
         try:
-            logger.info("Background task: Running send pitch.")
-            # This should call a method that fetches pitches ready to send and dispatches them.
-            # Assuming a method like `send_all_ready_pitches` exists.
-            # await sender.send_all_ready_pitches(stop_flag=stop_flag)
+            logger.info("Background task: Running send pitch (sending all ready pitches).")
+            # This needs a method in PitchSenderService to find and send all ready pitches
+            # Example: await sender.send_all_ready_pitches(stop_flag=stop_flag)
             logger.warning("Send pitch background task is a placeholder. Needs a method to find and send ready pitches.")
             logger.info("Background task: Send pitch completed (placeholder).")
         except Exception as e:
             logger.error(f"Background task: Error during send pitch: {e}", exc_info=True)
         finally:
-            await db_service_pg.close_db_pool()
-    _run_async_task_in_new_loop(_task())
-
-def _run_enrich_host_name_task(stop_flag: threading.Event):
-    async def _task():
-        await db_service_pg.init_db_pool()
-        orchestrator = EnrichmentOrchestrator() # Assuming EnrichmentOrchestrator handles this
-        try:
-            logger.info("Background task: Running host name enrichment.")
-            # This should trigger the relevant part of the enrichment orchestrator
-            await orchestrator.run_pipeline_once() # This runs all enrichment steps, including host enrichment
-            logger.info("Background task: Host name enrichment completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during host name enrichment: {e}", exc_info=True)
-        finally:
-            await db_service_pg.close_db_pool()
+            await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
 
@@ -208,12 +167,11 @@ async def trigger_automation_api(
         "generate_bio_angles": _run_angles_bio_generation_task,
         "fetch_podcast_episodes": _run_episode_sync_task,
         "transcribe_podcast": _run_transcription_task,
-        "summary_host_guest": _run_summary_host_guest_task,
-        "determine_fit": _run_determine_fit_task,
+        "enrichment_pipeline": _run_enrichment_orchestrator_task, # New action for full enrichment
         "pitch_writer": _run_pitch_writer_task,
         "send_pitch": _run_send_pitch_task,
-        "enrich_host_name": _run_enrich_host_name_task,
-        # Add other specific tasks here
+        # Removed: summary_host_guest, determine_fit, enrich_host_name as they are part of enrichment_pipeline
+        # Removed: mipr_podcast_search as it's legacy/replaced by discovery service
     }
 
     if action not in task_map:
