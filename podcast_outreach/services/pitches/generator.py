@@ -486,32 +486,3 @@ class PitchGeneratorService:
             result["message"] = f"An unhandled error occurred during pitch generation: {str(e)}"
             result["error_details"] = str(e)
             return result
-
-# Example of how to run this service (e.g., from a FastAPI endpoint)
-async def main_generate_pitch(match_id_to_process: int):
-    generator = PitchGeneratorService()
-    try:
-        # Example template name, in a real scenario this might come from user input or campaign settings
-        result = await generator.generate_pitch_for_match(match_id_to_process, "friendly_intro_template")
-        print("Pitch Generation Result:", result)
-    except Exception as e:
-        logger.error(f"Error running main_generate_pitch: {e}")
-
-if __name__ == "__main__":
-    # This is a placeholder for testing. Replace with an actual match ID from your DB.
-    # You'd need to have a campaign, media, episodes, and an approved match suggestion in your DB.
-    test_match_id = 1 # Replace with an actual match_id from your database
-
-    if test_match_id == 1:
-        print("Please replace '1' with an actual match_id from your DB for testing.")
-        print("Ensure you have a campaign, media, episodes, and an approved match suggestion linked.")
-    else:
-        # Ensure DB pool is initialized for standalone script execution
-        import db_service_pg
-        async def run_test():
-            await db_service_pg.init_db_pool()
-            try:
-                await main_generate_pitch(test_match_id)
-            finally:
-                await db_service_pg.close_db_pool()
-        asyncio.run(run_test())
