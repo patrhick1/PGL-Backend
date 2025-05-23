@@ -110,3 +110,55 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
             except Exception as e:
                 logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
                 raise
+
+async def fetch_episodes_for_transcription(limit: int = 20) -> list[Dict[str, Any]]:
+    """Return episodes that need transcription."""
+    query = """
+    SELECT episode_id, media_id, episode_url, title
+    FROM episodes
+    WHERE transcribe = TRUE AND (transcript IS NULL OR transcript = '')
+    ORDER BY created_at ASC
+    LIMIT $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception("Error fetching episodes for transcription: %s", e)
+            return []
+
+async def update_episode_transcription(
+    episode_id: int,
+    transcript: str,
+    summary: str | None = None,
+    embedding: list[float] | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Update an episode with its transcript and optional summary/embedding."""
+    set_clauses = ["transcript = $1", "downloaded = TRUE", "updated_at = NOW()"]
+    values = [transcript]
+    idx = 2
+    if summary is not None:
+        set_clauses.append(f"ai_episode_summary = ${idx}")
+        values.append(summary)
+        idx += 1
+    if embedding is not None:
+        set_clauses.append(f"embedding = ${idx}")
+        values.append(embedding)
+        idx += 1
+    query = f"""
+    UPDATE episodes
+    SET {', '.join(set_clauses)}
+    WHERE episode_id = ${idx}
+    RETURNING *;
+    """
+    values.append(episode_id)
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, *values)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception("Error updating transcription for episode %s: %s", episode_id, e)
+            return None
