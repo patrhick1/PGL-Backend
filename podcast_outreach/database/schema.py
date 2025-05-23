@@ -42,12 +42,12 @@ def create_timestamp_update_trigger_function(conn):
     """Creates or replaces a function to update a timestamp column to NOW()."""
     trigger_func_sql = """
     CREATE OR REPLACE FUNCTION update_modified_column()
-    RETURNS TRIGGER AS $$
+    RETURNS TRIGGER AS $
     BEGIN
        NEW.updated_at = NOW();
        RETURN NEW;
     END;
-    $$ language 'plpgsql';
+    $ language 'plpgsql';
     """
     try:
         execute_sql(conn, trigger_func_sql)
@@ -237,7 +237,8 @@ def create_campaigns_table(conn):
         end_date DATE,
         goal_note TEXT,
         media_kit_url TEXT,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        instantly_campaign_id TEXT -- New column for Instantly campaign ID
     );
     CREATE INDEX IF NOT EXISTS idx_campaigns_person_id ON CAMPAIGNS (person_id);
     CREATE INDEX IF NOT EXISTS idx_campaigns_embedding_hnsw ON CAMPAIGNS USING hnsw (embedding vector_cosine_ops);
@@ -373,7 +374,7 @@ def create_pitches_table(conn):
         send_ts TIMESTAMPTZ,
         reply_bool BOOLEAN,
         reply_ts TIMESTAMPTZ,
-
+        instantly_lead_id TEXT, -- New column for Instantly Lead ID
         pitch_gen_id INTEGER REFERENCES pitch_generations(pitch_gen_id) ON DELETE SET NULL,
         placement_id INTEGER REFERENCES placements(placement_id) ON DELETE SET NULL, -- Renamed from booking_id
         pitch_state VARCHAR(100),
@@ -385,6 +386,7 @@ def create_pitches_table(conn):
     CREATE INDEX IF NOT EXISTS idx_pitches_media_id ON pitches (media_id);
     CREATE INDEX IF NOT EXISTS idx_pitches_pitch_gen_id ON pitches (pitch_gen_id);
     CREATE INDEX IF NOT EXISTS idx_pitches_placement_id ON pitches (placement_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pitches_instantly_lead_id ON pitches (instantly_lead_id) WHERE instantly_lead_id IS NOT NULL; -- Ensure uniqueness
     """
     execute_sql(conn, sql_statement)
     print("Table PITCHES created/ensured.")
@@ -525,4 +527,4 @@ def create_all_tables():
 if __name__ == "__main__":
     print("Starting database schema creation process...")
     create_all_tables()
-    print("Schema creation process finished.") 
+    print("Schema creation process finished.")
