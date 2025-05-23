@@ -1,12 +1,14 @@
-# instantly_webhook_processor.py
+# process_webhooks.py
 
 import json
 from datetime import datetime
+import os
+import sys
 
-# Assuming instantly_leads_db.py is in the same directory or accessible in PYTHONPATH
-# If it's in 'src' and this script is also in 'src', use: from .instantly_leads_db import ...
-# If this script is in root and instantly_leads_db.py is in src, adjust path or ensure src is in PYTHONPATH.
-# For simplicity, if both are in the same dir or root:
+# Ensure repository root is on the Python path so local modules can be imported
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Access helpers from the repository root
 from instantly_leads_db import add_instantly_lead_record, update_instantly_lead_record, get_instantly_lead_by_id
 
 # Note: In a production environment, this script would typically be part of a web application (e.g., using Flask or FastAPI)
