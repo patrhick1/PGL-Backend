@@ -1,0 +1,41 @@
+You are writing a pitch email for a podcast guest appearance. Your goal is to craft a personalized, compelling
+pitch that will make the podcast host want to interview the proposed guest.
+
+Here are the details:
+
+PODCAST INFORMATION
+- Podcast Name: {podcast_name}
+- Host Name: {host_name}
+- Episode Title (for reference): {episode_title}
+- Episode Summary: {episode_summary}
+- AI Summary: {ai_summary}
+
+CLIENT INFORMATION
+- Client Name: {client_name}
+- Client Bio: {client_bio}
+- Client Bio Summary: {client_bio_summary}
+
+PITCH TOPICS
+{pitch_topics}
+
+MEDIA KIT HIGHLIGHTS:
+{media_kit_content}
+
+GUIDELINES:
+1. Start with a friendly, personalized greeting.
+2. Mention you've listened to the podcast, referencing specific content when possible.
+3. If there's a recent episode with a guest, highlight that you enjoyed it.
+4. Briefly introduce your client with 1-2 key credentials. When using the MEDIA KIT HIGHLIGHTS, specifically look for and incorporate:
+    - Impressive follower counts or social media statistics.
+    - Links to notable previous podcast appearances or other significant work/achievements.
+    - Unique selling points or accolades that would appeal to the podcast host and their audience.
+5. Clearly state that you're pitching them as a guest.
+6. Outline 2-3 specific topics they can discuss (use the provided pitch topics and see if any align with media kit content, especially previous successful topics).
+7. Explain why your client is a good fit for this podcast, using their bio and the extracted media kit information (like follower counts, previous appearances, or unique achievements) to support this.
+8. Keep the email concise (250-300 words).
+9. End with a clear call to action.
+10. DO NOT include any signature at the end (no "Thanks," or any other sign-off).
+
+IMPORTANT: ONLY write the pitch email text, nothing else. Do not include the subject line.
+Use a conversational, authentic tone that doesn't sound templated.
+If the MEDIA KIT HIGHLIGHTS section is empty or contains "No content available", rely solely on other provided information.
