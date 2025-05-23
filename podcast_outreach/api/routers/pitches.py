@@ -12,10 +12,11 @@ from api.schemas.pitch_schemas import PitchGenerationRequest, PitchGenerationRes
 from podcast_outreach.services.pitches.generator import PitchGeneratorService
 from podcast_outreach.services.pitches.sender import PitchSenderService
 
-# Import db_service_pg (assuming it's still at project root for now)
-import db_service_pg
+# Import modular queries
 from podcast_outreach.database.queries import pitches as pitch_queries
 from podcast_outreach.database.queries import pitch_generations as pitch_gen_queries
+from podcast_outreach.database.queries import campaigns as campaign_queries # For validation
+from podcast_outreach.database.queries import media as media_queries # For validation
 
 # Import dependencies for authentication
 from api.dependencies import get_current_user, get_admin_user
@@ -36,7 +37,6 @@ async def generate_pitch_for_match_api(
     """
     generator_service = PitchGeneratorService()
     try:
-        # The generate_pitch_for_match method is async
         result = await generator_service.generate_pitch_for_match(
             match_id=request_data.match_id,
             pitch_template_name=request_data.pitch_template_name
@@ -62,10 +62,9 @@ async def approve_pitch_generation_api(
     Staff or Admin access required.
     """
     try:
-        # The approve_pitch_generation method is async
         approved_pitch_gen = await pitch_gen_queries.approve_pitch_generation(
             pitch_gen_id=pitch_gen_id,
-            reviewer_id=user["username"] # Pass the username of the approver
+            reviewer_id=user["username"]
         )
         if not approved_pitch_gen:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation with ID {pitch_gen_id} not found or could not be approved.")
@@ -88,7 +87,6 @@ async def send_pitch_api(
     """
     sender_service = PitchSenderService()
     try:
-        # Need to get pitch_gen_id from pitch_id first
         pitch_record = await pitch_queries.get_pitch_by_id(pitch_id)
         if not pitch_record:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch record with ID {pitch_id} not found.")
@@ -97,12 +95,10 @@ async def send_pitch_api(
         if not pitch_gen_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Pitch record {pitch_id} is not linked to a pitch generation.")
 
-        # Check if the pitch is ready to send
         pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
         if not pitch_gen_record or not pitch_gen_record.get('send_ready_bool'):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Pitch generation {pitch_gen_id} is not marked as send-ready.")
 
-        # The send_pitch_to_instantly method is async
         result = await sender_service.send_pitch_to_instantly(pitch_gen_id=pitch_gen_id)
         
         if not result.get("success"):
@@ -121,7 +117,7 @@ async def list_pitch_generations_api(skip: int = 0, limit: int = 100, user: dict
     Lists all pitch generation records with pagination. Staff or Admin access required.
     """
     try:
-        generations_from_db = await db_service_pg.get_all_pitch_generations_from_db(skip=skip, limit=limit)
+        generations_from_db = await pitch_gen_queries.get_all_pitch_generations_from_db(skip=skip, limit=limit)
         return [PitchGenerationInDB(**pg) for pg in generations_from_db]
     except Exception as e:
         logger.exception(f"Error in list_pitch_generations_api: {e}")
@@ -147,7 +143,7 @@ async def list_pitches_api(skip: int = 0, limit: int = 100, user: dict = Depends
     Lists all pitch records with pagination. Staff or Admin access required.
     """
     try:
-        pitches_from_db = await db_service_pg.get_all_pitches_from_db(skip=skip, limit=limit)
+        pitches_from_db = await pitch_queries.get_all_pitches_from_db(skip=skip, limit=limit)
         return [PitchInDB(**p) for p in pitches_from_db]
     except Exception as e:
         logger.exception(f"Error in list_pitches_api: {e}")
