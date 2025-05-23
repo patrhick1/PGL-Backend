@@ -10,6 +10,7 @@ from api.schemas.match_schemas import MatchSuggestionCreate, MatchSuggestionUpda
 
 # Import db_service_pg (assuming it's now at database/queries/db_service_pg.py)
 import db_service_pg # Original path, adjust if moved to database/queries/
+from podcast_outreach.database.queries import match_suggestions as match_queries
 
 # Import dependencies (for user auth)
 from api.dependencies import get_current_user, get_admin_user
@@ -100,4 +101,17 @@ async def delete_match_suggestion_api(match_id: int, user: dict = Depends(get_ad
         return # Returns 204 No Content on success
     except Exception as e:
         logger.exception(f"Error in delete_match_suggestion_api for ID {match_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/{match_id}/approve", response_model=MatchSuggestionInDB, summary="Approve Match Suggestion")
+async def approve_match_suggestion_api(match_id: int, user: dict = Depends(get_current_user)):
+    """Approve a match suggestion and create a pitch review task."""
+    try:
+        approved_match = await match_queries.approve_match_and_create_pitch_task(match_id)
+        if not approved_match:
+            raise HTTPException(status_code=404, detail=f"Match suggestion with ID {match_id} not found.")
+        return MatchSuggestionInDB(**approved_match)
+    except Exception as e:
+        logger.exception(f"Error in approve_match_suggestion_api for ID {match_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
