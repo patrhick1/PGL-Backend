@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any
 
-from podcast_outreach.services.media.episode_sync import MediaFetcher
+from podcast_outreach.services.media.podcast_fetcher import MediaFetcher
 from podcast_outreach.database.queries import review_tasks
 
 logger = logging.getLogger(__name__)
