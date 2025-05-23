@@ -20,8 +20,8 @@ from podcast_outreach.database.connection import init_db_pool, close_db_pool # <
 # Import new DB query functions for campaign status
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import pitches as pitch_queries
-from podcast_outreach.database.queries import placements as placement_queries # Assuming this will be created in Phase 7
-from podcast_outreach.database.queries import people as people_queries # Assuming this exists for client name
+from podcast_outreach.database.queries import placements as placement_queries # Now exists
+from podcast_outreach.database.queries import people as people_queries # Now exists
 
 logger = get_logger(__name__)
 
@@ -268,7 +268,6 @@ class CampaignStatusReporter:
             all_placements.extend(placements_for_campaign)
 
         # Define the statuses to track and how they map from DB fields
-        # This mapping needs to be carefully defined based on your `pitches` and `placements` table statuses
         STATUS_MAPPING = {
             "Messages sent": {"table": "pitches", "field": "send_ts", "status_field": "pitch_state", "status_value": "sent"},
             "Total replies": {"table": "pitches", "field": "reply_ts", "status_field": "reply_bool", "status_value": True},
@@ -458,13 +457,10 @@ async def main_reports_async():
 
     args = parser.parse_args()
 
-    await db_service_pg.init_db_pool() # Initialize DB pool once for all reports
+    await init_db_pool() # Initialize DB pool once for all reports
 
     try:
         if args.report_type == "ai_usage":
-            # Re-use the main_ai_usage_async logic
-            # Need to manually pass args to the function as it expects them from parse_arguments
-            # For simplicity, let's just call the logic directly.
             report_args = argparse.Namespace(
                 start_date=args.start_date,
                 end_date=args.end_date,
@@ -508,7 +504,7 @@ async def main_reports_async():
             logger.info("Campaign status report generation completed.")
 
     finally:
-        await db_service_pg.close_db_pool() # Close DB pool after all reports are done
+        await close_db_pool() # Close DB pool after all reports are done
 
 if __name__ == "__main__":
     asyncio.run(main_reports_async())
