@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from podcast_outreach.services.media.fetcher import MediaFetcher
+from podcast_outreach.services.media.episode_sync import MediaFetcher
 import db_service_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
