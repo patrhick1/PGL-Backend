@@ -1,9 +1,45 @@
 import os
 from dotenv import load_dotenv
 
+# Load environment variables from a .env file if present
 load_dotenv()
- 
-# Database
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", 5432))
-# Add other config variables here 
+
+# Logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Database connection settings
+DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "localhost"))
+DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
+DB_NAME = os.getenv("PGDATABASE", "podcasts")
+DB_USER = os.getenv("PGUSER", "postgres")
+DB_PASSWORD = os.getenv("PGPASSWORD", "")
+
+# Third-party API keys
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API")
+LISTEN_NOTES_API_KEY = os.getenv("LISTEN_NOTES_API_KEY")
+PODSCAN_API_KEY = os.getenv("PODSCANAPI")
+INSTANTLY_API_KEY = os.getenv("INSTANTLY_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+# Google services
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+GOOGLE_PODCAST_INFO_FOLDER_ID = os.getenv("GOOGLE_PODCAST_INFO_FOLDER_ID")
+PGL_AI_DRIVE_FOLDER_ID = os.getenv("PGL_AI_DRIVE_FOLDER_ID")
+
+# Feature flags
+ENABLE_LLM_TEST_DASHBOARD = os.getenv("ENABLE_LLM_TEST_DASHBOARD", "false").lower() == "true"
+
+# Worker/concurrency settings
+EPISODE_SYNC_MAX_CONCURRENT_TASKS = int(os.getenv("EPISODE_SYNC_MAX_CONCURRENT_TASKS", "10"))
+GEMINI_TRANSCRIPTION_MAX_RETRIES = int(os.getenv("GEMINI_TRANSCRIPTION_MAX_RETRIES", "3"))
+GEMINI_TRANSCRIPTION_RETRY_DELAY = int(os.getenv("GEMINI_TRANSCRIPTION_RETRY_DELAY", "5"))
+GEMINI_API_CONCURRENCY = int(os.getenv("GEMINI_API_CONCURRENCY", "10"))
+DOWNLOAD_CONCURRENCY = int(os.getenv("DOWNLOAD_CONCURRENCY", "5"))
+TRANSCRIBER_MAX_EPISODES_PER_BATCH = int(os.getenv("TRANSCRIBER_MAX_EPISODES_PER_BATCH", "20"))
+FFMPEG_PATH = os.getenv("FFMPEG_CUSTOM_PATH")
+FFPROBE_PATH = os.getenv("FFPROBE_CUSTOM_PATH")
+
+# Default server port
+PORT = int(os.getenv("PORT", 3000))
