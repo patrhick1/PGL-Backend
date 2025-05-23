@@ -48,6 +48,7 @@ class PitchInDB(BaseModel):
     send_ts: Optional[datetime]
     reply_bool: Optional[bool]
     reply_ts: Optional[datetime]
+    instantly_lead_id: Optional[str] = None # Added for Instantly Lead ID
     pitch_gen_id: Optional[int]
     placement_id: Optional[int]
     pitch_state: Optional[str]
