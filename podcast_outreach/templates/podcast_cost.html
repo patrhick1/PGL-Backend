@@ -1,1 +1,134 @@
-<html><head><title>Podcast Cost</title></head><body><h1>Podcast Cost</h1></body></html> 
+<!-- podcast_outreach/templates/podcast_cost.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Usage Report - Pitch Generation {{ pitch_gen_id }}</title>
+    <link rel="stylesheet" href="/static/dashboard.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f7f6;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 20px auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        h1, h2 {
+            color: #2c3e50;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .summary-box {
+            background-color: #e8f5e9;
+            border-left: 5px solid #4CAF50;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .summary-box p {
+            margin: 5px 0;
+            font-size: 1.1em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .back-button {
+            display: inline-block;
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            text-decoration: none;
+            margin-top: 20px;
+        }
+        .back-button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Usage Report for Pitch Generation {{ pitch_gen_id }}</h1>
+
+        <div class="summary-box">
+            <p><strong>Total API Calls:</strong> {{ total_calls | format_number }}</p>
+            <p><strong>Total Tokens (In + Out):</strong> {{ total_tokens | format_number }}</p>
+            <p><strong>Total Cost:</strong> ${{ '%.4f' % total_cost }}</p>
+        </div>
+
+        <h2>Breakdown by Workflow Stage</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Workflow Stage</th>
+                    <th>Calls</th>
+                    <th>Tokens</th>
+                    <th>Cost</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for stage, stats in workflow_stages.items() %}
+                <tr>
+                    <td>{{ stage }}</td>
+                    <td>{{ stats.calls | format_number }}</td>
+                    <td>{{ stats.total_tokens | format_number }}</td>
+                    <td>${{ '%.4f' % stats.cost }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <h2>Timeline of Operations</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Workflow</th>
+                    <th>Model</th>
+                    <th>Tokens</th>
+                    <th>Cost</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in timeline %}
+                <tr>
+                    <td>{{ entry.timestamp | format_datetime }}</td>
+                    <td>{{ entry.workflow }}</td>
+                    <td>{{ entry.model }}</td>
+                    <td>{{ entry.total_tokens | format_number }}</td>
+                    <td>${{ '%.4f' % entry.cost }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <a href="/" class="back-button">Back to Dashboard</a>
+    </div>
+</body>
+</html>
