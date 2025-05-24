@@ -21,7 +21,7 @@ from podcast_outreach.integrations.listen_notes import ListenNotesAPIClient
 from podcast_outreach.integrations.podscan import PodscanAPIClient
 from podcast_outreach.utils.exceptions import APIClientError, RateLimitError
 from podcast_outreach.services.ai.utils import generate_genre_ids
-from src.data_processor import parse_date # Still from src, needs to be moved
+from podcast_outreach.utils.data_processor import parse_date
  
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO,

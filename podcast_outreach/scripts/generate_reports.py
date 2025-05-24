@@ -161,7 +161,7 @@ class CampaignStatusReporter:
     """
     def __init__(self):
         # GoogleSheetsService is still needed for writing reports
-        from src.google_sheets_service import GoogleSheetsService # Assuming this path is correct
+        from podcast_outreach.integrations.google_sheets import GoogleSheetsService
         self.sheets_service = GoogleSheetsService()
 
         # Google Drive/Sheets Config (from original campaign_status_tracker.py)
