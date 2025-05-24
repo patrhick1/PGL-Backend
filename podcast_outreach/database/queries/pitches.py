@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 # Assuming db_service_pg.py is the central connection pool manager
-import db_service_pg
+from podcast_outreach.database.connection import get_db_pool
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
     ) RETURNING *;
     """
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
@@ -70,7 +70,7 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
 async def get_pitch_by_id(pitch_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a pitch record by its ID."""
     query = "SELECT * FROM pitches WHERE pitch_id = $1;"
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, pitch_id)
@@ -101,7 +101,7 @@ async def update_pitch_in_db(pitch_id: int, update_data: Dict[str, Any]) -> Opti
     query = f"UPDATE pitches SET {set_clause_str} WHERE pitch_id = ${idx} RETURNING *;"
     values.append(pitch_id)
 
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *values)
@@ -114,7 +114,7 @@ async def update_pitch_in_db(pitch_id: int, update_data: Dict[str, Any]) -> Opti
 async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dict[str, Any]]:
     """Fetches a pitch record by its Instantly Lead ID."""
     query = "SELECT * FROM pitches WHERE instantly_lead_id = $1;"
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, instantly_lead_id)
@@ -126,7 +126,7 @@ async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dic
 async def get_pitch_by_pitch_gen_id(pitch_gen_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a pitch record by its associated pitch_gen_id."""
     query = "SELECT * FROM pitches WHERE pitch_gen_id = $1;"
-    pool = await db_service_pg.get_db_pool()
+    pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, pitch_gen_id)
