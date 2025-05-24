@@ -1,4 +1,4 @@
-# app/google_docs_service.py
+# podcast_outreach/integrations/google_docs_service.py
 
 import os
 from google.oauth2 import service_account
