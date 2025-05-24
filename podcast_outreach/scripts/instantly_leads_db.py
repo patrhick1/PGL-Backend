@@ -419,13 +419,13 @@ if __name__ == "__main__":
     else:
         print(f"\n--- Starting Lead Backup for {len(campaign_ids_to_backup)} Campaign(s) ---")
         try:
-            from src.external_api_service import InstantlyAPI 
+            from podcast_outreach.integrations.instantly import InstantlyAPIClient
         except ImportError:
-            print("Error: Could not import InstantlyAPI from src.external_api_service.")
-            print("Please ensure the file path is correct and the script is run from the PGL project root.")
+            print("Error: Could not import InstantlyAPIClient from podcast_outreach.integrations.instantly.")
+            print("Please ensure the integrations package is available and the script is run from the project root.")
             exit()
 
-        instantly_service = InstantlyAPI()
+        instantly_service = InstantlyAPIClient()
         total_leads_fetched_all_campaigns = 0
         total_leads_added_all_campaigns = 0
         total_leads_failed_all_campaigns = 0
