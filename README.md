@@ -27,3 +27,19 @@ podcast_outreach/
 ```
 
 Legacy Airtable code and miscellaneous scripts were relocated according to the migration guide. Refer to the documents above for full details and next steps in the transition.
+
+## Frontend
+
+A separate React application lives in the `frontend/` directory. It communicates with the FastAPI backend purely through JSON endpoints provided by the routers.
+
+Development workflow:
+
+```bash
+# start FastAPI backend
+uvicorn podcast_outreach.main:app --reload
+
+# in another terminal start the React dev server
+cd frontend && npm run dev
+```
+
+The React app reads the API base URL from a .env file (see frontend/.env.example). Production builds can be generated with `npm run build` and served as static files via FastAPI if desired.
