@@ -9,8 +9,7 @@ from datetime import datetime
 import html
 import re
 
-# Assuming src.exceptions is still valid or moved
-from src.exceptions import APIClientError 
+from podcast_outreach.utils.exceptions import APIClientError
 from podcast_outreach.logging_config import get_logger
 
 logger = get_logger(__name__)
