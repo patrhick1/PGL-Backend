@@ -26,6 +26,9 @@ PUBLIC_PATHS = [
     "/favicon.ico",
     "/api-status",
     "/webhooks", # Webhooks should be public for external services to hit them
+    "/docs", # Allow access to Swagger UI documentation
+    "/redoc", # Allow access to ReDoc documentation
+    "/openapi.json", # Allow access to the OpenAPI specification file
 ]
 
 # Paths that only admins can access
