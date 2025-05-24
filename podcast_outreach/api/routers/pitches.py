@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 # Import schemas
-from api.schemas.pitch_schemas import PitchGenerationRequest, PitchGenerationResponse, PitchInDB, PitchGenerationInDB
+from ..schemas.pitch_schemas import PitchGenerationRequest, PitchGenerationResponse, PitchInDB, PitchGenerationInDB
 
 # Import services
 from podcast_outreach.services.pitches.generator import PitchGeneratorService
@@ -19,7 +19,7 @@ from podcast_outreach.database.queries import campaigns as campaign_queries # Fo
 from podcast_outreach.database.queries import media as media_queries # For validation
 
 # Import dependencies for authentication
-from api.dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user
 
 import logging
 logger = logging.getLogger(__name__)

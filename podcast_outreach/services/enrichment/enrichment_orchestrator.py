@@ -23,7 +23,7 @@ from podcast_outreach.database.queries.episodes import (
 
 # Import services
 from .enrichment_agent import EnrichmentAgent
-from .quality_service import QualityService
+from .quality_score import QualityService # Corrected import path and filename
 
 # Import modular DB connection for main execution block
 from podcast_outreach.database.connection import init_db_pool, close_db_pool 
@@ -217,10 +217,10 @@ if __name__ == '__main__':
 
         try:
             from podcast_outreach.services.ai.gemini_client import GeminiService
-            from podcast_outreach.services.enrichment.social_discovery_service import SocialDiscoveryService
-            from podcast_outreach.services.enrichment.data_merger_service import DataMergerService
+            from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
+            from podcast_outreach.services.enrichment.data_merger import DataMergerService
             from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
-            from podcast_outreach.services.enrichment.quality_service import QualityService
+            from podcast_outreach.services.enrichment.quality_score import QualityService
 
             gemini_service = GeminiService()
             social_discovery_service = SocialDiscoveryService()

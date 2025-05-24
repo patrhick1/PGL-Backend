@@ -1,6 +1,6 @@
 # podcast_outreach/api/routers/ai_usage.py
 
-from fastapi import APIRouter, HTTPException, Depends, status, Query, Response
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Response, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates # For HTML dashboard
 from typing import Optional, Dict, Any, List

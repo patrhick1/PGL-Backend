@@ -7,13 +7,13 @@ import logging
 import asyncpg # For specific asyncpg exceptions
 
 # Import schemas
-from api.schemas.person_schemas import PersonCreate, PersonUpdate, PersonInDB, PersonSetPassword
+from ..schemas.person_schemas import PersonCreate, PersonUpdate, PersonInDB, PersonSetPassword
 
 # Import modular queries
 from podcast_outreach.database.queries import people as people_queries
 
 # Import dependencies (for password hashing and user auth)
-from api.dependencies import get_current_user, get_admin_user, hash_password
+from ..dependencies import get_current_user, get_admin_user, hash_password
 
 logger = logging.getLogger(__name__)
 

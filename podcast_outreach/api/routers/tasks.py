@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Query
 from podcast_outreach.services.tasks.manager import task_manager
 
 # Import dependencies for authentication
-from api.dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user
 
 # Import services/scripts that can be triggered (these should be async-ready)
 from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG
@@ -94,17 +94,17 @@ def _run_enrichment_orchestrator_task(stop_flag: threading.Event):
         # The orchestrator itself takes services as args, so we need to initialize them here.
         # This is a simplified initialization for a background task.
         from podcast_outreach.services.ai.gemini_client import GeminiService # Assuming this is the new path
-        from podcast_outreach.services.enrichment.social_discovery_service import SocialDiscoveryService
-        from podcast_outreach.services.enrichment.data_merger_service import DataMergerService
+        from podcast_outreach.services.enrichment.discovery import DiscoveryService
+        from podcast_outreach.services.enrichment.data_merger import DataMerger
         from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
-        from podcast_outreach.services.enrichment.quality_service import QualityService
+        from podcast_outreach.services.enrichment.quality_score import QualityScoreService
 
         try:
             gemini_service = GeminiService()
-            social_discovery_service = SocialDiscoveryService()
-            data_merger = DataMergerService()
+            social_discovery_service = DiscoveryService()
+            data_merger = DataMerger()
             enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
-            quality_service = QualityService()
+            quality_service = QualityScoreService()
             orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service)
 
             logger.info("Background task: Running full enrichment pipeline.")

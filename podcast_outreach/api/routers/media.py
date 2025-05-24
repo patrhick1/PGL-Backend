@@ -6,13 +6,13 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 # Import schemas
-from api.schemas.media_schemas import MediaCreate, MediaUpdate, MediaInDB
+from ..schemas.media_schemas import MediaCreate, MediaUpdate, MediaInDB
 
 # Import modular queries
 from podcast_outreach.database.queries import media as media_queries
 
 # Import dependencies for authentication
-from api.dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user
 
 import logging
 logger = logging.getLogger(__name__)

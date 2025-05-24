@@ -7,7 +7,7 @@ from datetime import datetime, date
 import logging
 
 # Import schemas
-from api.schemas.campaign_schemas import CampaignCreate, CampaignUpdate, CampaignInDB, AnglesBioTriggerResponse
+from ..schemas.campaign_schemas import CampaignCreate, CampaignUpdate, CampaignInDB, AnglesBioTriggerResponse
 
 # Import modular queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
@@ -17,7 +17,7 @@ from podcast_outreach.database.queries import people as people_queries # Needed 
 from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG # Corrected import path
 
 # Import dependencies for authentication
-from api.dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 import logging
 
 # Import schemas
-from api.schemas.match_schemas import MatchSuggestionCreate, MatchSuggestionUpdate, MatchSuggestionInDB
+from ..schemas.match_schemas import MatchSuggestionCreate, MatchSuggestionUpdate, MatchSuggestionInDB
 
 # Import modular queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
@@ -17,7 +17,7 @@ from podcast_outreach.database.queries import media as media_queries # For valid
 from podcast_outreach.services.enrichment.discovery import DiscoveryService
 
 # Import dependencies for authentication
-from api.dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user
 
 logger = logging.getLogger(__name__)
 
