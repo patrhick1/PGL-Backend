@@ -245,7 +245,7 @@ For batch processing or one-off tasks, refer to `podcast_outreach/scripts/`:
 - **Improved Error Handling**: Standardize and enhance error logging and user feedback across all layers.
 - **Frontend UI Development**: Expand the internal dashboard to provide full visibility and control over all new PostgreSQL-backed workflows (e.g., pitch review UI, detailed campaign analytics).
 - **Queueing System**: Implement a message queue (e.g., Celery, RabbitMQ) for long-running tasks to decouple them from the FastAPI request-response cycle.
-- **Refine instantly_leads.py and instantly_leads_db.py**: These currently use psycopg2 directly and are more akin to legacy scripts. They should be refactored to use the asyncpg connection pool and integrated fully into the new database/queries structure or removed if their functionality is entirely superseded.
+- **Refine instantly_leads_db.py**: The `instantly_leads.py` module now uses the shared asyncpg pool. The standalone backup script still relies on psycopg2 and should be updated or removed if superseded by API endpoints.
 - **Advanced Reporting**: Develop more sophisticated reporting features, potentially leveraging the status_history table for granular historical campaign performance analysis.
 
 ---

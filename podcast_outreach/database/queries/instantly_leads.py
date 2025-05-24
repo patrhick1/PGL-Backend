@@ -1,37 +1,17 @@
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import DictCursor, Json
-import os
-from dotenv import load_dotenv
-import json # For handling potential JSON string conversion if needed, though psycopg2 handles dicts for JSONB well.
+"""Instantly leads backup queries using the asyncpg connection pool."""
 
-# Load environment variables from .env file at the start
-load_dotenv()
+import logging
+from typing import Any, Dict, List, Optional
 
-# --- Database Connection ---
-def get_db_connection():
-    """Establishes a connection to the PostgreSQL database."""
-    try:
-        conn = psycopg2.connect(
-            dbname=os.environ.get("PGDATABASE"),
-            user=os.environ.get("PGUSER"),
-            password=os.environ.get("PGPASSWORD"),
-            host=os.environ.get("PGHOST"),
-            port=os.environ.get("PGPORT")
-        )
-        return conn
-    except psycopg2.OperationalError as e:
-        print(f"Error connecting to the database: {e}")
-        print("Please ensure PostgreSQL is running and connection details are correct.")
-        print("Ensure environment variables are set: PGDATABASE, PGUSER, PGPASSWORD, PGHOST, PGPORT")
-        return None
+from podcast_outreach.database.queries.connection import get_db_pool
+
+logger = logging.getLogger(__name__)
+
+# No synchronous connections here. All interactions go through the asyncpg pool.
 
 # --- Table Creation ---
-def create_clientsinstantlyleads_table():
-    """Creates the clientsinstantlyleads table in the database if it doesn't exist."""
-    conn = get_db_connection()
-    if not conn:
-        return
+async def create_clientsinstantlyleads_table() -> None:
+    """Creates the clientsinstantlyleads table if it doesn't exist."""
 
     create_table_sql = """
     CREATE TABLE IF NOT EXISTS clientsinstantlyleads (
@@ -94,47 +74,46 @@ def create_clientsinstantlyleads_table():
     # upload_method: 'manual', 'api', 'website-visitor'
     # esp_code: e.g., 0:InQueue, 1:Google, 2:Microsoft, 1000:NotFound
 
-    create_email_index_sql = "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_email ON clientsinstantlyleads (email);"
-    create_campaign_index_sql = "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_campaign_id ON clientsinstantlyleads (campaign_id);"
-    create_ts_created_index_sql = "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_timestamp_created ON clientsinstantlyleads (timestamp_created);"
-    create_payload_gin_index_sql = "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_payload_gin ON clientsinstantlyleads USING GIN (payload);"
+    create_email_index_sql = (
+        "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_email ON clientsinstantlyleads (email);"
+    )
+    create_campaign_index_sql = (
+        "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_campaign_id ON clientsinstantlyleads (campaign_id);"
+    )
+    create_ts_created_index_sql = (
+        "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_timestamp_created ON clientsinstantlyleads (timestamp_created);"
+    )
+    create_payload_gin_index_sql = (
+        "CREATE INDEX IF NOT EXISTS idx_clientsinstantlyleads_payload_gin ON clientsinstantlyleads USING GIN (payload);"
+    )
 
-    try:
-        with conn.cursor() as cur:
-            cur.execute(create_table_sql)
-            cur.execute(create_email_index_sql)
-            cur.execute(create_campaign_index_sql)
-            cur.execute(create_ts_created_index_sql)
-            cur.execute(create_payload_gin_index_sql)
-            conn.commit()
-            print("clientsinstantlyleads table checked/created successfully with indexes.")
-    except psycopg2.Error as e:
-        print(f"Error creating clientsinstantlyleads table or indexes: {e}")
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(create_table_sql)
+            await conn.execute(create_email_index_sql)
+            await conn.execute(create_campaign_index_sql)
+            await conn.execute(create_ts_created_index_sql)
+            await conn.execute(create_payload_gin_index_sql)
+            logger.info("clientsinstantlyleads table checked/created successfully with indexes.")
+        except Exception as e:
+            logger.error(f"Error creating clientsinstantlyleads table or indexes: {e}")
+            raise
 
 # --- CRUD Operations ---
 
-def add_instantly_lead_record(lead_api_data):
-    """Adds a new lead record from Instantly API to the clientsinstantlyleads table.
-    lead_api_data should be a dictionary from the Instantly API response for a single lead.
-    Returns the lead_id of the newly inserted record, or None on failure.
-    """
-    conn = get_db_connection()
-    if not conn:
+async def add_instantly_lead_record(lead_api_data: Dict[str, Any]) -> Optional[str]:
+    """Adds a new lead record from Instantly API to the backup table."""
+
+    if not lead_api_data.get("id"):
+        logger.warning("Lead data missing 'id' field.")
         return None
 
     # Map API data to table columns
     # Note: API keys are often camelCase or similar, table columns are snake_case
     # Ensure all required fields are present or handle missing data appropriately (e.g. default to None)
     
-    # It's crucial that lead_api_data['id'] exists and is a valid UUID string for the PRIMARY KEY.
-    if not lead_api_data.get('id'):
-        print("Error: Lead data is missing 'id' field.")
-        return None
+
 
     insert_data = {
         "lead_id": lead_api_data.get("id"),
@@ -193,193 +172,116 @@ def add_instantly_lead_record(lead_api_data):
     # However, for a backup, explicit NULLs for missing data from API might be desired.
     # The .get(key) method already returns None if key is not found, which psycopg2 handles as NULL.
 
-    columns = insert_data.keys()
-    # sql.Placeholder(col) creates named placeholders like %(col_name)s
-    # So the second argument to execute should be a dictionary.
-    values_placeholders = [sql.Placeholder(col) for col in columns] 
-    
-    insert_query = sql.SQL("INSERT INTO clientsinstantlyleads ({}) VALUES ({}) RETURNING lead_id").format(
-        sql.SQL(', ').join(map(sql.Identifier, columns)),
-        sql.SQL(', ').join(values_placeholders)
+    columns = list(insert_data.keys())
+    placeholders = [f"${i}" for i in range(1, len(columns) + 1)]
+    values = [insert_data[col] for col in columns]
+    insert_query = (
+        f"INSERT INTO clientsinstantlyleads ({', '.join(columns)}) "
+        f"VALUES ({', '.join(placeholders)}) RETURNING lead_id;"
     )
-    
-    # Prepare the dictionary for execute, wrapping dicts for JSONB columns with Json()
-    execute_dict = {}
-    for col, value in insert_data.items():
-        if col in ["status_summary", "payload", "status_summary_subseq"] and isinstance(value, dict):
-            execute_dict[col] = Json(value)
-        else:
-            execute_dict[col] = value
 
-    try:
-        with conn.cursor() as cur:
-            cur.execute(insert_query, execute_dict) # Pass the dictionary directly
-            inserted_lead_id = cur.fetchone()[0]
-            conn.commit()
-            # print(f"Lead record {inserted_lead_id} added to clientsinstantlyleads successfully.")
-            return inserted_lead_id
-    except psycopg2.IntegrityError as e:
-        print(f"Integrity error adding lead {lead_api_data.get('id')}: {e}")
-        print("This might be due to a duplicate lead_id if not using ON CONFLICT.")
-        if conn:
-            conn.rollback()
-        return None
-    except psycopg2.Error as e:
-        print(f"Error adding lead {lead_api_data.get('id')} to backup: {e}")
-        if conn:
-            conn.rollback()
-        return None
-    finally:
-        if conn:
-            conn.close()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            lead_id = await conn.fetchval(insert_query, *values)
+            return str(lead_id) if lead_id else None
+        except Exception as e:
+            logger.error(f"Error adding lead {lead_api_data.get('id')} to backup: {e}")
+            return None
 
-def update_instantly_lead_record(lead_id: str, update_data: dict):
-    """Updates an existing lead record in the clientsinstantlyleads table.
-    
-    Args:
-        lead_id (str): The UUID string of the lead to update.
-        update_data (dict): A dictionary where keys are column names (snake_case)
-                              and values are their new values.
-                              
-    Returns:
-        bool: True if the update was successful and at least one row was affected, False otherwise.
-    """
-    conn = get_db_connection()
-    if not conn:
-        return False
+async def update_instantly_lead_record(lead_id: str, update_data: Dict[str, Any]) -> bool:
+    """Updates an existing lead record in the clientsinstantlyleads table."""
+
     if not update_data:
-        print("No update data provided.")
+        logger.warning("No update data provided.")
         return False
 
-    # Prepare the SET clause dynamically
-    set_clauses = []
-    processed_update_data = {}
-
+    set_clauses: List[str] = []
+    values: List[Any] = []
+    idx = 1
     for key, value in update_data.items():
-        # Ensure the key is a valid column name to prevent SQL injection if keys come from untrusted source
-        # For now, assuming keys are controlled and map to actual column names.
-        set_clauses.append(sql.SQL("{} = {}").format(sql.Identifier(key), sql.Placeholder(key)))
-        if key in ["status_summary", "payload", "status_summary_subseq"] and isinstance(value, dict):
-            processed_update_data[key] = Json(value)
-        else:
-            processed_update_data[key] = value
-    
+        set_clauses.append(f"{key} = ${idx}")
+        values.append(value)
+        idx += 1
+
     if not set_clauses:
-        print("No valid fields to update.")
         return False
 
-    # Add the lead_id to the dictionary for the WHERE clause placeholder
-    processed_update_data['lead_id_where'] = lead_id
-
-    update_query = sql.SQL("UPDATE clientsinstantlyleads SET {} WHERE lead_id = {} ").format(
-        sql.SQL(', ').join(set_clauses),
-        sql.Placeholder('lead_id_where')
+    update_query = (
+        f"UPDATE clientsinstantlyleads SET {', '.join(set_clauses)} "
+        f"WHERE lead_id = ${idx};"
     )
+    values.append(lead_id)
 
-    try:
-        with conn.cursor() as cur:
-            cur.execute(update_query, processed_update_data)
-            updated_rows = cur.rowcount # Number of rows affected
-            conn.commit()
-            if updated_rows > 0:
-                print(f"Lead record {lead_id} updated successfully. {updated_rows} row(s) affected.")
-                return True
-            else:
-                print(f"Lead record {lead_id} not found or no data changed. {updated_rows} row(s) affected.")
-                return False # Could be True if no change is also success, but False if not found.
-    except psycopg2.Error as e:
-        print(f"Error updating lead {lead_id}: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(update_query, *values)
+            updated_rows = int(result.split(' ')[1]) if result.startswith('UPDATE ') else 0
+            return updated_rows > 0
+        except Exception as e:
+            logger.error(f"Error updating lead {lead_id}: {e}")
+            return False
 
-def get_instantly_lead_by_id(lead_id: str):
-    """Fetches a single lead record from clientsinstantlyleads by its lead_id."""
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT * FROM clientsinstantlyleads WHERE lead_id = %s;", (lead_id,))
-            record = cur.fetchone()
-            return dict(record) if record else None
-    except psycopg2.Error as e:
-        print(f"Error fetching lead by ID {lead_id}: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
+async def get_instantly_lead_by_id(lead_id: str) -> Optional[Dict[str, Any]]:
+    """Fetches a single lead record by its lead_id."""
 
-def get_all_instantly_leads_for_campaign(campaign_id: str, limit: int = None, offset: int = 0):
-    """Fetches all lead records for a specific campaign_id, with optional pagination."""
-    conn = get_db_connection()
-    if not conn:
-        return []
-    try:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            query = "SELECT * FROM clientsinstantlyleads WHERE campaign_id = %s ORDER BY timestamp_created DESC"
-            params = [campaign_id]
-            if limit is not None:
-                query += " LIMIT %s OFFSET %s"
-                params.extend([limit, offset])
-            query += ";"
-            cur.execute(query, tuple(params))
-            records = [dict(row) for row in cur.fetchall()]
-            return records
-    except psycopg2.Error as e:
-        print(f"Error fetching leads for campaign {campaign_id}: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
+    query = "SELECT * FROM clientsinstantlyleads WHERE lead_id = $1;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, lead_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error fetching lead by ID {lead_id}: {e}")
+            return None
 
-def get_all_instantly_leads(limit: int = None, offset: int = 0):
-    """Fetches all lead records from clientsinstantlyleads, with optional pagination."""
-    conn = get_db_connection()
-    if not conn:
-        return []
-    try:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            query = "SELECT * FROM clientsinstantlyleads ORDER BY timestamp_created DESC"
-            params = []
-            if limit is not None:
-                query += " LIMIT %s OFFSET %s"
-                params.extend([limit, offset])
-            query += ";"
-            cur.execute(query, tuple(params) if params else None)
-            records = [dict(row) for row in cur.fetchall()]
-            return records
-    except psycopg2.Error as e:
-        print(f"Error fetching all leads: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
+async def get_all_instantly_leads_for_campaign(campaign_id: str, limit: int | None = None, offset: int = 0) -> List[Dict[str, Any]]:
+    """Fetches lead records for a specific campaign."""
 
-def delete_instantly_lead_record(lead_id: str):
-    """Deletes a lead record from clientsinstantlyleads by its lead_id."""
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM clientsinstantlyleads WHERE lead_id = %s;", (lead_id,))
-            deleted_rows = cur.rowcount
-            conn.commit()
-            if deleted_rows > 0:
-                print(f"Lead record {lead_id} deleted successfully.")
-                return True
-            else:
-                print(f"Lead record {lead_id} not found for deletion.")
-                return False
-    except psycopg2.Error as e:
-        print(f"Error deleting lead {lead_id}: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
+    query = "SELECT * FROM clientsinstantlyleads WHERE campaign_id = $1 ORDER BY timestamp_created DESC"
+    params: List[Any] = [campaign_id]
+    if limit is not None:
+        query += " LIMIT $2 OFFSET $3"
+        params.extend([limit, offset])
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching leads for campaign {campaign_id}: {e}")
+            return []
+
+async def get_all_instantly_leads(limit: int | None = None, offset: int = 0) -> List[Dict[str, Any]]:
+    """Fetches all lead records from the backup table."""
+
+    query = "SELECT * FROM clientsinstantlyleads ORDER BY timestamp_created DESC"
+    params: List[Any] = []
+    if limit is not None:
+        query += " LIMIT $1 OFFSET $2"
+        params.extend([limit, offset])
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching all leads: {e}")
+            return []
+
+async def delete_instantly_lead_record(lead_id: str) -> bool:
+    """Deletes a lead record by its lead_id."""
+
+    query = "DELETE FROM clientsinstantlyleads WHERE lead_id = $1;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(query, lead_id)
+            deleted_rows = int(result.split(" ")[1]) if result.startswith("DELETE ") else 0
+            return deleted_rows > 0
+        except Exception as e:
+            logger.error(f"Error deleting lead {lead_id}: {e}")
+            return False
