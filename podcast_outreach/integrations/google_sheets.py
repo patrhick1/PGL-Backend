@@ -1,4 +1,4 @@
-# src/google_sheets_service.py
+# podcast_outreach/integrations/google_sheets.py
 
 import os
 from google.oauth2 import service_account
