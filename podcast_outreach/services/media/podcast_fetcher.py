@@ -16,11 +16,11 @@ from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_tasks_queries
 from podcast_outreach.database.connection import get_db_pool, close_db_pool # For main function
 
-from src.openai_service import OpenAIService # Still from src, needs to be moved
+from podcast_outreach.services.ai.openai_client import OpenAIService
 from podcast_outreach.integrations.listen_notes import ListenNotesAPIClient
 from podcast_outreach.integrations.podscan import PodscanAPIClient
 from podcast_outreach.utils.exceptions import APIClientError, RateLimitError
-from src.mipr_podcast import generate_genre_ids # Still from src, needs to be moved
+from podcast_outreach.services.ai.utils import generate_genre_ids
 from src.data_processor import parse_date # Still from src, needs to be moved
  
 # --- Configuration ---

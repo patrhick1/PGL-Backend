@@ -5,6 +5,7 @@ from src.external_api_service import ListenNotesAPIClient, PodscanAPIClient # RE
 from src.data_processor import DataProcessor, parse_date
 from datetime import datetime, timedelta
 from src.file_manipulation import read_txt_file
+from podcast_outreach.services.ai.utils import generate_genre_ids
 import threading
 from typing import Optional
 import time
@@ -14,43 +15,6 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-genre_id_prompt = read_txt_file(
-    r"prompts/podcast_search/listennotes_genre_id_prompt.txt")
-
-def generate_genre_ids(openai_service, run_keyword, record_id=None):
-    """
-    Helper function to generate genre IDs using OpenAI.
-    
-    Args:
-        openai_service: Instance of OpenAIService
-        run_keyword: The keyword to search for
-        record_id: Optional record ID for tracking
-        
-    Returns:
-        str: Comma-separated genre IDs
-    """
-    logger.info("Calling OpenAI to generate genre IDs...")
-    
-    prompt = f"""
-    User Search Query:
-    "{run_keyword}"
-
-    Provide the list of genre IDs as per the example above. 
-    Return the response in JSON format with an 'ids' key containing an array of integers.
-    Do not include backticks i.e ```json
-    Example JSON Output Format: {{"ids": "139,144,157,99,90,77,253,69,104,84"}}
-    """
-    
-    genre_ids = openai_service.create_chat_completion(
-        system_prompt=genre_id_prompt,
-        prompt=prompt,
-        workflow="generate_genre_ids",
-        parse_json=True,
-        json_key="ids",
-        podcast_id=record_id  # Pass the record_id as podcast_id for tracking
-    )
-    logger.info(f"Genre IDs generated: {genre_ids}")
-    return genre_ids
 
 def process_mipr_podcast_search_listennotes(record_id, stop_flag: Optional[threading.Event] = None):
     # Initialize services
