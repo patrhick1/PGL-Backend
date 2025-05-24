@@ -10,9 +10,16 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 
-# Import modular queries
-from podcast_outreach.database.queries import media as media_queries
-from podcast_outreach.database.queries import episodes as episode_queries
+# Import specific query functions from the modular queries packages
+from podcast_outreach.database.queries.media import (
+    get_media_for_enrichment,
+    update_media_enrichment_data,
+    update_media_quality_score,
+    count_transcribed_episodes_for_media,
+)
+from podcast_outreach.database.queries.episodes import (
+    flag_recent_episodes_for_transcription,
+)
 
 # Import services
 from .enrichment_agent import EnrichmentAgent
@@ -46,7 +53,7 @@ class EnrichmentOrchestrator:
     async def _enrich_media_batch(self):
         """Fetches a batch of media, enriches them, and updates the database."""
         logger.info("Starting media enrichment batch...")
-        media_to_enrich = await media_queries.get_media_for_enrichment(
+        media_to_enrich = await get_media_for_enrichment(
             batch_size=ORCHESTRATOR_CONFIG["media_enrichment_batch_size"],
             enriched_before_hours=ORCHESTRATOR_CONFIG["media_enrichment_interval_hours"]
         )
@@ -76,7 +83,7 @@ class EnrichmentOrchestrator:
                     if 'rss_feed_url' in update_data:
                         update_data['rss_url'] = update_data.pop('rss_feed_url')
 
-                    updated_media = await media_queries.update_media_enrichment_data(media_id, update_data)
+                    updated_media = await update_media_enrichment_data(media_id, update_data)
                     if updated_media:
                         logger.info(f"Successfully enriched and updated media_id: {media_id}")
                         enriched_count += 1
@@ -96,9 +103,9 @@ class EnrichmentOrchestrator:
         """Identifies media that might need new episodes flagged for transcription."""
         logger.info("Checking for media items to flag new episodes for transcription...")
         
-        media_to_check = await media_queries.get_media_for_enrichment(
-            batch_size=100, 
-            enriched_before_hours=24 * 30 
+        media_to_check = await get_media_for_enrichment(
+            batch_size=100,
+            enriched_before_hours=24 * 30
         )
         if not media_to_check:
             logger.info("No media items found for transcription flagging check.")
@@ -109,7 +116,7 @@ class EnrichmentOrchestrator:
         for media_item in media_to_check:
             media_id = media_item['media_id']
             try:
-                newly_flagged_count = await episode_queries.flag_recent_episodes_for_transcription(
+                newly_flagged_count = await flag_recent_episodes_for_transcription(
                     media_id, ORCHESTRATOR_CONFIG["max_transcription_flags_per_media"]
                 )
                 if newly_flagged_count > 0:
@@ -124,7 +131,7 @@ class EnrichmentOrchestrator:
         """Fetches media, checks transcribed episode counts, and updates quality scores."""
         logger.info("Starting quality score update batch...")
         
-        media_for_scoring = await media_queries.get_media_for_enrichment(
+        media_for_scoring = await get_media_for_enrichment(
             batch_size=ORCHESTRATOR_CONFIG["media_enrichment_batch_size"],
             enriched_before_hours=ORCHESTRATOR_CONFIG["quality_score_update_interval_days"] * 24
         )
@@ -140,7 +147,7 @@ class EnrichmentOrchestrator:
         for media_data_dict in media_for_scoring:
             media_id = media_data_dict.get('media_id')
             try:
-                transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id)
+                transcribed_count = await count_transcribed_episodes_for_media(media_id)
                 
                 if transcribed_count >= ORCHESTRATOR_CONFIG["quality_score_min_transcribed_episodes"]:
                     from podcast_outreach.models.podcast_profile_models import EnrichedPodcastProfile
@@ -154,7 +161,7 @@ class EnrichmentOrchestrator:
                     quality_score_val, _ = self.quality_service.calculate_podcast_quality_score(profile_for_scoring)
                     
                     if quality_score_val is not None:
-                        success = await media_queries.update_media_quality_score(media_id, quality_score_val)
+                        success = await update_media_quality_score(media_id, quality_score_val)
                         if success:
                             logger.info(f"Successfully updated quality score for media_id: {media_id} to {quality_score_val}")
                             updated_scores_count += 1
