@@ -197,3 +197,21 @@ Dedicated client wrappers for external APIs:
 - **`legacy/`**: Temporary holding area for Airtable-dependent code during refactoring
 
 This structure provides a solid foundation for long-term growth while maintaining code quality and developer productivity.
+
+### Frontend
+
+A dedicated React app lives at the repository root in the `frontend/` directory. It communicates with the FastAPI backend over HTTP.
+
+```
+frontend/
+├── public/
+├── src/
+│   ├── components/
+│   ├── pages/
+│   │   ├── Internal/
+│   │   └── Client/
+│   └── services/
+├── .env
+├── vite.config.js
+└── package.json
+```
