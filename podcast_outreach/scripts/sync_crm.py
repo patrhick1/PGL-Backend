@@ -7,14 +7,9 @@ import re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-# Attempt to import AttioClient from the src directory
-try:
-    from src.attio_service import AttioClient
-    from src.external_api_service import InstantlyAPI # Import InstantlyAPI
-except ImportError as e:
-    print(f"Error: Could not import required services: {e}")
-    print("Please ensure src/attio_service.py and src/external_api_service.py exist and the script is run from the workspace root, or adjust import paths.")
-    exit(1)
+# Import client classes from the new integrations package
+from podcast_outreach.integrations.attio import AttioClient
+from podcast_outreach.integrations.instantly import InstantlyAPIClient
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,7 +19,7 @@ load_dotenv()
 # INSTANTLY_API_KEY = os.getenv('INSTANTLY_API_KEY') 
 # ATTIO_API_KEY = os.getenv('ATTIO_ACCESS_TOKEN')
 
-# INSTANTLY_BASE_URL = 'https://api.instantly.ai/api/v2/emails' # Now handled by InstantlyAPI class
+# INSTANTLY_BASE_URL = 'https://api.instantly.ai/api/v2/emails' # Now handled by InstantlyAPIClient class
 ATTIO_PERSON_OBJECT_SLUG = 'people' # As per user's object name
 ATTIO_EMAIL_THREAD_ATTRIBUTE_SLUG = 'email_thread' # Slug for the email thread attribute in Attio
 
@@ -163,7 +158,7 @@ def format_email_interaction(email_data: dict) -> str:
     return thread_entry
 
 # --- Main Logic ---
-def fetch_instantly_emails(instantly_client: InstantlyAPI, target_date: datetime, max_emails_to_fetch: int = None) -> list:
+def fetch_instantly_emails(instantly_client: InstantlyAPIClient, target_date: datetime, max_emails_to_fetch: int = None) -> list:
     """Fetches emails from Instantly API using InstantlyAPI client, filtering by date.
     Optionally, fetching can stop once max_emails_to_fetch is reached.
     """
@@ -227,7 +222,7 @@ def fetch_instantly_emails(instantly_client: InstantlyAPI, target_date: datetime
     logger.info(f"Finished fetching Instantly emails. Total checked: {fetched_count}. Total matching date criteria: {len(filtered_emails)}.")
     return filtered_emails
 
-def process_and_store_in_attio(emails: list, attio_client: AttioClient, instantly_client: InstantlyAPI, processed_ids: set):
+def process_and_store_in_attio(emails: list, attio_client: AttioClient, instantly_client: InstantlyAPIClient, processed_ids: set):
     """Processes emails and stores them as notes in Attio."""
     new_persons_created_for_notes = 0
     new_notes_created = 0
@@ -448,8 +443,8 @@ if __name__ == "__main__":
     logger.info("--- Starting Instantly to Attio Sync Script ---")
     try:
         attio_client = AttioClient()
-        instantly_client = InstantlyAPI()
-        logger.info("AttioClient and InstantlyAPI client initialized successfully.")
+        instantly_client = InstantlyAPIClient()
+        logger.info("AttioClient and InstantlyAPIClient initialized successfully.")
     except ValueError as e: 
         logger.error(f"Failed to initialize API clients: {e}")
         exit(1)
