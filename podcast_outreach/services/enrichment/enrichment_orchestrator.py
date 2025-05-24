@@ -150,7 +150,7 @@ class EnrichmentOrchestrator:
                 transcribed_count = await count_transcribed_episodes_for_media(media_id)
                 
                 if transcribed_count >= ORCHESTRATOR_CONFIG["quality_score_min_transcribed_episodes"]:
-                    from podcast_outreach.models.podcast_profile_models import EnrichedPodcastProfile
+                    from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
                     try:
                         profile_for_scoring = EnrichedPodcastProfile(**media_data_dict)
                     except Exception as val_err:
