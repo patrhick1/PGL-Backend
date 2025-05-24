@@ -8,8 +8,12 @@ import sys
 # Ensure repository root is on the Python path so local modules can be imported
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Access helpers from the repository root
-from instantly_leads_db import add_instantly_lead_record, update_instantly_lead_record, get_instantly_lead_by_id
+# Access database helpers
+from podcast_outreach.database.queries.instantly_leads import (
+    add_instantly_lead_record,
+    update_instantly_lead_record,
+    get_instantly_lead_by_id,
+)
 
 # Note: In a production environment, this script would typically be part of a web application (e.g., using Flask or FastAPI)
 # that exposes an HTTP endpoint for Instantly.ai to send webhook POST requests to.
