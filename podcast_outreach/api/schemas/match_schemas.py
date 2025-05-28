@@ -29,6 +29,7 @@ class MatchSuggestionInDB(MatchSuggestionBase):
     client_approved: bool # Will have a default from DB if not set
     approved_at: Optional[datetime]
     created_at: datetime
-
+    media_name: Optional[str] = None 
+    media_website: Optional[str] = None
     class Config:
         from_attributes = True

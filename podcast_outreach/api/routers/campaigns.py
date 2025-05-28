@@ -23,6 +23,29 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
+# Add a simple test endpoint to debug database connectivity
+@router.get("/test", summary="Test Database Connectivity")
+async def test_campaigns_db():
+    """
+    Test endpoint to verify database connectivity without authentication.
+    """
+    try:
+        # Try to fetch campaigns from database
+        campaigns_from_db = await campaign_queries.get_all_campaigns_from_db(skip=0, limit=1)
+        return {
+            "status": "success", 
+            "message": "Database connection working",
+            "campaign_count": len(campaigns_from_db),
+            "test_timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.exception(f"Error in test_campaigns_db: {e}")
+        return {
+            "status": "error",
+            "message": f"Database error: {str(e)}",
+            "test_timestamp": datetime.now().isoformat()
+        }
+
 @router.post("/", response_model=CampaignInDB, status_code=status.HTTP_201_CREATED, summary="Create New Campaign")
 async def create_campaign_api(campaign: CampaignCreate, user: dict = Depends(get_admin_user)):
     """

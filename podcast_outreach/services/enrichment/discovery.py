@@ -42,6 +42,16 @@ class DiscoveryService:
         # you'd fetch all and filter in Python:
         # all_suggestions = await match_queries.get_match_suggestions_for_campaign_from_db(uuid.UUID(campaign_id))
         # suggestions = [s for s in all_suggestions if s.get('status') == 'pending']
+        from podcast_outreach.database.queries import media as media_queries
+
+        enhanced_suggestions = []
+        for suggestion_dict in suggestions: # Assuming suggestions is a list of dicts here
+            media_record = await media_queries.get_media_by_id_from_db(suggestion_dict['media_id'])
+            suggestion_dict['media_name'] = media_record.get('name') if media_record else 'Unknown Media'
+            suggestion_dict['media_website'] = media_record.get('website') if media_record else None
+        enhanced_suggestions.append(suggestion_dict)
+
+         # Return the list of dicts
 
         logger.info(f"Discovery for campaign {campaign_id} completed. Found {len(suggestions)} new match suggestions.")
-        return suggestions
+        return enhanced_suggestions

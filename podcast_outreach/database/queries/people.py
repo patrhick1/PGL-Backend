@@ -144,3 +144,14 @@ async def delete_person_from_db(person_id: int) -> bool:
         except Exception as e:
             logger.exception(f"Error deleting person {person_id} from DB: {e}")
             raise
+
+async def get_person_by_dashboard_username(dashboard_username: str) -> Optional[Dict[str, Any]]:
+    query = "SELECT * FROM people WHERE dashboard_username = $1;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, dashboard_username)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error fetching person by dashboard username {dashboard_username}: {e}")
+            return None
