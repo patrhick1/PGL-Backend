@@ -8,11 +8,11 @@ load_dotenv()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Database connection settings
-DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "localhost"))
-DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
-DB_NAME = os.getenv("PGDATABASE", "podcasts")
-DB_USER = os.getenv("PGUSER", "postgres")
-DB_PASSWORD = os.getenv("PGPASSWORD", "")
+DB_HOST = os.getenv("PGHOST")
+DB_PORT = int(os.getenv("PGPORT"))
+DB_NAME = os.getenv("PGDATABASE")
+DB_USER = os.getenv("PGUSER")
+DB_PASSWORD = os.getenv("PGPASSWORD")
 
 # Third-party API keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -42,4 +42,7 @@ FFMPEG_PATH = os.getenv("FFMPEG_CUSTOM_PATH")
 FFPROBE_PATH = os.getenv("FFPROBE_CUSTOM_PATH")
 
 # Default server port
-PORT = int(os.getenv("PORT", 3000))
+PORT = int(os.getenv("PORT"))
+
+
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")

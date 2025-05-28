@@ -1,12 +1,5 @@
 # podcast_outreach/main.py
 
-"""
-Unified FastAPI Application
-
-Author: Paschal Okonkwor
-Date: 2025-05-23
-"""
-
 import os
 import uuid
 import logging
@@ -17,7 +10,7 @@ import threading
 import asyncio 
 
 # Project-specific imports from the new structure
-from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT
+from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT, FRONTEND_ORIGIN # Import FRONTEND_ORIGIN
 from podcast_outreach.logging_config import setup_logging, get_logger
 from podcast_outreach.api.dependencies import (
     authenticate_user, 
@@ -38,8 +31,11 @@ from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+# Import CORS middleware
+from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
+
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks, ai_usage 
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks, ai_usage, review_tasks # <--- ADD review_tasks
 
 
 setup_logging()
@@ -71,9 +67,9 @@ async def lifespan(app: FastAPI):
             original_sys_path = list(sys.path)
             # Add tests directory to sys.path to allow importing test_runner
             # and also the project root to allow test_runner to import src modules like auth_middleware
-            if tests_dir not in sys.path:
+            if tests_dir not in sys.sys_path: # Corrected from sys.path
                 sys.path.insert(0, tests_dir)
-            if project_root not in sys.path: # test_runner itself might try to import from src
+            if project_root not in sys.sys_path: # Corrected from sys.path
                 sys.path.insert(0, project_root)
             
             try:
@@ -115,6 +111,15 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app with lifespan context manager
 app = FastAPI(lifespan=lifespan)
 
+# Add CORS middleware # <--- ADD THIS BLOCK
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_ORIGIN],  # Allows only your frontend origin
+    allow_credentials=True,           # Allow cookies to be sent
+    allow_methods=["*"],              # Allow all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],              # Allow all headers
+)
+
 # Add authentication middleware
 app.add_middleware(AuthMiddleware)
 
@@ -155,6 +160,7 @@ app.include_router(tasks.router)
 app.include_router(auth.router)
 app.include_router(webhooks.router) 
 app.include_router(ai_usage.router)
+app.include_router(review_tasks.router)
 
 
 @app.get("/login")

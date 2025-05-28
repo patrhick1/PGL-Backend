@@ -121,3 +121,57 @@ async def process_match_suggestion_approval(review_task_id: int, new_status: str
             logger.warning(f"ReviewTask ID {review_task_id} (match_suggestion) was rejected but has no related_id.")
 
     return True
+
+async def get_all_review_tasks_paginated(
+    page: int = 1,
+    size: int = 20,
+    task_type: Optional[str] = None,
+    status: Optional[str] = None,
+    assigned_to_id: Optional[int] = None,
+    campaign_id: Optional[str] = None # Assuming campaign_id is UUID, but comes as str from query param
+) -> tuple[List[Dict[str, Any]], int]:
+    """Fetches review tasks with filtering and pagination."""
+    offset = (page - 1) * size
+    
+    conditions = []
+    params = []
+    param_idx = 1
+
+    if task_type:
+        conditions.append(f"task_type = ${param_idx}")
+        params.append(task_type)
+        param_idx += 1
+    if status:
+        conditions.append(f"status = ${param_idx}")
+        params.append(status)
+        param_idx += 1
+    if assigned_to_id is not None:
+        conditions.append(f"assigned_to = ${param_idx}")
+        params.append(assigned_to_id)
+        param_idx += 1
+    if campaign_id:
+        conditions.append(f"campaign_id = ${param_idx}")
+        params.append(campaign_id) # Keep as string, asyncpg handles UUID conversion if column is UUID
+        param_idx += 1
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    base_query = "FROM review_tasks WHERE " + where_clause
+    
+    query = f"SELECT * {base_query} ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1};"
+    params.extend([size, offset])
+    
+    count_query = f"SELECT COUNT(*) AS total {base_query};"
+    # Params for count_query are the same as for the main query, excluding limit and offset
+    count_params = params[:-2] if len(params) > 1 else [] 
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            total_record = await conn.fetchrow(count_query, *count_params)
+            total = total_record['total'] if total_record else 0
+            return [dict(row) for row in rows], total
+        except Exception as e:
+            logger.exception(f"Error fetching paginated review tasks: {e}")
+            return [], 0

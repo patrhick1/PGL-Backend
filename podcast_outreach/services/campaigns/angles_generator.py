@@ -54,25 +54,57 @@ class AnglesProcessorPG:
         # Prompt document IDs (if you still use master prompts from GDocs)
         # For this refactor, we'll embed a generic prompt structure, but you can re-add these.
         self.bio_angles_prompt_template_text = """
-        Based on the provided information (mock interview, social posts, podcast transcripts, articles), 
-        please generate the following for the campaign '{campaign_name}':
+        You are a junior consultant at a PR firm. I am attaching relevant client information for you.
+        We want to pitch your client as a guest on other podcasts, pitch him for guest posts in blogs and have journalists write articles about him. From the information provided, follow the guides for crafting an effective bio and for developing angles.
 
-        1.  **Detailed Bio**: A comprehensive and engaging biography.
-        2.  **Three Distinct Angles**: Each angle should include:
-            *   **Topic**: The core subject or theme.
-            *   **Outcome**: The benefit or result for the audience.
-            *   **Description**: A detailed explanation of the angle.
+        ---
+        Craft an Effective Bio:
+        One of the most important questions you need to address when you reach out to a host is: Who are you?
+        To answer that question and make a great first impression, you’ll need a rock solid bio that tells the podcast host a bit about you and why you’re an authority within your niche. You’ll want to prepare several different versions of your bio, each with a specific purpose:
 
-        Ensure the tone is professional and compelling. Structure the output clearly.
+        *   **Full Bio**: A detailed bio you would put up on a website or a blog. It can be up to several paragraphs long and should cover your background, accomplishments, and authority in detail.
+        *   **Summary Bio**: A succinct bio that’s generally just two paragraphs covering your background and current work. Hosts may use this version for show notes, on-air intros, and more.
+        *   **Short Bio**: A bio that’s less than 280 characters so it can be used for social media and short blogs.
+
+        Creating your bios before you start reaching out to hosts allows you to take time to think things through and create strong, descriptive bios. You also have them on-hand and ready to send when a guest application or host inevitably asks for them.
+
+        In addition to your bios, you need to tell hosts what topics you’re available to talk about.
+
+        ---
+        Developing Your Angles:
+        When it comes to podcast guest placement, angles are prepared topics and unique perspectives you can offer the hosts to whom you reach out. Angles are important because they narrow your expertise into a tangible subject for a podcast episode. After all, the hosts might not be experts in your industry — you are the expert.
+
+        Providing angles in your pitches is vital for getting booked. Start your conversation with the host by being specific; it allows you to provide them with multiple options in case your initial angle doesn’t resonate with them or they already have someone lined up for a similar discussion.
+
+        You should prepare at least 10 angle options to use. Each angle should include the following:
+
+        *   **Topic**: The subject in which you’re an authority and about which you can talk as a guest.
+        *   **Outcome**: The outcome(s) podcast listeners can expect to see or learn.
+        *   **Description**: More information about the topic and your unique perspective, as well as why you’re the authority to have on the show for such a discussion.
+
+        Examples of angles in the following format (Topic; Outcome; Description), separated by a semi-colon:
+        Topic: Content Creation: Quality vs. Quantity; Outcome: High Value engaged audience, more leads, clients that respect your more. ; Description: Discussing the importance of quality content creation over quantity for lead flow. We’ve just published our 5th piece of content coming up on our 3rd year in business as a content marketing agency.
+        Topic: Educating clients vs. Traditional sales; Outcome: High Value engaged audience, more leads, clients that respect you more. ; Description: How educational content establishes authority and speeds sales when the traditional methods fall flat. We used this strategy to build Call For Content into a 6 figure agency.
+        Topic: Is college worth the cost? ; Outcome: Who college isn’t for, how to hack the best parts for free ; Description: Michael, a two time college dropout and recent graduate discusses how individuals can establish themselves without formal education and the importance of ROI in education.
+
+        ---
+        Now, craft the 3 bios (Full, Summary, Short) following the guidelines provided, and then give me at least 10 topics the client can speak on, with the outcome for each and a description for each, based on the method outlined in the examples provided.
         """
         self.keyword_prompt_text = """
-        Based on the following Bio and Angles for the campaign '{campaign_name}', 
-        generate a concise list of relevant SEO keywords (around 10-15 keywords).
+        You are an SEO expert specializing in podcast guest selection. Given a potential guest's bio and the angles they could cover, generate a list of relevant keywords that the target audience might use to find a podcast featuring that guest.
+        Instructions:
+        Input: I will provide information about my client, including their bio and the potential angles they could discuss on a podcast.
+        Keyword Format: Generate keywords as comma-separated values.
+        Keyword Length: Each keyword should be a maximum of 2-3 words.
+        Keyword Limit: Generate a maximum of 25 keywords.
+        Keyword Relevance: Ensure keywords are highly relevant to the client's bio and potential podcast discussion angles.
+        Keyword Diversity: Avoid generating keywords that are too similar to each other.
+        Goal: The generated keywords should accurately reflect the client's expertise and potential podcast content, maximizing the chances of the target audience discovering the podcast episode featuring the client.
 
-        Bio:
+        Client Bio:
         {bio_content}
 
-        Angles:
+        Client Angles:
         {angles_content}
 
         Keywords:
@@ -250,9 +282,8 @@ class AnglesProcessorPG:
 
             # 2. Generate Bio and Angles using Gemini
             # Construct the main prompt for Gemini
-            # Using the embedded prompt template text
-            generation_prompt = self.bio_angles_prompt_template_text.format(campaign_name=campaign_name)
-            
+            # The bio_angles_prompt_template_text itself doesn't have a placeholder for campaign_name
+            # so we include it in the wrapper prompt for context.            
             full_prompt_for_gemini = f"""
             Campaign Name: {campaign_name}
 
@@ -270,7 +301,7 @@ class AnglesProcessorPG:
 
             ---
             TASK:
-            {generation_prompt}
+            {self.bio_angles_prompt_template_text}
             """
             
             logger.info(f"Generating Bio & Angles for '{campaign_name}' using Gemini...")

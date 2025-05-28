@@ -1,19 +1,21 @@
+# podcast_outreach/database/queries/episodes.py
 import logging
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Set, Tuple
 from datetime import datetime, date
-
+ 
 from podcast_outreach.database.connection import get_db_pool
-
+ 
 logger = logging.getLogger(__name__)
-
+ 
 async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Insert a single episode record and return it."""
     query = """
     INSERT INTO episodes (
         media_id, title, publish_date, duration_sec, episode_summary,
         episode_url, transcript, transcribe, downloaded, guest_names,
-        source_api, api_episode_id, ai_episode_summary, embedding
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        source_api, api_episode_id, ai_episode_summary, embedding,
+        episode_themes, episode_keywords, ai_analysis_done
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
     RETURNING *;
     """
     pool = await get_db_pool()
@@ -33,14 +35,65 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
                 episode_data.get("guest_names"),
                 episode_data.get("source_api"),
                 episode_data.get("api_episode_id"),
-                episode_data.get("ai_episode_summary"), # Added
-                episode_data.get("embedding"), # Added
+                episode_data.get("ai_episode_summary"),
+                episode_data.get("embedding"),
+                episode_data.get("episode_themes"), # NEW
+                episode_data.get("episode_keywords"), # NEW
+                episode_data.get("ai_analysis_done", False), # NEW
             )
             return dict(row) if row else None
         except Exception as e:
             logger.exception("Error inserting episode for media_id %s: %s", episode_data.get("media_id"), e)
             return None
 
+async def insert_episodes_batch(episodes_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Inserts multiple episode records in a single batch operation."""
+    if not episodes_data:
+        return []
+
+    query = """
+    INSERT INTO episodes (
+        media_id, title, publish_date, duration_sec, episode_summary,
+        episode_url, transcript, transcribe, downloaded, guest_names,
+        source_api, api_episode_id, ai_episode_summary, embedding,
+        episode_themes, episode_keywords, ai_analysis_done
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    RETURNING *;
+    """
+    records = []
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                for episode_data in episodes_data:
+                    row = await conn.fetchrow(
+                        query,
+                        episode_data["media_id"],
+                        episode_data["title"],
+                        episode_data["publish_date"],
+                        episode_data.get("duration_sec"),
+                        episode_data.get("episode_summary"),
+                        episode_data.get("episode_url"),
+                        episode_data.get("transcript"),
+                        episode_data.get("transcribe", False),
+                        episode_data.get("downloaded", False),
+                        episode_data.get("guest_names"),
+                        episode_data.get("source_api"),
+                        episode_data.get("api_episode_id"),
+                        episode_data.get("ai_episode_summary"),
+                        episode_data.get("embedding"),
+                        episode_data.get("episode_themes"), # NEW
+                        episode_data.get("episode_keywords"), # NEW
+                        episode_data.get("ai_analysis_done", False), # NEW
+                    )
+                    if row:
+                        records.append(dict(row))
+                logger.info(f"Successfully inserted {len(records)} episodes in batch.")
+                return records
+            except Exception as e:
+                logger.exception("Error inserting episodes batch: %s", e)
+                raise # Re-raise to trigger transaction rollback
+ 
 async def delete_oldest_episodes(media_id: int, keep_count: int = 10) -> int:
     """Delete episodes beyond the most recent `keep_count` for a media."""
     query = """
@@ -63,7 +116,7 @@ async def delete_oldest_episodes(media_id: int, keep_count: int = 10) -> int:
         except Exception as e:
             logger.exception("Error deleting old episodes for media_id %s: %s", media_id, e)
             return 0
-
+ 
 async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) -> int:
     """Flag the most recent episodes for transcription."""
     pool = await get_db_pool()
@@ -82,8 +135,9 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
                     count,
                 )
                 candidate_ids = [row["episode_id"] for row in candidate_rows]
-
+ 
                 if candidate_ids:
+                    # Set existing 'transcribe = TRUE' episodes to FALSE if they are not in the new candidate list
                     await conn.execute(
                         f"""
                         UPDATE episodes
@@ -93,6 +147,7 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
                         """,
                         media_id,
                     )
+                    # Set new candidates to TRUE
                     flagged = await conn.fetch(
                         f"""
                         UPDATE episodes
@@ -104,6 +159,7 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
                     logger.info("Flagged %s episodes for transcription for media_id %s", len(flagged), media_id)
                     return len(flagged)
                 else:
+                    # If no candidates, ensure all existing 'transcribe = TRUE' episodes are set to FALSE
                     await conn.execute(
                         "UPDATE episodes SET transcribe = FALSE, updated_at = NOW() "
                         "WHERE media_id = $1 AND transcribe = TRUE AND downloaded = FALSE;",
@@ -113,7 +169,7 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
             except Exception as e:
                 logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
                 raise
-
+ 
 async def fetch_episodes_for_transcription(limit: int = 20) -> list[Dict[str, Any]]:
     """Return episodes that need transcription."""
     query = """
@@ -131,7 +187,7 @@ async def fetch_episodes_for_transcription(limit: int = 20) -> list[Dict[str, An
         except Exception as e:
             logger.exception("Error fetching episodes for transcription: %s", e)
             return []
-
+ 
 async def update_episode_transcription(
     episode_id: int,
     transcript: str,
@@ -165,7 +221,7 @@ async def update_episode_transcription(
         except Exception as e:
             logger.exception("Error updating transcription for episode %s: %s", episode_id, e)
             return None
-
+ 
 async def get_episodes_for_media_with_content(media_id: int) -> List[Dict[str, Any]]:
     """
     Fetches episodes for a given media_id that have either an AI summary or a transcript,
@@ -184,4 +240,113 @@ async def get_episodes_for_media_with_content(media_id: int) -> List[Dict[str, A
             return [dict(row) for row in rows]
         except Exception as e:
             logger.exception(f"Error fetching episodes with content for media_id {media_id}: {e}")
+            return []
+
+async def get_existing_episode_identifiers(media_id: int) -> Set[Tuple[str, datetime.date]]:
+    """
+    Fetches a set of (title, publish_date) tuples for existing episodes of a given media.
+    Used to prevent duplicate insertions.
+    """
+    query = """
+    SELECT title, publish_date FROM episodes WHERE media_id = $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_id)
+            return {(r['title'], r['publish_date']) for r in rows}
+        except Exception as e:
+            logger.exception(f"Error fetching existing episode identifiers for media_id {media_id}: {e}")
+            return set()
+
+# NEW: Function to fetch a single episode by ID
+async def get_episode_by_id(episode_id: int) -> Optional[Dict[str, Any]]:
+    """Fetches a single episode record by its ID."""
+    query = "SELECT * FROM episodes WHERE episode_id = $1;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, episode_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching episode {episode_id}: {e}")
+            return None
+
+# NEW: Function to update episode analysis data
+async def update_episode_analysis_data(
+    episode_id: int,
+    host_names: Optional[List[str]] = None,
+    guest_names: Optional[List[str]] = None,
+    episode_themes: Optional[List[str]] = None,
+    episode_keywords: Optional[List[str]] = None,
+    ai_analysis_done: bool = True
+) -> Optional[Dict[str, Any]]:
+    """
+    Updates an episode record with AI analysis results.
+    """
+    set_clauses = ["updated_at = NOW()", "ai_analysis_done = $1"]
+    values = [ai_analysis_done]
+    idx = 2
+
+    if host_names is not None:
+        set_clauses.append(f"guest_names = $2") # Reusing guest_names for host/guest list
+        values.append(host_names)
+        idx += 1
+    if guest_names is not None:
+        # If you want separate host_names and guest_names columns, you'd need to add them to schema
+        # For now, I'll combine them into 'guest_names' or pick one.
+        # Let's update the existing 'guest_names' column with a combined list if both are present.
+        # Or, if 'guest_names' is specifically for guests, we need a new 'host_names' column.
+        # Given the schema, 'guest_names' is TEXT, not TEXT[]. Let's update it to TEXT[] in schema.
+        # For now, I'll use it as a combined list of identified people.
+        if guest_names is not None:
+            set_clauses.append(f"guest_names = ${idx}")
+            values.append(guest_names)
+            idx += 1
+
+    if episode_themes is not None:
+        set_clauses.append(f"episode_themes = ${idx}")
+        values.append(episode_themes)
+        idx += 1
+    if episode_keywords is not None:
+        set_clauses.append(f"episode_keywords = ${idx}")
+        values.append(episode_keywords)
+        idx += 1
+
+    query = f"""
+    UPDATE episodes
+    SET {', '.join(set_clauses)}
+    WHERE episode_id = ${idx}
+    RETURNING *;
+    """
+    values.append(episode_id)
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, *values)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error updating episode analysis data for episode {episode_id}: {e}")
+            return None
+
+# NEW: Function to fetch episodes needing AI analysis
+async def fetch_episodes_for_analysis(limit: int = 20) -> List[Dict[str, Any]]:
+    """
+    Fetches episodes that have a transcript/summary but haven't been analyzed by AI yet.
+    """
+    query = """
+    SELECT episode_id, media_id, title, episode_summary, ai_episode_summary, transcript
+    FROM episodes
+    WHERE (transcript IS NOT NULL OR ai_episode_summary IS NOT NULL) AND ai_analysis_done = FALSE
+    ORDER BY created_at ASC
+    LIMIT $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching episodes for AI analysis: {e}")
             return []
