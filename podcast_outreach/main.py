@@ -8,13 +8,14 @@ from contextlib import asynccontextmanager
 import sys
 import threading
 import asyncio 
+import secrets # For session secret key
 
 # Project-specific imports from the new structure
 from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT, FRONTEND_ORIGIN # Import FRONTEND_ORIGIN
 from podcast_outreach.logging_config import setup_logging, get_logger
 from podcast_outreach.api.dependencies import (
-    authenticate_user, 
-    create_session, 
+    authenticate_user_details, 
+    prepare_session_data, 
     get_current_user,
     get_admin_user
 )
@@ -33,6 +34,9 @@ from fastapi.templating import Jinja2Templates
 
 # Import CORS middleware
 from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
+
+# Session Middleware
+from starlette.middleware.sessions import SessionMiddleware # Import SessionMiddleware
 
 # Import the new API routers
 from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, webhooks, ai_usage, review_tasks # <--- ADD review_tasks
@@ -111,13 +115,43 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app with lifespan context manager
 app = FastAPI(lifespan=lifespan)
 
+
+# --- Session Middleware Configuration ---
+# Generate a strong secret key. Store this in your .env for production.
+# For development, a hardcoded one is okay, but NOT for production.
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", secrets.token_hex(32))
+if SESSION_SECRET_KEY == secrets.token_hex(32) and os.getenv("NODE_ENV") != "development": # NODE_ENV is a common var, adjust if you use another
+    logger.warning("SESSION_SECRET_KEY is not set in environment variables. Using a temporary one. THIS IS NOT SAFE FOR PRODUCTION.")
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET_KEY,
+    # session_cookie="session_id", # Default is "session"
+    # max_age=3600, # 1 hour, can be configured here or per cookie
+    # same_site="lax",
+    # https_only=True # Set to True in production
+)
+
+
+# For development, if your Vite frontend runs on 5173:
+origins = [
+    "http://localhost:5173", # Vite dev server (check your actual port)
+    # Add your production frontend URL here, e.g., "https://your-frontend-domain.com"
+]
+# If you have FRONTEND_ORIGIN in your config.py and it's correctly set:
+if FRONTEND_ORIGIN:
+    origins.append(FRONTEND_ORIGIN)
+else: # Fallback for local dev if FRONTEND_ORIGIN is not set for some reason
+    if "http://localhost:5173" not in origins:
+         origins.append("http://localhost:5173")
+
 # Add CORS middleware # <--- ADD THIS BLOCK
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],  # Allows only your frontend origin
-    allow_credentials=True,           # Allow cookies to be sent
-    allow_methods=["*"],              # Allow all methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],              # Allow all headers
+    allow_origins=origins, # List of allowed origins
+    allow_credentials=True, # Allow cookies
+    allow_methods=["*"],    # Allow all methods
+    allow_headers=["*"],    # Allow all headers
 )
 
 # Add authentication middleware
@@ -172,42 +206,39 @@ def login_page(request: Request):
 @app.post("/login")
 async def login(
     request: Request,
-    username: str = Form(...),
+    username: str = Form(...), # This form field name is 'username' from HTML, but we treat it as email
     password: str = Form(...)
 ):
-    """Handle login form submission"""
-    role = authenticate_user(username, password)
+    email_to_auth = username # Treat the form's 'username' field as the email
+    user_details = await authenticate_user_details(email_to_auth, password)
     
-    if not role:
+    if not user_details:
         return templates.TemplateResponse(
             "login.html", 
             {
                 "request": request, 
-                "error": "Invalid username or password"
+                "error": "Invalid email or password" # Updated message
             }
         )
     
-    session_id = create_session(username, role)
+    # Store user details in the session
+    session_data = prepare_session_data(user_details)
+    request.session.update(session_data) # StarletteSessionMiddleware provides request.session
     
-    response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    logger.info(f"User '{user_details['username']}' logged in via form. Session data set.")
     
-    response.set_cookie(
-        key="session_id",
-        value=session_id,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=3600
-    )
-    
-    return response
+    # RedirectResponse will carry the session cookie set by the middleware
+    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.get("/logout")
-def logout(request: Request):
-    """Log out the user by clearing the session cookie"""
+async def logout(request: Request): # request is needed to clear session
+    request.session.clear() # Clear the session data
+    logger.info("User logged out. Session cleared.")
     response = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
-    response.delete_cookie(key="session_id")
+    # The session cookie itself will be managed by the middleware (e.g., cleared or expired)
+    # If you need to explicitly delete the cookie:
+    # response.delete_cookie(key="session", httponly=True, secure=True, samesite="lax") # Default cookie name is "session"
     return response
 
 
@@ -254,7 +285,6 @@ def admin_dashboard(request: Request, user: dict = Depends(get_admin_user)):
 if __name__ == "__main__":
     import uvicorn
 
-    port = PORT
+    port = PORT if isinstance(PORT, int) else 8000 # Ensure PORT is int, fallback
     logger.info(f"Starting FastAPI app on port {port}.")
-
     uvicorn.run(app, host='0.0.0.0', port=port)

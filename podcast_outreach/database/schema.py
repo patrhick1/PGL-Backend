@@ -1,14 +1,14 @@
 # podcast_outreach/database/schema.py
-
+ 
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import DictCursor
 import os
 from dotenv import load_dotenv
-
+ 
 # Load environment variables from .env file at the start
 load_dotenv()
-
+ 
 # --- Database Connection ---
 def get_db_connection():
     """Establishes a connection to the PostgreSQL database."""
@@ -26,7 +26,7 @@ def get_db_connection():
         print("Please ensure PostgreSQL is running and connection details are correct.")
         print("Ensure environment variables are set: PGDATABASE, PGUSER, PGPASSWORD, PGHOST, PGPORT")
         return None
-
+ 
 # --- Utility Functions ---
 def execute_sql(conn, sql_statement, params=None):
     """Executes a given SQL statement."""
@@ -39,7 +39,7 @@ def execute_sql(conn, sql_statement, params=None):
         if conn:
             conn.rollback()
         raise # Re-raise the exception to be handled by the caller
-
+ 
 def create_timestamp_update_trigger_function(conn):
     """Creates or replaces a function to update a timestamp column to NOW()."""
     trigger_func_sql = """
@@ -48,7 +48,7 @@ def create_timestamp_update_trigger_function(conn):
     BEGIN
        NEW.updated_at = NOW();
        RETURN NEW;
-    END;
+     END;
     $ language 'plpgsql';
     """
     try:
@@ -57,8 +57,8 @@ def create_timestamp_update_trigger_function(conn):
     except psycopg2.Error as e:
         print(f"Error creating timestamp update function: {e}")
         # Do not close connection here, let main handler do it
-
-
+ 
+ 
 def apply_timestamp_update_trigger(conn, table_name):
     """Applies the timestamp update trigger to the specified table's updated_at column."""
     trigger_name = f"trigger_update_{table_name}_updated_at"
@@ -77,10 +77,10 @@ def apply_timestamp_update_trigger(conn, table_name):
         print(f"Timestamp update trigger applied to table '{table_name}'.")
     except psycopg2.Error as e:
         print(f"Error applying trigger to {table_name}: {e}")
-
-
+ 
+ 
 # --- Table Creation Functions ---
-
+ 
 def create_companies_table(conn):
     sql_statement = """
     CREATE TABLE companies (
@@ -102,7 +102,7 @@ def create_companies_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table COMPANIES created/ensured.")
-
+ 
 def create_people_table(conn):
     sql_statement = """
     CREATE TABLE people (
@@ -125,14 +125,14 @@ def create_people_table(conn):
     execute_sql(conn, sql_statement)
     print("Table PEOPLE created/ensured.")
     apply_timestamp_update_trigger(conn, "people")
-
-
+ 
+ 
 def create_media_table(conn):
     sql_statement = """
     CREATE TABLE IF NOT EXISTS media (
         media_id                  SERIAL PRIMARY KEY,
         company_id                INTEGER REFERENCES companies(company_id) ON DELETE SET NULL,
-
+ 
         -- existing core fields
         name                      TEXT,
         rss_url                   TEXT,
@@ -149,7 +149,7 @@ def create_media_table(conn):
         updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- NEW: Add updated_at
         last_fetched_at           TIMESTAMPTZ,
         latest_episode_date       DATE, -- This will be updated by enrichment
-
+ 
         -- new profile_data fields from EnrichedPodcastProfile
         source_api                TEXT,
         api_id                    TEXT UNIQUE, -- NEW: Make api_id unique for easier lookup
@@ -195,7 +195,7 @@ def create_media_table(conn):
         quality_score             NUMERIC,     -- Calculated quality score
         first_episode_date        DATE         -- When the podcast first published an episode
     );
-
+ 
     CREATE INDEX IF NOT EXISTS idx_media_company_id           ON media (company_id);
     CREATE INDEX IF NOT EXISTS idx_media_embedding_hnsw       ON media USING hnsw (embedding vector_cosine_ops);
     CREATE INDEX IF NOT EXISTS idx_media_api_id               ON media (api_id); -- NEW: Index for api_id
@@ -203,8 +203,8 @@ def create_media_table(conn):
     execute_sql(conn, sql_statement)
     print("Table MEDIA created/ensured with extended profile_data columns.")
     apply_timestamp_update_trigger(conn, "media") # NEW: Apply trigger to media table
-
-
+ 
+ 
 def create_media_people_table(conn):
     sql_statement = """
     CREATE TABLE media_people (
@@ -218,7 +218,7 @@ def create_media_people_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table MEDIA_PEOPLE created/ensured.")
-
+ 
 def create_campaigns_table(conn):
     sql_statement = """
     CREATE TABLE campaigns (
@@ -247,7 +247,7 @@ def create_campaigns_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table CAMPAIGNS created/ensured.")
-
+ 
 def create_episodes_table(conn):
     sql_statement = """
     CREATE TABLE episodes (
@@ -267,14 +267,18 @@ def create_episodes_table(conn):
         source_api TEXT,
         api_episode_id TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        -- NEW FIELDS FOR EPISODE ANALYSIS
+        episode_themes TEXT[],
+        episode_keywords TEXT[],
+        ai_analysis_done BOOLEAN DEFAULT FALSE
     );
     CREATE INDEX IF NOT EXISTS idx_episodes_media_id ON episodes (media_id);
     CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON episodes USING hnsw (embedding vector_cosine_ops);
     """
     execute_sql(conn, sql_statement)
     print("Table EPISODES created/ensured.")
-
+ 
 # In schema_creation_extended.py
 def create_match_suggestions(conn):
     sql_statement = """
@@ -295,7 +299,7 @@ def create_match_suggestions(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table MATCH_SUGGESTIONS created/ensured.")
-
+ 
 def create_pitch_templates_table(conn):
     sql_statement = """
     CREATE TABLE pitch_templates (
@@ -311,7 +315,7 @@ def create_pitch_templates_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table PITCH_TEMPLATES created/ensured.")
-
+ 
 def create_pitch_generations_table(conn):
     sql_statement = """
     CREATE TABLE pitch_generations (
@@ -336,7 +340,7 @@ def create_pitch_generations_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table PITCH_GENERATIONS created/ensured.")
-
+ 
 def create_placements_table(conn): # Renamed from BOOKINGS
     sql_statement = """
     CREATE TABLE placements (
@@ -359,7 +363,7 @@ def create_placements_table(conn): # Renamed from BOOKINGS
     """
     execute_sql(conn, sql_statement)
     print("Table PLACEMENTS created/ensured.")
-
+ 
 def create_pitches_table(conn):
     sql_statement = """
     CREATE TABLE pitches (
@@ -392,7 +396,7 @@ def create_pitches_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table PITCHES created/ensured.")
-
+ 
 def create_status_history_table(conn):
     sql_statement = """
     CREATE TABLE status_history (
@@ -407,7 +411,7 @@ def create_status_history_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table STATUS_HISTORY created/ensured.")
-
+ 
 def create_review_tasks(conn):
     sql_statement = """
     CREATE TABLE review_tasks (
@@ -426,7 +430,7 @@ def create_review_tasks(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table REVIEW_TASKS created/ensured.")
-
+ 
 def create_ai_usage_logs_table(conn):
     sql_statement = """
     CREATE TABLE ai_usage_logs (
@@ -452,7 +456,7 @@ def create_ai_usage_logs_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table AI_USAGE_LOGS created/ensured.")
-
+ 
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
@@ -472,7 +476,7 @@ def drop_all_tables(conn):
         "PEOPLE",             # FK to COMPANIES
         "COMPANIES"           # Base table - should be last or rely entirely on CASCADE from dependents
     ]
-
+ 
     print("Attempting to drop tables...")
     all_drops_attempted_successfully = True
     try:
@@ -493,7 +497,7 @@ def drop_all_tables(conn):
                 conn.rollback()
                 print("Errors occurred during table drop commands. Transaction rolled back.")
                 raise Exception("Failed to execute all DROP TABLE commands cleanly. Aborting schema creation.") 
-
+ 
     except psycopg2.Error as e: 
         print(f"A database error occurred during the drop_all_tables operation: {e}")
         if conn and not conn.closed:
@@ -507,7 +511,7 @@ def drop_all_tables(conn):
             except psycopg2.Error as rb_e: print(f"Further error during rollback: {rb_e}")
         if not isinstance(e, psycopg2.Error): 
              raise 
-
+ 
 # --- Main Execution ---
 def create_all_tables():
     """Creates all defined tables in the correct order."""
@@ -515,15 +519,15 @@ def create_all_tables():
     if not conn:
         print("Database connection failed. Aborting table creation.")
         return
-
+ 
     try:
         # Drop all tables first to ensure a clean slate
         # Uncomment the line below if you want to drop tables before creating them
         # drop_all_tables(conn)
-
+ 
         # Create helper function for triggers first
         create_timestamp_update_trigger_function(conn)
-
+ 
         # Create tables in order of dependency
         create_companies_table(conn)
         create_people_table(conn) # Depends on COMPANIES (indirectly via trigger), applies trigger
@@ -549,8 +553,9 @@ def create_all_tables():
         if conn:
             conn.close()
             print("Database connection closed.")
-
+ 
 if __name__ == "__main__":
     print("Starting database schema creation process...")
     create_all_tables()
     print("Schema creation process finished.")
+ 
