@@ -77,20 +77,45 @@ def get_current_user(request: Request) -> Dict[str, Any]:
     Dependency function to get the current user from the session
     populated by Starlette's SessionMiddleware.
     """
+    logger.info("--- ENTERING get_current_user ---") # New log
+    print("--- ENTERING get_current_user (print) ---") # Print for immediate visibility
+
+    if hasattr(request, 'session'):
+        logger.info(f"request.session type: {type(request.session)}")
+        logger.info(f"request.session content: {dict(request.session) if request.session else 'None or Empty'}") # Log content
+        print(f"request.session content (print): {dict(request.session) if request.session else 'None or Empty'}")
+    else:
+        logger.error("request.session attribute does NOT exist!")
+        print("request.session attribute does NOT exist! (print)")
+        # If request.session doesn't even exist, that's a major middleware problem
+        raise HTTPException(status_code=500, detail="Session middleware not working correctly - request.session missing")
+
     # SessionMiddleware populates request.session
     if not request.session or "username" not in request.session:
         logger.warning("Attempt to get current user without active session or username in session.")
+        print("Attempt to get current user without active session or username in session. (print)")
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    # Extract all stored user details from the session
-    user_data = {
-        "username": request.session.get("username"), # This is the email
-        "role": request.session.get("role"),
-        "person_id": request.session.get("person_id"),
-        "full_name": request.session.get("full_name")
-    }
-    logger.debug(f"Current user retrieved from session: {user_data.get('username')}, Role: {user_data.get('role')}")
-    return user_data
+
+    logger.info("Session and username key exist. Proceeding to extract user_data.") # New log
+    print("Session and username key exist. Proceeding to extract user_data. (print)")
+
+    try:
+        user_data = {
+            "username": request.session.get("username"),
+            "role": request.session.get("role"),
+            "person_id": request.session.get("person_id"),
+            "full_name": request.session.get("full_name")
+        }
+        logger.debug(f"Current user retrieved from session: {user_data.get('username')}, Role: {user_data.get('role')}")
+        print(f"Current user retrieved from session (print): {user_data.get('username')}, Role: {user_data.get('role')}")
+        logger.info("--- EXITING get_current_user SUCCESSFULLY ---") # New log
+        print("--- EXITING get_current_user SUCCESSFULLY (print) ---")
+        return user_data
+    except Exception as e:
+        logger.error(f"--- ERROR INSIDE get_current_user when creating user_data ---: {e}", exc_info=True)
+        print(f"--- ERROR INSIDE get_current_user when creating user_data (print) ---: {e}")
+        # This will likely lead to a 500 if not caught by FastAPI's default error handling for dependencies
+        raise HTTPException(status_code=500, detail=f"Error processing session data: {str(e)}")
 
 def get_admin_user(request: Request) -> Dict[str, Any]:
     """

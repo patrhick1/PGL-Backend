@@ -115,23 +115,23 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app with lifespan context manager
 app = FastAPI(lifespan=lifespan)
 
-
-# --- Session Middleware Configuration ---
-# Generate a strong secret key. Store this in your .env for production.
-# For development, a hardcoded one is okay, but NOT for production.
-SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", secrets.token_hex(32))
-if SESSION_SECRET_KEY == secrets.token_hex(32) and os.getenv("NODE_ENV") != "development": # NODE_ENV is a common var, adjust if you use another
-    logger.warning("SESSION_SECRET_KEY is not set in environment variables. Using a temporary one. THIS IS NOT SAFE FOR PRODUCTION.")
+# CRITICAL: Add SessionMiddleware IMMEDIATELY after app creation
+# This must be done before any other configuration
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY")
+if not SESSION_SECRET_KEY:
+    logger.warning(
+        "SESSION_SECRET_KEY is not set in environment variables. "
+        "Using a default temporary key. THIS IS NOT SAFE FOR PRODUCTION. "
+        "Please set a strong, unique SESSION_SECRET_KEY in your .env file."
+    )
+    SESSION_SECRET_KEY = secrets.token_hex(32)
 
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET_KEY,
-    # session_cookie="session_id", # Default is "session"
-    # max_age=3600, # 1 hour, can be configured here or per cookie
-    # same_site="lax",
-    # https_only=True # Set to True in production
 )
 
+# --- Session Middleware Configuration ---
 
 # For development, if your Vite frontend runs on 5173:
 origins = [
@@ -145,10 +145,15 @@ else: # Fallback for local dev if FRONTEND_ORIGIN is not set for some reason
     if "http://localhost:5173" not in origins:
          origins.append("http://localhost:5173")
 
-# Add CORS middleware # <--- ADD THIS BLOCK
+# Add middleware in correct order - middleware executes in REVERSE order of addition
+# SessionMiddleware was added first (right after app creation)
+# Now adding: CORS, then Auth
+# Final execution order: Session -> Auth -> CORS
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins, # List of allowed origins
+    allow_origins=origins, # Now origins is defined
     allow_credentials=True, # Allow cookies
     allow_methods=["*"],    # Allow all methods
     allow_headers=["*"],    # Allow all headers
@@ -191,7 +196,7 @@ app.include_router(matches.router)
 app.include_router(media.router)
 app.include_router(pitches.router)
 app.include_router(tasks.router)
-app.include_router(auth.router)
+app.include_router(auth.router, prefix="/auth")
 app.include_router(webhooks.router) 
 app.include_router(ai_usage.router)
 app.include_router(review_tasks.router)

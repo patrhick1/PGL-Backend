@@ -1,3 +1,4 @@
+# podcast_outreach/database/models/llm_outputs.py
 from pydantic import BaseModel, Field, HttpUrl
 from typing import Optional, List
 
@@ -27,5 +28,16 @@ class LLMQualityVettingOutput(BaseModel):
     # based on podcast description, title, and potentially sample transcripts.
     content_quality_score: Optional[float] = Field(None, description="LLM-assessed content quality score (0-100) based on available text data.")
     explanation: Optional[str] = Field(None, description="Brief explanation from the LLM for its content_quality_score.")
-    # We might add other qualitative flags here later if needed, e.g.:
     # detected_content_issues: Optional[List[str]] = Field(None, description="Flags for potential content issues like poor audio indicators, off-topic discussions etc.") 
+
+# NEW MODEL FOR EPISODE ANALYSIS
+class EpisodeAnalysisOutput(BaseModel):
+    """
+    Pydantic model for structured output from an LLM when analyzing episode content
+    to identify hosts, guests, themes, and keywords.
+    """
+    host_names_identified: Optional[List[str]] = Field(None, description="Names of the hosts identified in the episode content.")
+    guest_names_identified: Optional[List[str]] = Field(None, description="Names of the guests identified in the episode content.")
+    episode_themes: Optional[List[str]] = Field(None, description="Key themes or topics discussed in the episode.")
+    episode_keywords: Optional[List[str]] = Field(None, description="Important keywords extracted from the episode content.")
+    ai_analysis_summary: Optional[str] = Field(None, description="A brief summary of the AI's findings or overall analysis of the episode content.")

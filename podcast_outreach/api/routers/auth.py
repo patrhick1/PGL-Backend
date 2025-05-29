@@ -104,10 +104,4 @@ async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)
     """
     Retrieves information about the currently authenticated user.
     """
-    # If you stored person_id in the session, you can include it here:
-    # return {
-    #     "username": current_user.get("username"),
-    #     "role": current_user.get("role"),
-    #     "person_id": current_user.get("person_id") # Assuming person_id is in the session
-    # }
     return current_user
