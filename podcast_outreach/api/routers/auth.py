@@ -13,7 +13,7 @@ from podcast_outreach.api.dependencies import hash_password # For hashing
 import logging
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 class UserRegistration(BaseModel):
     full_name: str = Field(..., min_length=2)

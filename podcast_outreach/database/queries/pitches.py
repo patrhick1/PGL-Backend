@@ -134,3 +134,30 @@ async def get_pitch_by_pitch_gen_id(pitch_gen_id: int) -> Optional[Dict[str, Any
         except Exception as e:
             logger.exception(f"Error fetching pitch by pitch_gen_id {pitch_gen_id}: {e}")
             raise
+
+async def count_pitches_by_state(pitch_states: List[str], person_id: Optional[int] = None) -> int:
+    """Counts pitches matching given states, optionally filtered by person_id (via campaign)."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            if not pitch_states:
+                return 0
+            
+            state_placeholders = ', '.join([f'${i+1}' for i in range(len(pitch_states))])
+            params = list(pitch_states)
+            
+            query_parts = ["SELECT COUNT(p.*) FROM pitches p"]
+            
+            if person_id is not None:
+                query_parts.append("JOIN campaigns c ON p.campaign_id = c.campaign_id")
+                query_parts.append(f"WHERE c.person_id = ${len(params) + 1} AND p.pitch_state IN ({state_placeholders})")
+                params.append(person_id)
+            else:
+                query_parts.append(f"WHERE p.pitch_state IN ({state_placeholders})")
+
+            query = " ".join(query_parts)
+            count = await conn.fetchval(query, *params)
+            return count if count is not None else 0
+        except Exception as e:
+            logger.exception(f"Error counting pitches by state (person_id: {person_id}, states: {pitch_states}): {e}")
+            return 0

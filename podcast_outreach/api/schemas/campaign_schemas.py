@@ -22,6 +22,7 @@ class CampaignBase(BaseModel):
     end_date: Optional[date] = None
     goal_note: Optional[str] = None
     media_kit_url: Optional[str] = None
+    questionnaire_responses: Optional[Dict[str, Any]] = None
 
 class CampaignCreate(CampaignBase):
     campaign_id: uuid.UUID = Field(default_factory=uuid.uuid4) # Client can provide or defaults to new UUID
@@ -42,6 +43,7 @@ class CampaignUpdate(BaseModel):
     end_date: Optional[date] = None
     goal_note: Optional[str] = None
     media_kit_url: Optional[str] = None
+    questionnaire_responses: Optional[Dict[str, Any]] = None
 
 class CampaignInDB(CampaignBase):
     campaign_id: uuid.UUID
@@ -55,3 +57,6 @@ class AnglesBioTriggerResponse(BaseModel):
     status: str # e.g., "processing_started", "success", "error", "skipped"
     message: str
     details: Optional[Dict[str, Any]] = None
+
+class QuestionnaireSubmitData(BaseModel):
+    questionnaire_data: Dict[str, Any] # This will hold the structured JSON from the frontend

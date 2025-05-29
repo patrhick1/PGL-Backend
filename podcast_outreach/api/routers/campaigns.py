@@ -7,7 +7,10 @@ from datetime import datetime, date
 import logging
 
 # Import schemas
-from ..schemas.campaign_schemas import CampaignCreate, CampaignUpdate, CampaignInDB, AnglesBioTriggerResponse
+from ..schemas.campaign_schemas import (
+    CampaignCreate, CampaignUpdate, CampaignInDB, AnglesBioTriggerResponse,
+    QuestionnaireSubmitData # <<< NEW IMPORT
+)
 
 # Import modular queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
@@ -16,8 +19,10 @@ from podcast_outreach.database.queries import people as people_queries # Needed 
 # Import AnglesProcessorPG (assuming it's now at services/campaigns/bio_generator.py)
 from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG # Corrected import path
 
+from podcast_outreach.services.campaigns.questionnaire_processor import process_campaign_questionnaire_submission 
+
 # Import dependencies for authentication
-from ..dependencies import get_current_user, get_admin_user
+from ..dependencies import get_current_user, get_admin_user, get_staff_user
 
 logger = logging.getLogger(__name__)
 
@@ -161,5 +166,76 @@ async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict =
     except Exception as e:
         logger.exception(f"Unhandled exception during angles/bio generation trigger for campaign {campaign_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred during generation: {str(e)}")
+    finally:
+        processor.cleanup()
+
+
+@router.post("/{campaign_id}/submit-questionnaire", 
+            response_model=CampaignInDB, # Or a more specific response
+            summary="Submit Questionnaire Data for a Campaign")
+async def submit_campaign_questionnaire_api(
+    campaign_id: uuid.UUID, 
+    submission_data: QuestionnaireSubmitData, # Use the new Pydantic model for request body
+    user: dict = Depends(get_current_user) # Client or Staff/Admin can submit
+):
+    """
+    Submits questionnaire data for a specific campaign.
+    This will update the campaign with the questionnaire responses and a
+    generated mock interview transcript.
+    Accessible by the client who owns the campaign or staff/admin.
+    """
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    # Authorization: Ensure the current user is the owner or an admin/staff
+    if user.get("role") not in ["admin", "staff"] and campaign.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit questionnaire for this campaign")
+
+    success = await process_campaign_questionnaire_submission(campaign_id, submission_data.questionnaire_data)
+    
+    if success:
+        updated_campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+        if not updated_campaign: # Should not happen if update was successful
+             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve campaign after update.")
+        return CampaignInDB(**updated_campaign)
+    else:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process questionnaire data.")
+    
+
+@router.post("/{campaign_id}/generate-angles-bio", response_model=AnglesBioTriggerResponse, summary="Trigger Bio & Angles Generation")
+async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_staff_user)): # Changed to get_staff_user
+    """
+    Triggers the AI-powered generation of client bio and talking angles for a campaign.
+    Requires the campaign to have mock_interview_trancript populated (usually from questionnaire).
+    Staff or Admin access required.
+    """
+    campaign_exists = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign_exists:
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+    
+    if not campaign_exists.get("mock_interview_trancript"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Campaign {campaign_id} does not have a mock interview transcript. Please submit the questionnaire first.")
+
+    processor = AnglesProcessorPG() 
+    try:
+        # The process_campaign method in AnglesProcessorPG should use the mock_interview_trancript
+        # and other fields from the campaign record.
+        result = await processor.process_campaign(str(campaign_id))
+        
+        response_status = result.get("status", "error")
+        response_message = result.get("reason") or result.get("bio_doc_link") or "Processing completed."
+        if response_status == "success":
+            response_message = f"Successfully generated Bio & Angles for campaign {campaign_id}."
+
+        return AnglesBioTriggerResponse(
+            campaign_id=campaign_id,
+            status=response_status,
+            message=response_message,
+            details=result
+        )
+    except Exception as e:
+        logger.exception(f"Unhandled exception during angles/bio generation trigger for campaign {campaign_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
     finally:
         processor.cleanup()

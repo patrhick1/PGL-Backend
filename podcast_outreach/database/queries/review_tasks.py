@@ -175,3 +175,26 @@ async def get_all_review_tasks_paginated(
         except Exception as e:
             logger.exception(f"Error fetching paginated review tasks: {e}")
             return [], 0
+        
+async def count_review_tasks_by_status(status: str, person_id: Optional[int] = None) -> int:
+    """Counts review tasks by status, optionally filtered by person_id (via campaign)."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            base_query = "SELECT COUNT(rt.*) FROM review_tasks rt"
+            params = [status]
+            conditions = [f"rt.status = $1"]
+
+            if person_id is not None:
+                base_query += " JOIN campaigns c ON rt.campaign_id = c.campaign_id"
+                conditions.append(f"c.person_id = ${len(params) + 1}")
+                params.append(person_id)
+            
+            where_clause = "WHERE " + " AND ".join(conditions)
+            query = f"{base_query} {where_clause};"
+            
+            count = await conn.fetchval(query, *params)
+            return count if count is not None else 0
+        except Exception as e:
+            logger.exception(f"Error counting review tasks (person_id: {person_id}, status: {status}): {e}")
+            return 0

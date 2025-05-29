@@ -7,7 +7,7 @@ import logging
 import asyncpg # For specific asyncpg exceptions
 
 # Import schemas
-from ..schemas.person_schemas import PersonCreate, PersonUpdate, PersonInDB, PersonSetPassword
+from ..schemas.person_schemas import PersonCreate, PersonUpdate, PersonInDB, PersonSetPassword, UserProfileUpdate
 
 # Import modular queries
 from podcast_outreach.database.queries import people as people_queries
@@ -148,3 +148,60 @@ async def set_person_password_api(person_id: int, password_data: PersonSetPasswo
     
     logger.info(f"Password updated successfully for person ID: {person_id}")
     return # Return 204 No Content
+
+
+@router.patch("/me/profile", response_model=PersonInDB, summary="Update Current User's Profile")
+async def update_current_user_profile(
+    profile_data: UserProfileUpdate, 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Allows the authenticated user to update their own profile information.
+    """
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not authenticated properly.")
+
+    update_data_dict = profile_data.model_dump(exclude_unset=True)
+    
+    # Prevent users from updating certain fields like role or email directly if needed
+    # For example, if email change requires verification:
+    # if "email" in update_data_dict and update_data_dict["email"] != current_user.get("username"):
+    #     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email change requires a separate verification process.")
+    # if "role" in update_data_dict:
+    #     del update_data_dict["role"] # Users cannot change their own role
+
+    if not update_data_dict:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update data provided.")
+
+    try:
+        # If dashboard_username is being updated, check for uniqueness against other users
+        if "dashboard_username" in update_data_dict and update_data_dict["dashboard_username"]:
+            existing_user_with_username = await people_queries.get_person_by_dashboard_username(update_data_dict["dashboard_username"])
+            if existing_user_with_username and existing_user_with_username["person_id"] != person_id:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dashboard username already taken.")
+        
+        # If email is being updated, check for uniqueness (if self-service email change is allowed)
+        if "email" in update_data_dict and update_data_dict["email"]:
+            existing_user_with_email = await people_queries.get_person_by_email_from_db(update_data_dict["email"])
+            if existing_user_with_email and existing_user_with_email["person_id"] != person_id:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email address already in use.")
+
+
+        updated_person = await people_queries.update_person_in_db(person_id, update_data_dict)
+        if not updated_person:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found or update failed.")
+        
+        # IMPORTANT: If email or other critical session fields are updated,
+        # you might need to update the session data here.
+        # For example, if email (which is `username` in session) changes:
+        # request.session["username"] = updated_person["email"]
+        # This requires `request: Request` to be injected into this endpoint.
+        # For simplicity, this example assumes `useAuth` will refetch `/auth/me` which will have updated data.
+
+        return PersonInDB(**updated_person)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error updating profile for person ID {person_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

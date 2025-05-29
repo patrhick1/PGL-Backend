@@ -106,21 +106,28 @@ def create_companies_table(conn):
 def create_people_table(conn):
     sql_statement = """
     CREATE TABLE people (
-        person_id SERIAL PRIMARY KEY,
-        company_id INTEGER REFERENCES companies(company_id) ON DELETE SET NULL,
-        full_name TEXT,
-        email TEXT UNIQUE,
-        linkedin_profile_url TEXT,
-        twitter_profile_url TEXT,
-        instagram_profile_url TEXT,
-        tiktok_profile_url TEXT,
-        dashboard_username TEXT,
-        dashboard_password_hash TEXT,
-        attio_contact_id UUID,
-        role VARCHAR(255),
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        person_id                 SERIAL PRIMARY KEY,
+        company_id                INTEGER    REFERENCES companies(company_id) ON DELETE SET NULL,
+        full_name                 TEXT,
+        email                     TEXT       UNIQUE,
+        linkedin_profile_url      TEXT,
+        twitter_profile_url       TEXT,
+        instagram_profile_url     TEXT,
+        tiktok_profile_url        TEXT,
+        dashboard_username        TEXT,
+        dashboard_password_hash   TEXT,
+        attio_contact_id          UUID,
+        role                      VARCHAR(255),
+        created_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        bio                       TEXT,
+        website                   TEXT,
+        location                  TEXT,
+        timezone                  VARCHAR(100),
+        notification_settings     JSONB DEFAULT '{}'::jsonb,
+        privacy_settings          JSONB DEFAULT '{}'::jsonb
     );
+
     """
     execute_sql(conn, sql_statement)
     print("Table PEOPLE created/ensured.")
@@ -240,7 +247,8 @@ def create_campaigns_table(conn):
         goal_note TEXT,
         media_kit_url TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        instantly_campaign_id TEXT -- New column for Instantly campaign ID
+        instantly_campaign_id TEXT -- New column for Instantly campaign ID,
+        questionnaire_responses JSONB -- New column for questionnaire responses
     );
     CREATE INDEX IF NOT EXISTS idx_campaigns_person_id ON CAMPAIGNS (person_id);
     CREATE INDEX IF NOT EXISTS idx_campaigns_embedding_hnsw ON CAMPAIGNS USING hnsw (embedding vector_cosine_ops);
@@ -347,6 +355,7 @@ def create_placements_table(conn): # Renamed from BOOKINGS
         placement_id SERIAL PRIMARY KEY,
         campaign_id UUID REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
         media_id INTEGER REFERENCES media(media_id) ON DELETE RESTRICT,
+        pitch_id INTEGER REFERENCES pitches(pitch_id) ON DELETE SET NULL, 
         current_status VARCHAR(100),
         status_ts TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         meeting_date DATE,
@@ -360,6 +369,7 @@ def create_placements_table(conn): # Renamed from BOOKINGS
     );
     CREATE INDEX IF NOT EXISTS idx_placements_campaign_id ON placements (campaign_id);
     CREATE INDEX IF NOT EXISTS idx_placements_media_id ON placements (media_id);
+    CREATE INDEX IF NOT EXISTS idx_placements_pitch_id ON placements (pitch_id); -- <<< ADD THIS INDEX
     """
     execute_sql(conn, sql_statement)
     print("Table PLACEMENTS created/ensured.")

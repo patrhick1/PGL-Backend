@@ -374,3 +374,36 @@ async def count_transcribed_episodes_for_media(media_id: int) -> int:
         except Exception as e:
             logger.exception(f"Error counting transcribed episodes for media {media_id}: {e}")
             return 0
+
+async def get_media_for_recommendation(limit: int = 3, min_quality_score: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Fetches media items for recommendation, e.g., by recency or quality score."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            conditions = []
+            params = []
+            
+            if min_quality_score is not None:
+                conditions.append(f"quality_score >= ${len(params) + 1}")
+                params.append(min_quality_score)
+            
+            # Add other conditions like "has contact_email", "is not in a 'do not contact' list", etc.
+            conditions.append("contact_email IS NOT NULL AND contact_email != ''")
+
+
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            # Order by quality_score desc (if available), then by recency of last_posted_at or creation
+            query = f"""
+                SELECT * FROM media
+                {where_clause}
+                ORDER BY quality_score DESC NULLS LAST, last_posted_at DESC NULLS LAST, created_at DESC
+                LIMIT ${len(params) + 1};
+            """
+            params.append(limit)
+            
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching media for recommendation: {e}")
+            return []

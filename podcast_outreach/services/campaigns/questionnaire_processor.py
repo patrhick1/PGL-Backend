@@ -3,47 +3,33 @@ import logging
 import uuid
 from typing import Dict, Any
 from podcast_outreach.database.queries import campaigns as campaign_queries
+import json # For storing as JSONB
 
 logger = logging.getLogger(__name__)
 
 def _construct_mock_interview_from_questionnaire(questionnaire_data: Dict[str, Any]) -> str:
     """
     Constructs a string for mock_interview_trancript from questionnaire responses.
+    (This function can be expanded based on your questionnaire structure)
     """
     lines = []
     
-    # Personal Info
-    pi = questionnaire_data.get("personalInfo", {})
-    if pi.get("fullName"): lines.append(f"Full Name: {pi['fullName']}")
-    if pi.get("jobTitle"): lines.append(f"Job Title: {pi['jobTitle']}")
-    if pi.get("company"): lines.append(f"Company: {pi['company']}")
-    if pi.get("bio"): lines.append(f"\nProfessional Bio:\n{pi['bio']}\n")
-    if pi.get("expertise"): lines.append(f"Areas of Expertise: {', '.join(pi['expertise'])}")
+    # Example: Iterate through top-level keys and their values
+    for section_key, section_value in questionnaire_data.items():
+        lines.append(f"--- {section_key.replace('_', ' ').title()} ---")
+        if isinstance(section_value, dict):
+            for item_key, item_value in section_value.items():
+                if isinstance(item_value, list):
+                    lines.append(f"{item_key.replace('_', ' ').title()}: {', '.join(map(str, item_value))}")
+                else:
+                    lines.append(f"{item_key.replace('_', ' ').title()}: {str(item_value)}")
+        elif isinstance(section_value, list):
+             lines.append(f"{section_key.replace('_', ' ').title()}: {', '.join(map(str, section_value))}")
+        else:
+            lines.append(f"{section_key.replace('_', ' ').title()}: {str(section_value)}")
+        lines.append("") # Add a blank line for separation
 
-    # Experience
-    exp = questionnaire_data.get("experience", {})
-    if exp.get("yearsOfExperience"): lines.append(f"\nYears of Experience: {exp['yearsOfExperience']}")
-    if exp.get("previousPodcasts"): lines.append(f"Previous Podcast Appearances: {exp['previousPodcasts']}")
-    if exp.get("speakingExperience"): lines.append(f"Other Speaking Experience: {', '.join(exp['speakingExperience'])}")
-    if exp.get("achievements"): lines.append(f"\nKey Achievements:\n{exp['achievements']}\n")
-
-    # Goals
-    goals = questionnaire_data.get("goals", {})
-    if goals.get("primaryGoals"): lines.append(f"Primary Goals for Podcast Appearances: {', '.join(goals['primaryGoals'])}")
-    if goals.get("targetAudience"): lines.append(f"\nTarget Audience Description:\n{goals['targetAudience']}\n")
-    if goals.get("keyMessages"): lines.append(f"\nKey Messages to Convey:\n{goals['keyMessages']}\n")
-    
-    # You might also iterate through the `interviewResponses` from PitchGenerator.tsx's form
-    # if that data is also submitted here or if those questions are merged into Questionnaire.tsx.
-    # For example, if `interviewResponses` is part of `questionnaire_data`:
-    # interview_responses = questionnaire_data.get("interviewResponses", {})
-    # if interview_responses:
-    #     lines.append("\n--- Interview Insights ---")
-    #     for q_id, answer in interview_responses.items():
-    #         # You'd need a mapping from q_id to actual question text for readability
-    #         lines.append(f"Q ({q_id}): {answer}")
-
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 async def process_campaign_questionnaire_submission(campaign_id: uuid.UUID, questionnaire_data: Dict[str, Any]) -> bool:
     """
@@ -59,18 +45,31 @@ async def process_campaign_questionnaire_submission(campaign_id: uuid.UUID, ques
         mock_interview_text = _construct_mock_interview_from_questionnaire(questionnaire_data)
         
         update_payload: Dict[str, Any] = {
-            "questionnaire_responses": questionnaire_data, # Store the raw JSON
+            "questionnaire_responses": questionnaire_data, # Store the raw Python dict, asyncpg handles JSONB
             "mock_interview_trancript": mock_interview_text
         }
 
-        # Extract keywords
-        keywords = set(campaign.get("campaign_keywords", []) or []) # Start with existing keywords
-        if questionnaire_data.get("personalInfo", {}).get("expertise"):
-            keywords.update(questionnaire_data["personalInfo"]["expertise"])
-        if questionnaire_data.get("preferences", {}).get("preferredTopics"):
-            keywords.update(questionnaire_data["preferences"]["preferredTopics"])
+        # Extract keywords (example logic, adjust based on your questionnaire structure)
+        # This assumes your questionnaire_data might have keys like 'expertise', 'preferredTopics' etc.
+        current_keywords = set(campaign.get("campaign_keywords", []) or []) 
         
-        update_payload["campaign_keywords"] = sorted(list(keywords))
+        # Example: Extracting from a nested structure
+        personal_info = questionnaire_data.get("personalInfo", {})
+        if isinstance(personal_info, dict) and personal_info.get("expertise"):
+            expertise_list = personal_info["expertise"]
+            if isinstance(expertise_list, list):
+                 current_keywords.update(kw for kw in expertise_list if isinstance(kw, str))
+
+        preferences = questionnaire_data.get("preferences", {})
+        if isinstance(preferences, dict) and preferences.get("preferredTopics"):
+            topics_list = preferences["preferredTopics"]
+            if isinstance(topics_list, list):
+                current_keywords.update(topic for topic in topics_list if isinstance(topic, str))
+        
+        # Add more keyword extraction logic as needed from other parts of questionnaire_data
+
+        if current_keywords: # Only update if new keywords were found or existing ones were present
+            update_payload["campaign_keywords"] = sorted(list(current_keywords))
 
         updated_campaign = await campaign_queries.update_campaign(campaign_id, update_payload)
         if updated_campaign:
@@ -83,14 +82,3 @@ async def process_campaign_questionnaire_submission(campaign_id: uuid.UUID, ques
     except Exception as e:
         logger.exception(f"Error processing questionnaire for campaign {campaign_id}: {e}")
         return False
-
-# In your new API router (e.g., api/routers/campaigns.py):
-# from podcast_outreach.services.campaigns.questionnaire_processor import process_campaign_questionnaire_submission
-#
-# @router.post("/{campaign_id}/submit-questionnaire-data")
-# async def submit_questionnaire(campaign_id: uuid.UUID, questionnaire_data: YourQuestionnairePydanticModel):
-#     success = await process_campaign_questionnaire_submission(campaign_id, questionnaire_data.model_dump())
-#     if success:
-#         return {"message": "Questionnaire data processed successfully."}
-#     else:
-#         raise HTTPException(status_code=500, detail="Failed to process questionnaire data.")
