@@ -6,13 +6,16 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 # Import schemas
-from ..schemas.media_schemas import MediaCreate, MediaUpdate, MediaInDB
+from ..schemas.media_schemas import MediaCreate, MediaUpdate, MediaInDB, AdminDiscoveryRequestSchema
 
 # Import modular queries
 from podcast_outreach.database.queries import media as media_queries
 
 # Import dependencies for authentication
 from ..dependencies import get_current_user, get_admin_user
+
+# Import the fetcher
+from podcast_outreach.services.media.podcast_fetcher import MediaFetcher
 
 import logging
 logger = logging.getLogger(__name__)
@@ -98,3 +101,40 @@ async def delete_media_api(media_id: int, user: dict = Depends(get_admin_user)):
     except Exception as e:
         logger.exception(f"Error in delete_media_api for ID {media_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.post("/discover-admin", response_model=List[MediaInDB], summary="Admin Discover Podcasts")
+async def admin_discover_podcasts_api(
+    payload: AdminDiscoveryRequestSchema, 
+    current_user: dict = Depends(get_admin_user) # Or a more general staff/admin check
+):
+    """
+    Allows Admin/Staff to discover podcasts by keyword.
+    This endpoint directly uses the MediaFetcher to search, enrich, and upsert media,
+    bypassing client-specific limitations. Results are full media records.
+    """
+    media_fetcher = MediaFetcher()
+    try:
+        # The new method in MediaFetcher is admin_discover_and_process_podcasts
+        # It expects: keyword: str, campaign_id_for_association: Optional[uuid.UUID], max_results_per_source: int
+        # The payload AdminDiscoveryRequestSchema provides query (keyword) and campaign_id.
+        # We can use a default for max_results_per_source or make it part of AdminDiscoveryRequestSchema if needed.
+        # For now, using the default from the method (e.g., 10).
+        
+        results_from_fetcher = await media_fetcher.admin_discover_and_process_podcasts(
+            keyword=payload.query,
+            campaign_id_for_association=payload.campaign_id, # This is Optional[uuid.UUID]
+            max_results_per_source=10 # Staff/admin can get a decent number; can be parameterized if needed
+        )
+        
+        # The fetcher method is designed to return a list of dicts that are compatible with MediaInDB
+        return [MediaInDB.model_validate(r) for r in results_from_fetcher]
+    
+    except HTTPException: # Re-raise HTTPExceptions directly if they occur in the fetcher
+        raise
+    except Exception as e:
+        logger.exception(f"Error in admin_discover_podcasts_api for query '{payload.query}': {e}")
+        # Consider if more specific error handling from fetcher is needed
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Admin discovery failed: {str(e)}")
+    finally:
+        # Ensure ThreadPoolExecutor in MediaFetcher is cleaned up
+        media_fetcher.cleanup()

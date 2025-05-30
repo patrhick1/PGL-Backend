@@ -37,44 +37,18 @@ ADMIN_ONLY_PATHS = [
 ]
 
 def is_path_public(path: str) -> bool:
-    logger.info(f"--- ENTERING is_path_public with path: '{path}' (type: {type(path)}) ---")
-    print(f"--- ENTERING is_path_public (print) with path: '{path}' (type: {type(path)}) ---")
-    try:
-        if not isinstance(path, str): # Defensive check
-            logger.error(f"is_path_public: path is not a string, it's {type(path)}")
-            return False
-
-        for i, public_path in enumerate(PUBLIC_PATHS):
-            logger.debug(f"is_path_public: Checking '{path}' against PUBLIC_PATHS[{i}]: '{public_path}'")
-            print(f"is_path_public (print): Checking '{path}' against PUBLIC_PATHS[{i}]: '{public_path}'")
-            if not isinstance(public_path, str): # Defensive check
-                logger.error(f"is_path_public: PUBLIC_PATHS[{i}] is not a string, it's {type(public_path)}")
-                continue
-
-            # The actual comparison
-            if path == public_path or path.startswith(public_path + "/"):
-                logger.info(f"--- EXITING is_path_public (True for {path}) ---")
-                print(f"--- EXITING is_path_public (print) (True for {path}) ---")
-                return True
-        
-        logger.info(f"--- EXITING is_path_public (False for {path}) ---")
-        print(f"--- EXITING is_path_public (print) (False for {path}) ---")
-        return False
-    except Exception as e_isp:
-        logger.error(f"--- ERROR INSIDE is_path_public ---: {e_isp}", exc_info=True)
-        print(f"--- ERROR INSIDE is_path_public (print) ---: {e_isp}")
-        raise
+    # logger.info(f"is_path_public check for: {path}") # Keep if very high-level trace needed
+    if not isinstance(path, str): return False
+    for public_path in PUBLIC_PATHS:
+        if path == public_path or path.startswith(public_path + "/"):
+            return True
+    return False
 
 def requires_admin(path: str) -> bool:
-    """
-    Check if a path requires admin privileges at the middleware level.
-    """
-    logger.debug(f"Checking if path '{path}' requires admin...") # Added debug
+    # logger.debug(f"Checking if path '{path}' requires admin...")
     for admin_path in ADMIN_ONLY_PATHS:
         if path == admin_path or path.startswith(admin_path + "/"):
-            logger.debug(f"Path '{path}' matched admin path '{admin_path}'. Requires admin.")
             return True
-    logger.debug(f"Path '{path}' does not require admin at middleware level.")
     return False
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -84,50 +58,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
-        logger.info("--- ENTERING AuthMiddleware.dispatch ---")
-        print("--- ENTERING AuthMiddleware.dispatch (print) ---")
+        path = request.url.path
+        logger.debug(f"AuthMiddleware processing path: {path}")
 
-        path_for_log = "ERROR_PATH_NOT_SET_IN_DISPATCH"
-        is_public_result_for_log = "ERROR_IS_PUBLIC_NOT_CHECKED_IN_DISPATCH"
+        if is_path_public(path):
+            logger.debug(f"Path {path} is public, skipping auth.")
+            return await call_next(request)
 
-        try:
-            path_for_log = request.url.path
-            logger.info(f"AuthMiddleware: Processing path: {path_for_log} (type: {type(path_for_log)})")
-            print(f"AuthMiddleware: Processing path (print): {path_for_log} (type: {type(path_for_log)})")
-
-            logger.info("AuthMiddleware: About to call is_path_public.")
-            print("AuthMiddleware: About to call is_path_public. (print)")
-            
-            is_public_result_for_log = is_path_public(path_for_log) 
-            
-            # Try-except block specifically for logging the result of is_path_public
-            try:
-                logger.info(f"AuthMiddleware: is_path_public returned: {is_public_result_for_log}")
-                print(f"AuthMiddleware: is_path_public returned (print): {is_public_result_for_log}")
-            except Exception as e_log_after_is_public:
-                print(f"CRITICAL ERROR (print): Failed to log result of is_path_public. Error: {e_log_after_is_public}")
-                logger.error(f"CRITICAL ERROR: Failed to log result of is_path_public. Error: {e_log_after_is_public}", exc_info=True)
-                # Allow to fall through to the main exception handler for this specific case,
-                # but the print/log above will give us a clue if this specific spot is the issue.
-
-            if is_public_result_for_log:
-                logger.info(f"AuthMiddleware: Path {path_for_log} is public. Skipping auth checks.")
-                print(f"AuthMiddleware: Path {path_for_log} is public. Skipping auth checks. (print)")
-                return await call_next(request)
-            
-        except Exception as e_path_check:
-            # This catches errors from request.url.path, or from within is_path_public if it re-raises
-            logger.error(f"AuthMiddleware: Error during path processing or is_path_public. Path was '{path_for_log}'. is_path_public_result was '{is_public_result_for_log}'. Error: {e_path_check}", exc_info=True)
-            print(f"AuthMiddleware: Error during path processing or is_path_public (print). Path was '{path_for_log}'. is_path_public_result was '{is_public_result_for_log}'. Error: {e_path_check}")
-            return Response(f"Internal Server Error: Error determining path public status. {str(e_path_check)}", status_code=500)
-
-        # If path is not public, just continue - let dependencies handle session authentication
-        logger.info(f"AuthMiddleware: Path {path_for_log} is NOT public. Letting dependencies handle authentication.")
-        print(f"AuthMiddleware: Path {path_for_log} is NOT public. Letting dependencies handle authentication. (print)")
-
-        # Note: We don't access request.session here because AuthMiddleware runs before SessionMiddleware
-        # Session-based authentication will be handled by dependencies like get_current_user()
+        # For non-public paths, AuthMiddleware now defers actual session validation 
+        # and user fetching to endpoint dependencies (like get_current_user).
+        # It can still perform broad role checks based on request.state.role if populated by dependencies.
+        # However, the primary role of this middleware (after SessionMiddleware runs) is to check path-based rules
+        # that don't depend on a fully validated session (e.g. IP blocking, rate limiting - not implemented here).
+        # The current logic for role checks based on request.state.role (populated by get_current_user)
+        # inside an endpoint is generally preferred over doing it broadly in middleware if it involves reading session.
         
-        logger.info(f"--- EXITING AuthMiddleware.dispatch (calling next for path {path_for_log}) ---")
-        print(f"--- EXITING AuthMiddleware.dispatch (calling next for path {path_for_log}) (print) ---")
+        # The previous version of this middleware tried to access request.session directly here.
+        # That was problematic because middleware order dictates SessionMiddleware might not have run yet.
+        # Now, we let it pass through. If an endpoint requires auth, its `Depends(get_current_user)`
+        # will handle checking `request.session` (which *will* have been populated by SessionMiddleware by then)
+        # and raise HTTPException if no valid session/user.
+
+        # We *could* still check `requires_admin` here if we make `get_current_user` populate `request.state`
+        # and then check `request.state.role` if it exists. But let's keep this middleware simpler for now.
+        # The dependencies in routers are the primary gatekeepers for roles.
+
+        logger.debug(f"Path {path} is not public. Proceeding to next handler/endpoint dependencies.")
         return await call_next(request)

@@ -154,68 +154,136 @@ async def delete_media_from_db(media_id: int) -> bool:
             raise
 
 async def upsert_media_in_db(media_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Create or update a media record based on rss_url or api_id."""
+    """Create or update a media record based on rss_url or (api_id and source_api)."""
+    # Unique identification should be robust. Consider a composite key in DB if necessary.
+    # For now, primary check is rss_url, fallback is api_id + source_api (if api_id can be non-unique across sources).
+    # If source_api is not reliably in media_data for existing records, this might need adjustment.
     rss_url = media_data.get("rss_url")
     api_id = media_data.get("api_id")
+    source_api = media_data.get("source_api") # Important for unique api_id
     
     existing = None
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         if rss_url:
-            query = "SELECT * FROM media WHERE rss_url = $1;"
-            existing = await conn.fetchrow(query, rss_url)
-        elif api_id: # Fallback to api_id if no RSS or RSS didn't find a match
-            query = "SELECT * FROM media WHERE api_id = $1;"
-            existing = await conn.fetchrow(query, api_id)
+            query_existing = "SELECT * FROM media WHERE rss_url = $1;"
+            existing = await conn.fetchrow(query_existing, rss_url)
         
-        existing = dict(existing) if existing else None
+        if not existing and api_id and source_api: 
+            # Only use api_id if rss_url didn't yield a result, and ensure source_api is present for context
+            query_existing_api = "SELECT * FROM media WHERE api_id = $1 AND source_api = $2;"
+            existing = await conn.fetchrow(query_existing_api, api_id, source_api)
+        elif not existing and api_id and not source_api:
+            # If source_api is not provided, we might get an api_id collision if it's not globally unique
+            logger.warning(f"Attempting to find existing media by api_id ({api_id}) without source_api. This might lead to incorrect matches if api_id is not globally unique.")
+            query_existing_api_no_source = "SELECT * FROM media WHERE api_id = $1;"
+            existing = await conn.fetchrow(query_existing_api_no_source, api_id)
 
-        if existing:
+        existing_dict = dict(existing) if existing else None
+
+        # Prepare columns and values for insert or update
+        # Exclude media_id from insert list as it's auto-generated (SERIAL)
+        # Exclude created_at from update list
+        update_payload = {k: v for k, v in media_data.items() if k not in ['media_id']}
+        
+        # Ensure all expected columns are at least Nulled if not in media_data for INSERT
+        # This list should match the DB schema / create_media_in_db list
+        all_db_columns = [
+            'name', 'title', 'rss_url', 'rss_feed_url', 'website', 'description', 'ai_description',
+            'contact_email', 'language', 'category', 'image_url', 'company_id', 'avg_downloads',
+            'audience_size', 'total_episodes', 'itunes_id', 'podcast_spotify_id', 'listen_score',
+            'listen_score_global_rank', 'itunes_rating_average', 'itunes_rating_count',
+            'spotify_rating_average', 'spotify_rating_count', 'fetched_episodes', 'source_api',
+            'api_id', 'last_posted_at', 'podcast_twitter_url', 'podcast_linkedin_url',
+            'podcast_instagram_url', 'podcast_facebook_url', 'podcast_youtube_url',
+            'podcast_tiktok_url', 'podcast_other_social_url', 'host_names', 'rss_owner_name',
+            'rss_owner_email', 'rss_explicit', 'rss_categories', 'twitter_followers',
+            'twitter_following', 'is_twitter_verified', 'linkedin_connections',
+            'instagram_followers', 'tiktok_followers', 'facebook_likes', 'youtube_subscribers',
+            'publishing_frequency_days', 'last_enriched_timestamp', 'quality_score', 'first_episode_date',
+            'latest_episode_date', 'updated_at' # updated_at will be set to NOW()
+        ]
+
+        if existing_dict:
+            # UPDATE existing record
+            media_id_to_update = existing_dict['media_id']
             set_clauses = []
             values = []
             idx = 1
-            for k, v in media_data.items():
-                # Skip primary keys and immutable identifiers for update
-                if k in ["media_id", "rss_url", "api_id", "created_at"]:
+            
+            for col in all_db_columns:
+                if col == 'created_at' or col == 'media_id': # Cannot update these
                     continue
-                set_clauses.append(f"{k} = ${idx}")
-                values.append(v)
-                idx += 1
+                if col == 'updated_at': # Will be set to NOW()
+                    continue 
+                if col in update_payload: # If new data provides this key
+                    # More nuanced update logic can be added here if needed, e.g., only update if new value is not NULL
+                    # or if existing value is NULL and new is not. 
+                    # For now, if key is in payload, it's set.
+                    set_clauses.append(f"{col} = ${idx}")
+                    values.append(update_payload[col])
+                    idx += 1
+                # If key not in payload, existing value is kept (not included in SET)
             
-            # Always update updated_at timestamp
-            set_clauses.append(f"updated_at = NOW()")
-
             if not set_clauses:
-                return existing # No fields to update, return existing record
-
-            # Use existing media_id for update
-            update_query = f"UPDATE media SET {', '.join(set_clauses)} WHERE media_id = ${idx} RETURNING *;"
-            values.append(existing['media_id'])
-            row = await conn.fetchrow(update_query, *values)
-            logger.info(f"Media updated: {existing.get('name')} (ID: {existing['media_id']})")
-            return dict(row) if row else None
-        else:
-            # Insert new record
-            columns = []
-            placeholders = []
-            values = []
-            idx = 1
-            for k, v in media_data.items():
-                # Skip media_id if it's auto-generated
-                if k == "media_id": continue
-                columns.append(k)
-                placeholders.append(f"${idx}")
-                values.append(v)
-                idx += 1
+                 # If only media_id/created_at/updated_at were in payload, nothing to set explicitly from payload
+                 # Still, we should update the 'updated_at' timestamp if any operation brought us here.
+                 # However, if truly no change, we might just return existing.
+                 # For now, always update 'updated_at' if an existing record was found and we evaluated it.
+                set_clauses.append(f"updated_at = NOW()") 
+            else:
+                set_clauses.append(f"updated_at = NOW()") # Always update updated_at if other fields are changing
             
+            update_query = f"UPDATE media SET {', '.join(set_clauses)} WHERE media_id = ${idx} RETURNING *;"
+            values.append(media_id_to_update)
+            
+            try:
+                row = await conn.fetchrow(update_query, *values)
+                logger.info(f"Media updated: {existing_dict.get('name')} (ID: {media_id_to_update})")
+                return dict(row) if row else None
+            except Exception as e:
+                logger.error(f"Error during UPDATE for media ID {media_id_to_update}, name {existing_dict.get('name')}: {e}", exc_info=True)
+                raise
+        else:
+            # INSERT new record
+            columns_for_insert = []
+            placeholders_for_insert = []
+            values_for_insert = []
+            current_idx = 1
+            for col in all_db_columns:
+                if col == 'media_id': continue # Skip for insert if auto-generated
+                if col == 'updated_at': continue # Should be handled by default or trigger in DB or NOW()
+                
+                columns_for_insert.append(col)
+                placeholders_for_insert.append(f"${current_idx}")
+                values_for_insert.append(media_data.get(col, None)) # Use None if not provided
+                current_idx += 1
+            
+            # Add created_at, updated_at explicitly for INSERT if not default in DB
+            if 'created_at' not in columns_for_insert:
+                columns_for_insert.append('created_at')
+                placeholders_for_insert.append(f'${current_idx}')
+                values_for_insert.append(datetime.utcnow()) # Or NOW() if DB handles timezone better
+                current_idx +=1
+            if 'updated_at' not in columns_for_insert:
+                columns_for_insert.append('updated_at')
+                placeholders_for_insert.append(f'${current_idx}')
+                values_for_insert.append(datetime.utcnow()) # Or NOW()
+                current_idx += 1
+
             insert_query = f"""
-            INSERT INTO media ({', '.join(columns)})
-            VALUES ({', '.join(placeholders)})
+            INSERT INTO media ({', '.join(columns_for_insert)})
+            VALUES ({', '.join(placeholders_for_insert)})
             RETURNING *;
             """
-            row = await conn.fetchrow(insert_query, *values)
-            logger.info(f"Media created: {media_data.get('name')} (ID: {row.get('media_id') if row else 'N/A'})")
-            return dict(row) if row else None
+            try:
+                row = await conn.fetchrow(insert_query, *values_for_insert)
+                logger.info(f"Media created: {media_data.get('name')} (ID: {row.get('media_id') if row else 'N/A'})")
+                return dict(row) if row else None
+            except Exception as e:
+                logger.error(f"Error during INSERT for media name {media_data.get('name')}: {e}", exc_info=True)
+                # Consider if a partial insert occurred or if transaction rolled back
+                raise
 
 async def update_media_after_sync(media_id: int) -> Optional[Dict[str, Any]]:
     """Updates last_fetched_at for a media item after episode sync."""

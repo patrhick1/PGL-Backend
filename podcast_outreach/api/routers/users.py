@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks, Query, Form
 from typing import Dict, Any, Optional, List
-from pydantic import EmailStr
+from pydantic import EmailStr, BaseModel, Field
 
 from ..schemas.person_schemas import PersonInDB, PersonCreate, PersonUpdate
 from ..schemas.settings_schemas import (
@@ -20,6 +20,7 @@ from ..schemas.settings_schemas import (
     NotificationSettingsUpdate,
     PrivacySettingsUpdate
 )
+from ..schemas import client_profile_schemas
 from podcast_outreach.database.queries import people as people_queries
 from ..dependencies import get_current_user, get_admin_user, hash_password, verify_password
 from podcast_outreach.logging_config import get_logger
@@ -27,8 +28,11 @@ from podcast_outreach.logging_config import get_logger
 from podcast_outreach.database.queries import people as people_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import placements as placement_queries
+from podcast_outreach.database.queries import client_profiles as client_profile_queries
 from podcast_outreach.database.queries import pitches as pitch_queries
-
+from podcast_outreach.config import ( # For default allowances
+    FREE_PLAN_DAILY_DISCOVERY_LIMIT, FREE_PLAN_WEEKLY_DISCOVERY_LIMIT
+)
 from podcast_outreach.services.tasks.manager import task_manager
 
 logger = get_logger(__name__)
@@ -41,7 +45,7 @@ class EmailService: # Replace with your actual email service
         return True 
 email_service = EmailService() # Instantiate your email service or a mock
 
-router = APIRouter(prefix="/users", tags=["Current User Settings"])
+router = APIRouter(prefix="/users", tags=["Users & People"])
 
 @router.patch("/me/notification-settings", response_model=PersonInDB, summary="Update My Notification Settings")
 async def update_my_notification_settings(
@@ -463,3 +467,54 @@ async def confirm_account_deletion(
         logger.error(f"Error during account deletion for person_id {person_id_to_delete}: {e}", exc_info=True)
         # Don't delete token on failure, user might retry with same token if it's still valid
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process account deletion.")
+    
+# --- Client Profile Management by Admin ---
+@router.post("/{person_id}/client-profile", response_model=client_profile_schemas.ClientProfileInDB, summary="Admin: Create or Link Client Profile")
+async def admin_create_client_profile(
+    person_id: int,
+    profile_data_in: client_profile_schemas.ClientProfileCreate, # Use ClientProfileCreate which includes person_id
+    admin_user: dict = Depends(get_admin_user)
+):
+    person = await people_queries.get_person_by_id_from_db(person_id)
+    if not person:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found.")
+    if person.get("role") != "client":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This person is not a client.")
+
+    existing_profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+    if existing_profile:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Client profile already exists for this person.")
+
+    # Use profile_data_in directly as it should match the structure needed by create_client_profile
+    # The query function will handle default allowances based on plan_type.
+    created_profile = await client_profile_queries.create_client_profile(person_id, profile_data_in.model_dump())
+    if not created_profile:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create client profile.")
+    return client_profile_schemas.ClientProfileInDB(**created_profile)
+
+
+@router.put("/{person_id}/client-profile", response_model=client_profile_schemas.ClientProfileInDB, summary="Admin: Update Client Profile")
+async def admin_update_client_profile(
+    person_id: int,
+    profile_update_data: client_profile_schemas.ClientProfileUpdate,
+    admin_user: dict = Depends(get_admin_user)
+):
+    person = await people_queries.get_person_by_id_from_db(person_id)
+    if not person or person.get("role") != "client":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client person not found.")
+
+    update_data_dict = profile_update_data.model_dump(exclude_unset=True)
+    if not update_data_dict:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update data provided.")
+
+    updated_profile = await client_profile_queries.update_client_profile(person_id, update_data_dict)
+    if not updated_profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client profile not found or update failed.")
+    return client_profile_schemas.ClientProfileInDB(**updated_profile)
+
+@router.get("/{person_id}/client-profile", response_model=client_profile_schemas.ClientProfileInDB, summary="Admin: Get Client Profile")
+async def admin_get_client_profile(person_id: int, admin_user: dict = Depends(get_admin_user)):
+    profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client profile not found for this person.")
+    return client_profile_schemas.ClientProfileInDB(**profile)

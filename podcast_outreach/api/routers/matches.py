@@ -1,7 +1,7 @@
 # podcast_outreach/api/routers/matches.py
 
 import uuid
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 import logging
 
@@ -24,10 +24,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/match-suggestions", tags=["Match Suggestions"])
 
-@router.post("/campaigns/{campaign_id}/discover", response_model=List[MatchSuggestionInDB], summary="Discover podcasts for a campaign")
-async def discover_matches_for_campaign(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
+@router.post("/campaigns/{campaign_id}/discover", 
+             status_code=status.HTTP_202_ACCEPTED,
+             response_model=Dict[str, str],
+             summary="Start Discovery for a campaign (Background Task)")
+async def discover_matches_for_campaign_background(
+    campaign_id: uuid.UUID, 
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user)
+):
     """
-    Search for podcasts and create match suggestions with review tasks.
+    Starts a background task to search for podcasts and create match suggestions.
     Staff or Admin access required.
     """
     # Validate campaign exists
@@ -37,11 +44,12 @@ async def discover_matches_for_campaign(campaign_id: uuid.UUID, user: dict = Dep
 
     service = DiscoveryService()
     try:
-        suggestions = await service.discover_for_campaign(str(campaign_id))
-        return [MatchSuggestionInDB(**s) for s in suggestions]
-    except Exception as e:
-        logger.exception(f"Error discovering matches for campaign {campaign_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to discover matches: {str(e)}")
+        # Add the long-running task to background
+        background_tasks.add_task(service.discover_for_campaign, str(campaign_id))
+        return {"message": "Podcast discovery process started in the background.", "campaign_id": str(campaign_id)}
+    except Exception as e: # Catch any immediate errors during task submission (rare)
+        logger.exception(f"Error starting discovery task for campaign {campaign_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to start discovery task: {str(e)}")
 
 @router.post("/", response_model=MatchSuggestionInDB, status_code=status.HTTP_201_CREATED, summary="Create New Match Suggestion")
 async def create_match_suggestion_api(suggestion_data: MatchSuggestionCreate, user: dict = Depends(get_admin_user)):

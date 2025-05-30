@@ -52,3 +52,8 @@ FREE_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_WEEKLY_DISCOVERY_LIM
 
 PAID_PLAN_DAILY_DISCOVERY_LIMIT = int(os.getenv("PAID_PLAN_DAILY_DISCOVERY_LIMIT", "100")) # Example
 PAID_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("PAID_PLAN_WEEKLY_DISCOVERY_LIMIT", "500")) # Example
+
+# --- API Client Settings ---
+LISTENNOTES_PAGE_SIZE = int(os.getenv("LISTENNOTES_PAGE_SIZE", "10"))
+PODSCAN_PAGE_SIZE = int(os.getenv("PODSCAN_PAGE_SIZE", "10"))
+API_CALL_DELAY = float(os.getenv("API_CALL_DELAY", "1.0")) # Delay in seconds between API calls for rate limiting
