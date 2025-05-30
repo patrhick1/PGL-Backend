@@ -490,7 +490,44 @@ def create_ai_usage_logs_table(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table AI_USAGE_LOGS created/ensured.")
- 
+
+def create_media_kits_table(conn): # NEW FUNCTION
+    """Creates the media_kits table."""
+    sql_statement = """
+    CREATE TABLE media_kits (
+        media_kit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- Using UUID as primary key
+        campaign_id UUID REFERENCES campaigns(campaign_id) ON DELETE CASCADE NOT NULL,
+        person_id INTEGER REFERENCES people(person_id) ON DELETE CASCADE NOT NULL,
+        title TEXT,
+        slug TEXT UNIQUE NOT NULL,
+        is_public BOOLEAN DEFAULT FALSE NOT NULL,
+        theme_preference TEXT DEFAULT 'modern',
+        headline TEXT,
+        introduction TEXT,
+        full_bio_content TEXT,
+        summary_bio_content TEXT,
+        short_bio_content TEXT,
+        talking_points JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
+        key_achievements JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
+        previous_appearances JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
+        social_media_stats JSONB DEFAULT '{}'::jsonb, -- Default to empty JSON object
+        headshot_image_urls TEXT[],
+        logo_image_url TEXT,
+        call_to_action_text TEXT,
+        contact_information_for_booking TEXT,
+        custom_sections JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_media_kits_campaign_id ON media_kits (campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_media_kits_person_id ON media_kits (person_id);
+    CREATE INDEX IF NOT EXISTS idx_media_kits_slug ON media_kits (slug);
+    CREATE INDEX IF NOT EXISTS idx_media_kits_is_public ON media_kits (is_public);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table MEDIA_KITS created/ensured.")
+    apply_timestamp_update_trigger(conn, "media_kits")
+
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
@@ -501,6 +538,7 @@ def drop_all_tables(conn):
         "PITCHES",            # FKs to CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         "PITCH_GENERATIONS",  # FKs to CAMPAIGNS, MEDIA, PITCH_TEMPLATES
         "PLACEMENTS",         # FKs to CAMPAIGNS, MEDIA
+        "MEDIA_KITS",         # ADDED to drop order
         "PITCH_TEMPLATES",
         "EPISODES",           # FK to MEDIA
         "MEDIA_PEOPLE",       # FKs to MEDIA, PEOPLE
@@ -578,6 +616,7 @@ def create_all_tables():
         create_pitches_table(conn) # Depends on CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         create_status_history_table(conn) # Depends on PLACEMENTS
         create_ai_usage_logs_table(conn) # NEW: Depends on PITCH_GENERATIONS, CAMPAIGNS, MEDIA
+        create_media_kits_table(conn) # ADDED: Depends on CAMPAIGNS, PEOPLE
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:

@@ -152,32 +152,66 @@ class GeminiService: # Keeping original class name for compatibility with existi
             initial_retry_delay=initial_retry_delay
         )
 
-    async def get_structured_data(self, prompt: str, output_model: Any, temperature: float = 0.1,
+    async def get_structured_data(self, 
+                                  prompt_template_str: str, # Renamed from prompt to reflect it's a template string
+                                  user_query: str,          # Added: the actual content to process (e.g., GDoc text)
+                                  output_model: Any, 
+                                  temperature: float = 0.1,
                                   workflow: str = "structured_output",
                                   related_pitch_gen_id: Optional[int] = None,
-                                  related_campaign_id: Optional[uuid.UUID] = None, related_media_id: Optional[int] = None,
-                                  max_retries: int = 3, initial_retry_delay: int = 2) -> Optional[Any]:
+                                  related_campaign_id: Optional[uuid.UUID] = None, 
+                                  related_media_id: Optional[int] = None,
+                                  max_retries: int = 3, 
+                                  initial_retry_delay: int = 2) -> Optional[Any]:
         """
         Generates structured data using Gemini with a Pydantic-like output model.
-        This method is designed to be used with models that support structured output (e.g., Gemini 1.5 Flash/Pro).
+        It now expects a prompt_template_str (which should include placeholders like {user_query} and {format_instructions})
+        and a user_query (e.g., the GDoc content).
         """
         from langchain_google_genai import ChatGoogleGenerativeAI
-        from langchain.output_parsers.pydantic import PydanticOutputParser
-        from langchain.prompts import PromptTemplate
+        # Corrected import for PydanticOutputParser based on common Langchain usage
+        from langchain_core.output_parsers import PydanticOutputParser 
+        from langchain_core.prompts import PromptTemplate # Corrected import path
 
         parser = PydanticOutputParser(pydantic_object=output_model)
         format_instructions = parser.get_format_instructions()
 
-        full_prompt_template = PromptTemplate(
-            template="""{prompt_instructions}\n\n{format_instructions}\n\nUser query: {user_query}""",
-            input_variables=["prompt_instructions", "format_instructions", "user_query"]
+        # The prompt_template_str IS the template string itself now.
+        # It should contain placeholders for {format_instructions} and {user_query} (or whatever variable name you use for the GDoc content).
+        # Example prompt_template_str might be:
+        # """Please extract information from the following text: {user_query}
+        # Comply with these format instructions: {format_instructions}"""
+        
+        # Assume prompt_template_str contains {user_query} and {format_instructions}
+        # If your actual template uses a different placeholder for the GDoc content (e.g., {{gdoc_content}}),
+        # you'll need to ensure your PromptTemplate reflects that, e.g. input_variables=["gdoc_content", "format_instructions"]
+        # and then pass it in chain.invoke like {"gdoc_content": user_query}
+        
+        # For current implementation, let's assume the prompt_template_str expects 'user_query' and 'format_instructions'
+        # and 'prompt_instructions' is part of the prompt_template_str directly.
+        # The key is that the LangChain PromptTemplate needs to be constructed correctly.
+
+        # Let's define input_variables based on what your prompt_template_str actually expects.
+        # If your prompts (parse_bio_prompt.txt) use {{gdoc_content}}, then input_variables should reflect that.
+        # For example, if prompt_template_str is "Extract from {{gdoc_content}}. Format: {format_instructions}"
+        # then input_variables=["gdoc_content", "format_instructions"]
+        # and chain.invoke would be chain.invoke({"gdoc_content": user_query})
+
+        # For this adaptation, I will assume the prompt_template_str uses {user_query} and {format_instructions}.
+        # If your actual template uses a different name for the content placeholder (like {{gdoc_content}}), 
+        # then the `user_query` key in `chain.invoke` and `input_variables` must match that name.
+
+        prompt_template = PromptTemplate(
+            template=prompt_template_str, # This is the full template now
+            input_variables=["user_query", "format_instructions"], # Assuming these are in your prompt_template_str
+            partial_variables={"format_instructions": format_instructions}
         )
 
-        full_prompt = full_prompt_template.format(
-            prompt_instructions=prompt,
-            format_instructions=format_instructions,
-            user_query="" # The main prompt is the instruction, no separate user query here
-        )
+        # For logging, the fully formatted prompt before LLM call
+        # This requires formatting with the actual user_query as well.
+        # formatted_llm_prompt_for_logging = prompt_template.format(user_query=user_query) 
+        # For a simpler token count, we can use the template + user_query length.
+        approx_input_for_logging = prompt_template_str + user_query + format_instructions
 
         retry_count = 0
         retry_delay = initial_retry_delay
@@ -187,26 +221,21 @@ class GeminiService: # Keeping original class name for compatibility with existi
             try:
                 start_time = time.time()
 
-                # Re-initialize LLM for structured output if needed, or ensure it's configured for it
                 llm_for_structured_output = ChatGoogleGenerativeAI(
-                    model="gemini-1.5-flash-001", # Or a more capable model if needed for complex parsing
+                    model="gemini-1.5-flash-001", 
                     google_api_key=GEMINI_API_KEY,
                     temperature=temperature,
-                    max_output_tokens=2048 # Ensure enough tokens for structured output
+                    max_output_tokens=2048 
                 )
-
-                chain = (
-                    full_prompt_template.partial(prompt_instructions=prompt, format_instructions=format_instructions)
-                    | llm_for_structured_output.with_structured_output(output_model)
-                )
-
-                # Use asyncio.to_thread for synchronous LangChain call
-                response_obj = await asyncio.to_thread(chain.invoke, {"user_query": ""})
+                
+                # The chain now correctly uses the PromptTemplate which has format_instructions partially filled.
+                # It expects `user_query` to be provided during invoke.
+                chain = prompt_template | llm_for_structured_output.with_structured_output(output_model)
+                
+                response_obj = await asyncio.to_thread(chain.invoke, {"user_query": user_query})
 
                 execution_time = time.time() - start_time
-
-                # Estimate tokens for logging
-                tokens_in = len(full_prompt) // 4
+                tokens_in = len(approx_input_for_logging) // 4 
                 tokens_out = len(response_obj.model_dump_json()) // 4
 
                 await ai_tracker.log_usage(
@@ -215,18 +244,15 @@ class GeminiService: # Keeping original class name for compatibility with existi
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     execution_time=execution_time,
-                    endpoint="gemini.structured_output",
+                    endpoint="gemini.structured_output_v2", # Updated endpoint name
                     related_pitch_gen_id=related_pitch_gen_id,
                     related_campaign_id=related_campaign_id,
                     related_media_id=related_media_id
                 )
-
                 return response_obj
-
             except Exception as e:
                 last_exception = e
                 retry_count += 1
-
                 if retry_count <= max_retries:
                     logger.warning(f"Error in Gemini structured output API call (attempt {retry_count}/{max_retries}): {e}. "
                                    f"Retrying in {retry_delay} seconds...")
