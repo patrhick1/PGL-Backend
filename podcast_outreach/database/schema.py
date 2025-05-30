@@ -133,7 +133,31 @@ def create_people_table(conn):
     print("Table PEOPLE created/ensured.")
     apply_timestamp_update_trigger(conn, "people")
  
- 
+def create_client_profiles_table(conn):
+    sql_statement = """
+    CREATE TABLE client_profiles (
+        client_profile_id         SERIAL PRIMARY KEY,
+        person_id                 INTEGER NOT NULL UNIQUE REFERENCES people(person_id) ON DELETE CASCADE,
+        plan_type                 VARCHAR(50) DEFAULT 'free' NOT NULL, -- e.g., 'free', 'paid_basic', 'paid_premium'
+        daily_discovery_allowance INTEGER DEFAULT 10 NOT NULL,
+        weekly_discovery_allowance INTEGER DEFAULT 50 NOT NULL,
+        current_daily_discoveries INTEGER DEFAULT 0 NOT NULL,
+        current_weekly_discoveries INTEGER DEFAULT 0 NOT NULL,
+        last_daily_reset          DATE DEFAULT CURRENT_DATE,
+        last_weekly_reset         DATE DEFAULT CURRENT_DATE, -- Could be Monday of the week
+        subscription_provider_id  VARCHAR(255), -- e.g., Stripe subscription ID
+        subscription_status       VARCHAR(50),  -- e.g., 'active', 'canceled', 'past_due'
+        subscription_ends_at      TIMESTAMPTZ,
+        created_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_client_profiles_person_id ON client_profiles (person_id);
+    CREATE INDEX IF NOT EXISTS idx_client_profiles_plan_type ON client_profiles (plan_type);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table CLIENT_PROFILES created/ensured.")
+    apply_timestamp_update_trigger(conn, "client_profiles")
+
 def create_media_table(conn):
     sql_statement = """
     CREATE TABLE IF NOT EXISTS media (
@@ -541,6 +565,7 @@ def create_all_tables():
         # Create tables in order of dependency
         create_companies_table(conn)
         create_people_table(conn) # Depends on COMPANIES (indirectly via trigger), applies trigger
+        create_client_profiles_table(conn) # Depends on PEOPLE
         create_media_table(conn) # Depends on COMPANIES
         create_media_people_table(conn) # Depends on MEDIA, PEOPLE
         create_campaigns_table(conn) # Depends on PEOPLE
