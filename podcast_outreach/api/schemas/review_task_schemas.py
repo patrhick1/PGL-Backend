@@ -23,6 +23,15 @@ class ReviewTaskResponse(ReviewTaskBase):
     review_task_id: int
     created_at: datetime
     completed_at: Optional[datetime] = None
+    # Enriched fields (especially for pitch_review tasks)
+    draft_text: Optional[str] = None
+    subject_line: Optional[str] = None
+    media_name: Optional[str] = None
+    campaign_name: Optional[str] = None
+    client_name: Optional[str] = None
+    # Fields from pitch_generations itself if useful
+    pitch_gen_id: Optional[int] = None # This is same as related_id for pitch_review
+    media_id: Optional[int] = None
 
     class Config:
         orm_mode = True

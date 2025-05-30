@@ -31,5 +31,7 @@ class MatchSuggestionInDB(MatchSuggestionBase):
     created_at: datetime
     media_name: Optional[str] = None 
     media_website: Optional[str] = None
+    campaign_name: Optional[str] = None
+    client_name: Optional[str] = None
     class Config:
         from_attributes = True

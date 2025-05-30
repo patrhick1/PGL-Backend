@@ -56,6 +56,13 @@ class PitchInDB(BaseModel):
     created_by: Optional[str]
     created_at: datetime
 
+    # Enriched fields
+    campaign_name: Optional[str] = None
+    media_name: Optional[str] = None
+    client_name: Optional[str] = None
+    # Potentially full draft_text from pitch_generations if displaying sent content
+    draft_text: Optional[str] = None 
+
     class Config:
         from_attributes = True
 
@@ -77,3 +84,10 @@ class PitchGenerationInDB(BaseModel):
 
     class Config:
         from_attributes = True
+
+class PitchGenerationContentUpdate(BaseModel):
+    draft_text: Optional[str] = Field(None, description="The updated draft text of the pitch email body.")
+    new_subject_line: Optional[str] = Field(None, description="The updated subject line for the pitch.")
+
+    class Config:
+        from_attributes = True # Or orm_mode for Pydantic v1 compatibility

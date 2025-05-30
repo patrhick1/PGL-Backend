@@ -161,3 +161,139 @@ async def count_pitches_by_state(pitch_states: List[str], person_id: Optional[in
         except Exception as e:
             logger.exception(f"Error counting pitches by state (person_id: {person_id}, states: {pitch_states}): {e}")
             return 0
+
+async def get_all_pitches_enriched(
+    skip: int = 0, 
+    limit: int = 100,
+    campaign_id: Optional[uuid.UUID] = None,
+    media_id: Optional[int] = None,
+    pitch_states: Optional[List[str]] = None, # For IN clause
+    client_approval_status: Optional[str] = None,
+    person_id: Optional[int] = None # For filtering by client
+) -> List[Dict[str, Any]]:
+    """Fetches all pitches with optional filters and enrichment."""
+    conditions = []
+    params = []
+    param_idx = 1
+
+    select_clauses = [
+        "p.*",
+        "c.campaign_name",
+        "m.name AS media_name",
+        "cl.full_name AS client_name",
+        "pg.draft_text" # Get draft_text from pitch_generations
+    ]
+
+    joins = [
+        "LEFT JOIN campaigns c ON p.campaign_id = c.campaign_id",
+        "LEFT JOIN media m ON p.media_id = m.media_id",
+        "LEFT JOIN people cl ON c.person_id = cl.person_id",
+        "LEFT JOIN pitch_generations pg ON p.pitch_gen_id = pg.pitch_gen_id"
+    ]
+
+    if campaign_id:
+        conditions.append(f"p.campaign_id = ${param_idx}")
+        params.append(campaign_id)
+        param_idx += 1
+    if media_id:
+        conditions.append(f"p.media_id = ${param_idx}")
+        params.append(media_id)
+        param_idx += 1
+    if pitch_states:
+        # Create placeholders like ($2, $3, $4) for the IN clause
+        state_placeholders = ", ".join([f"${param_idx + i}" for i in range(len(pitch_states))])
+        conditions.append(f"p.pitch_state IN ({state_placeholders})")
+        params.extend(pitch_states)
+        param_idx += len(pitch_states)
+    if client_approval_status:
+        conditions.append(f"p.client_approval_status = ${param_idx}")
+        params.append(client_approval_status)
+        param_idx += 1
+    if person_id: # Filter by client (person_id associated with the campaign)
+        conditions.append(f"c.person_id = ${param_idx}")
+        params.append(person_id)
+        param_idx += 1
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    query_str = f"""
+    SELECT {', '.join(select_clauses)}
+    FROM pitches p
+    {' '.join(joins)}
+    WHERE {where_clause}
+    ORDER BY p.created_at DESC
+    OFFSET ${param_idx} LIMIT ${param_idx + 1};
+    """
+    params.extend([skip, limit])
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query_str, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching all enriched pitches: {e}")
+            return []
+
+# Ensure this function is removed or updated if get_all_pitches_enriched replaces its use cases
+async def get_all_pitches_from_db(
+    skip: int = 0, limit: int = 100,
+    campaign_id: Optional[uuid.UUID] = None,
+    media_id: Optional[int] = None,
+    pitch_state: Optional[str] = None,
+    client_approval_status: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    logger.warning("get_all_pitches_from_db is being called. Consider using get_all_pitches_enriched for richer data.")
+    # ... (keep existing implementation of get_all_pitches_from_db for now or deprecate)
+    # For this exercise, I'll assume it's kept for any part of the code still using it without enrichment.
+    conditions = []
+    params = []
+    param_idx = 1
+    if campaign_id:
+        conditions.append(f"campaign_id = ${param_idx}"); params.append(campaign_id); param_idx +=1
+    if media_id:
+        conditions.append(f"media_id = ${param_idx}"); params.append(media_id); param_idx +=1
+    if pitch_state:
+        conditions.append(f"pitch_state = ${param_idx}"); params.append(pitch_state); param_idx +=1
+    if client_approval_status:
+        conditions.append(f"client_approval_status = ${param_idx}"); params.append(client_approval_status); param_idx +=1
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    query = f"SELECT * FROM pitches WHERE {where_clause} ORDER BY created_at DESC OFFSET ${param_idx} LIMIT ${param_idx+1};"
+    params.extend([skip, limit])
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching all pitches (un-enriched): {e}")
+            return []
+
+async def get_pitch_by_id_enriched(pitch_id: int) -> Optional[Dict[str, Any]]:
+    """Fetches a single pitch by its ID and enriches it with related data."""
+    query = """
+    SELECT 
+        p.*,
+        c.campaign_name,
+        m.name AS media_name,
+        cl.full_name AS client_name,
+        pg.draft_text
+    FROM pitches p
+    LEFT JOIN campaigns c ON p.campaign_id = c.campaign_id
+    LEFT JOIN media m ON p.media_id = m.media_id
+    LEFT JOIN people cl ON c.person_id = cl.person_id
+    LEFT JOIN pitch_generations pg ON p.pitch_gen_id = pg.pitch_gen_id
+    WHERE p.pitch_id = $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, pitch_id)
+            if not row:
+                logger.debug(f"Enriched pitch not found: {pitch_id}")
+                return None
+            return dict(row)
+        except Exception as e:
+            logger.exception(f"Error fetching enriched pitch {pitch_id}: {e}")
+            return None # Or raise

@@ -128,54 +128,97 @@ async def get_all_review_tasks_paginated(
     task_type: Optional[str] = None,
     status: Optional[str] = None,
     assigned_to_id: Optional[int] = None,
-    campaign_id: Optional[str] = None # Assuming campaign_id is UUID, but comes as str from query param
+    campaign_id: Optional[str] = None 
 ) -> tuple[List[Dict[str, Any]], int]:
-    """Fetches review tasks with filtering and pagination."""
+    """Fetches review tasks with filtering, pagination, and enrichment for pitch_review tasks."""
     offset = (page - 1) * size
     
+    select_clauses = [
+        "rt.*",
+        "c.campaign_name",
+        "p.full_name AS client_name",
+        "m.name AS media_name",
+        "pg.draft_text",
+        "pch.subject_line", 
+        "pg.media_id AS pitch_media_id" # To distinguish from a general media_id if joined differently
+    ]
+    
+    joins = [
+        "LEFT JOIN campaigns c ON rt.campaign_id = c.campaign_id",
+        "LEFT JOIN people p ON c.person_id = p.person_id",
+        # Conditional joins for pitch_review related data
+        "LEFT JOIN pitch_generations pg ON rt.task_type = 'pitch_review' AND rt.related_id = pg.pitch_gen_id",
+        "LEFT JOIN pitches pch ON pg.pitch_gen_id = pch.pitch_gen_id", # Assuming one pitch per pitch_gen for subject
+        "LEFT JOIN media m ON pg.media_id = m.media_id" # Media for the pitch
+    ]
+    
+    # Note: If task_type is 'match_suggestion', media_name would come from a different join:
+    # LEFT JOIN match_suggestions ms ON rt.task_type = 'match_suggestion' AND rt.related_id = ms.match_id
+    # LEFT JOIN media m_match ON ms.media_id = m_match.media_id (and select m_match.name)
+    # For simplicity, this query prioritizes enrichment for 'pitch_review'. 
+    # A more complex query or separate functions might be needed for fully polymorphic enrichment.
+
     conditions = []
     params = []
     param_idx = 1
 
     if task_type:
-        conditions.append(f"task_type = ${param_idx}")
+        conditions.append(f"rt.task_type = ${param_idx}")
         params.append(task_type)
         param_idx += 1
     if status:
-        conditions.append(f"status = ${param_idx}")
+        conditions.append(f"rt.status = ${param_idx}")
         params.append(status)
         param_idx += 1
     if assigned_to_id is not None:
-        conditions.append(f"assigned_to = ${param_idx}")
+        conditions.append(f"rt.assigned_to = ${param_idx}")
         params.append(assigned_to_id)
         param_idx += 1
     if campaign_id:
-        conditions.append(f"campaign_id = ${param_idx}")
-        params.append(campaign_id) # Keep as string, asyncpg handles UUID conversion if column is UUID
+        conditions.append(f"rt.campaign_id = ${param_idx}") # campaign_id on review_tasks table
+        params.append(campaign_id)
         param_idx += 1
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 
-    base_query = "FROM review_tasks WHERE " + where_clause
+    query_string = f"""
+    SELECT {', '.join(select_clauses)}
+    FROM review_tasks rt
+    {' '.join(joins)}
+    WHERE {where_clause}
+    ORDER BY rt.created_at DESC
+    LIMIT ${param_idx} OFFSET ${param_idx + 1};
+    """
+    params_for_query = params + [size, offset]
     
-    query = f"SELECT * {base_query} ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1};"
-    params.extend([size, offset])
-    
-    count_query = f"SELECT COUNT(*) AS total {base_query};"
-    # Params for count_query are the same as for the main query, excluding limit and offset
-    count_params = params[:-2] if len(params) > 1 else [] 
+    count_query_string = f"""
+    SELECT COUNT(rt.*) AS total
+    FROM review_tasks rt
+    {' '.join(joins)}  -- Apply same joins for accurate count if filters span joined tables, though less critical for base count
+    WHERE {where_clause};
+    """
+    params_for_count = params # Count query doesn't need limit/offset params
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, *params)
-            total_record = await conn.fetchrow(count_query, *count_params)
+            rows = await conn.fetch(query_string, *params_for_query)
+            total_record = await conn.fetchrow(count_query_string, *params_for_count)
             total = total_record['total'] if total_record else 0
-            return [dict(row) for row in rows], total
+            
+            # Adapt the returned dictionary to include pitch_gen_id and media_id for the schema
+            results = []
+            for row in rows:
+                r = dict(row)
+                if r.get('task_type') == 'pitch_review':
+                    r['pitch_gen_id'] = r.get('related_id')
+                    r['media_id'] = r.get('pitch_media_id')
+                results.append(r)
+            return results, total
         except Exception as e:
-            logger.exception(f"Error fetching paginated review tasks: {e}")
+            logger.exception(f"Error fetching paginated and enriched review tasks: {e}")
             return [], 0
-        
+
 async def count_review_tasks_by_status(status: str, person_id: Optional[int] = None) -> int:
     """Counts review tasks by status, optionally filtered by person_id (via campaign)."""
     pool = await get_db_pool()

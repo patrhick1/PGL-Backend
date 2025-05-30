@@ -161,3 +161,79 @@ async def approve_match_and_create_pitch_task(match_id: int) -> Optional[Dict[st
         logger.exception("Error creating pitch review task for match %s: %s", match_id, e)
 
     return match
+
+async def get_all_match_suggestions_enriched(
+    status: Optional[str] = None, 
+    campaign_id: Optional[uuid.UUID] = None,
+    skip: int = 0, 
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Fetches all match suggestions, optionally filtered by status or campaign_id, and enriches them."""
+    conditions = []
+    params = []
+    param_idx = 1
+
+    if status:
+        conditions.append(f"ms.status = ${param_idx}")
+        params.append(status)
+        param_idx += 1
+    
+    if campaign_id:
+        conditions.append(f"ms.campaign_id = ${param_idx}")
+        params.append(campaign_id)
+        param_idx += 1
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    query = f"""
+    SELECT 
+        ms.*,
+        m.name AS media_name,
+        m.website AS media_website,
+        c.campaign_name AS campaign_name,
+        p.full_name AS client_name
+    FROM match_suggestions ms
+    JOIN media m ON ms.media_id = m.media_id
+    JOIN campaigns c ON ms.campaign_id = c.campaign_id
+    LEFT JOIN people p ON c.person_id = p.person_id -- LEFT JOIN in case person_id is nullable or person is deleted
+    WHERE {where_clause}
+    ORDER BY ms.created_at DESC
+    OFFSET ${param_idx} LIMIT ${param_idx + 1};
+    """
+    params.extend([skip, limit])
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching all enriched match_suggestions: {e}")
+            return []
+
+async def get_match_suggestion_by_id_enriched(match_id: int) -> Optional[Dict[str, Any]]:
+    """Fetches a single match suggestion by its ID and enriches it."""
+    query = """
+    SELECT 
+        ms.*,
+        m.name AS media_name,
+        m.website AS media_website,
+        c.campaign_name AS campaign_name,
+        p.full_name AS client_name
+    FROM match_suggestions ms
+    JOIN media m ON ms.media_id = m.media_id
+    JOIN campaigns c ON ms.campaign_id = c.campaign_id
+    LEFT JOIN people p ON c.person_id = p.person_id
+    WHERE ms.match_id = $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, match_id)
+            if not row:
+                logger.debug(f"Enriched match suggestion not found: {match_id}")
+                return None
+            return dict(row)
+        except Exception as e:
+            logger.exception(f"Error fetching enriched match suggestion {match_id}: {e}")
+            return None # Or raise, depending on desired error handling
