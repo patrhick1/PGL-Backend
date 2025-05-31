@@ -21,7 +21,7 @@ class SubjectLine(BaseModel):
 
 class PitchGenerationRequest(BaseModel):
     match_id: int = Field(..., description="The ID of the approved match suggestion for which to generate a pitch.")
-    pitch_template_name: str = Field(..., description="Name of the pitch template to use (e.g., 'friendly_intro_template').")
+    pitch_template_id: str = Field(..., description="ID of the pitch template to use (e.g., 'friendly_intro_template').")
 
 class PitchGenerationResponse(BaseModel):
     pitch_gen_id: int
@@ -71,7 +71,7 @@ class PitchGenerationInDB(BaseModel):
     campaign_id: uuid.UUID
     media_id: int
     template_id: str
-    draft_text: str
+    draft_text: Optional[str] = None
     ai_model_used: Optional[str]
     pitch_topic: Optional[str]
     temperature: Optional[float]

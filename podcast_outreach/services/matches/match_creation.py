@@ -1,0 +1,247 @@
+# podcast_outreach/services/matches/match_creation.py
+import asyncio
+import logging
+import uuid
+from typing import Dict, Any, Optional, List, Tuple
+import numpy as np
+
+# Database queries
+from podcast_outreach.database.queries import campaigns as campaign_queries
+from podcast_outreach.database.queries import media as media_queries
+from podcast_outreach.database.queries import episodes as episode_queries
+from podcast_outreach.database.queries import match_suggestions as match_queries
+from podcast_outreach.database.queries import review_tasks as review_task_queries
+
+# Task manager for creating review tasks
+from podcast_outreach.services.tasks.manager import task_manager
+
+logger = logging.getLogger(__name__)
+
+# Constants for scoring
+WEIGHT_EMBEDDING = 0.7
+WEIGHT_KEYWORD = 0.3
+MIN_SCORE_FOR_QUALITATIVE_REVIEW = 0.5 # Threshold to create a review task
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Computes cosine similarity between two vectors."""
+    if not vec1 or not vec2:
+        return 0.0
+    
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
+    # Handle potential zero norm
+    norm_v1 = np.linalg.norm(v1)
+    norm_v2 = np.linalg.norm(v2)
+    if norm_v1 == 0 or norm_v2 == 0:
+        return 0.0
+    
+    similarity = np.dot(v1, v2) / (norm_v1 * norm_v2)
+    return float(similarity) if not np.isnan(similarity) else 0.0
+
+def jaccard_similarity(list1: List[str], list2: List[str]) -> float:
+    """Computes Jaccard similarity between two lists of keywords."""
+    if not list1 or not list2:
+        return 0.0
+    set1 = set(list1)
+    set2 = set(list2)
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    return intersection / union if union > 0 else 0.0
+
+
+class MatchCreationService:
+    """
+    Service to create and score match suggestions between campaigns and media episodes.
+    """
+
+    async def create_and_score_match_suggestions_for_campaign(
+        self, 
+        campaign_id: uuid.UUID, 
+        media_records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Processes one campaign against multiple media records to create/update match suggestions.
+        """
+        processed_matches = []
+        campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+        if not campaign or not campaign.get("embedding") or not campaign.get("campaign_keywords"):
+            logger.warning(f"Campaign {campaign_id} has no embedding or keywords. Skipping match creation.")
+            return []
+
+        for media_data in media_records:
+            media_id = media_data.get("media_id")
+            if not media_id:
+                continue
+            
+            match_result = await self._score_single_campaign_media_pair(campaign, media_data)
+            if match_result:
+                processed_matches.append(match_result)
+        return processed_matches
+
+    async def create_and_score_match_suggestions_for_media(
+        self, 
+        media_id: int, 
+        campaign_records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Processes one media record (and its episodes) against multiple campaigns.
+        """
+        processed_matches = []
+        media_data = await media_queries.get_media_by_id_from_db(media_id)
+        if not media_data:
+            logger.warning(f"Media {media_id} not found. Skipping match creation.")
+            return []
+
+        episodes_with_embeddings = await episode_queries.get_episodes_for_media_with_embeddings(media_id, limit=10)
+        if not episodes_with_embeddings:
+            logger.info(f"Media {media_id} has no episodes with embeddings. Skipping match creation against campaigns.")
+            return []
+        
+        media_data["episodes_with_embeddings"] = episodes_with_embeddings
+
+        for campaign in campaign_records:
+            if not campaign or not campaign.get("embedding") or not campaign.get("campaign_keywords"):
+                logger.debug(f"Campaign {campaign.get('campaign_id')} missing embedding/keywords for media {media_id}. Skipping.")
+                continue
+            
+            match_result = await self._score_single_campaign_media_pair(campaign, media_data)
+            if match_result:
+                processed_matches.append(match_result)
+        return processed_matches
+
+    async def _score_single_campaign_media_pair(
+        self, 
+        campaign: Dict[str, Any], 
+        media: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Scores a single campaign against a single media item (with its episodes).
+        Creates or updates the match_suggestion record.
+        """
+        campaign_id = campaign["campaign_id"]
+        media_id = media["media_id"]
+        
+        campaign_embedding = campaign.get("embedding")
+        campaign_keywords = campaign.get("campaign_keywords", [])
+
+        if not campaign_embedding:
+            logger.debug(f"Campaign {campaign_id} has no embedding. Cannot score against media {media_id}.")
+            return None
+
+        episodes_to_score = media.get("episodes_with_embeddings")
+        if episodes_to_score is None:
+            episodes_to_score = await episode_queries.get_episodes_for_media_with_embeddings(media_id, limit=5)
+
+        if not episodes_to_score:
+            logger.debug(f"Media {media_id} has no recent episodes with embeddings. Cannot score for campaign {campaign_id}.")
+            return None
+
+        best_embedding_score = -1.0
+        best_matching_episode_id = None
+        best_episode_keywords = []
+        
+        for episode in episodes_to_score:
+            episode_embedding = episode.get("embedding")
+            if episode_embedding:
+                sim = cosine_similarity(campaign_embedding, episode_embedding)
+                if sim > best_embedding_score:
+                    best_embedding_score = sim
+                    best_matching_episode_id = episode.get("episode_id")
+                    best_episode_keywords = episode.get("episode_keywords", [])
+
+        keyword_score = 0.0
+        overlapping_keywords = []
+        if campaign_keywords and best_episode_keywords:
+            keyword_score = jaccard_similarity(campaign_keywords, best_episode_keywords)
+            overlapping_keywords = list(set(campaign_keywords).intersection(set(best_episode_keywords)))
+        
+        final_quantitative_score = (best_embedding_score * WEIGHT_EMBEDDING) + (keyword_score * WEIGHT_KEYWORD)
+        
+        ai_reasoning_parts = [f"Quantitative match score: {final_quantitative_score:.3f}."]
+        if best_embedding_score >= 0.0: # Check if any embedding score was calculated, not just > -1
+            ai_reasoning_parts.append(f"Content similarity (max {best_embedding_score:.3f}) with episode ID {best_matching_episode_id if best_matching_episode_id else 'N/A'}.")
+        if keyword_score > 0:
+            ai_reasoning_parts.append(f"Keyword Jaccard score ({keyword_score:.3f}). Overlap: {overlapping_keywords[:5]}.")
+        
+        ai_reasoning = " ".join(ai_reasoning_parts)
+
+        match_suggestion_payload = {
+            "campaign_id": campaign_id,
+            "media_id": media_id,
+            "match_score": final_quantitative_score,
+            "matched_keywords": overlapping_keywords,
+            "ai_reasoning": ai_reasoning,
+            "status": "pending_qualitative_assessment",
+            "best_matching_episode_id": best_matching_episode_id
+        }
+        
+        existing_suggestion = await match_queries.get_match_suggestion(campaign_id, media_id)
+        match_suggestion_id_for_task = None
+
+        if existing_suggestion:
+            # Only update if score or key details changed significantly, or if it can be re-processed
+            significant_change = abs(existing_suggestion.get('match_score', 0) - final_quantitative_score) > 0.01 or \
+                               existing_suggestion.get('best_matching_episode_id') != best_matching_episode_id
+            
+            can_reprocess_status = existing_suggestion.get('status') in [
+                'pending_qualitative_assessment', 'pending_human_review', 'rejected_by_ai', 'qualitative_assessment_failed'
+            ]
+
+            if significant_change or can_reprocess_status:
+                # Ensure status is reset if re-scoring an already assessed item based on new data
+                if significant_change and not can_reprocess_status: # e.g. was 'approved', but score changed
+                     match_suggestion_payload["status"] = "pending_qualitative_assessment" # Reset for new review
+                elif not significant_change and can_reprocess_status:
+                    # If only status allows reprocessing but score hasn't changed, keep existing status unless it was a failure state
+                    if existing_suggestion.get('status') == 'qualitative_assessment_failed':
+                        match_suggestion_payload["status"] = "pending_qualitative_assessment"
+                    else:
+                        match_suggestion_payload["status"] = existing_suggestion.get('status') # Keep current status
+                
+                updated_suggestion = await match_queries.update_match_suggestion_in_db(
+                    existing_suggestion["match_id"], 
+                    match_suggestion_payload
+                )
+                logger.info(f"Updated match suggestion for campaign {campaign_id} and media {media_id}. New score: {final_quantitative_score:.3f}, Status: {match_suggestion_payload['status']}")
+                match_suggestion_id_for_task = existing_suggestion["match_id"]
+                existing_suggestion = updated_suggestion # work with the most current data
+            else:
+                logger.info(f"Match suggestion for campaign {campaign_id} and media {media_id} exists with similar score ({existing_suggestion.get('match_score',0):.3f}) and status ({existing_suggestion.get('status')}). Skipping update.")
+                return existing_suggestion 
+        else:
+            new_suggestion = await match_queries.create_match_suggestion_in_db(match_suggestion_payload)
+            if not new_suggestion:
+                logger.error(f"Failed to create match suggestion for campaign {campaign_id} and media {media_id}.")
+                return None
+            logger.info(f"Created new match suggestion for campaign {campaign_id} and media {media_id}. Score: {final_quantitative_score:.3f}")
+            match_suggestion_id_for_task = new_suggestion["match_id"]
+            existing_suggestion = new_suggestion
+
+        # Ensure existing_suggestion is not None before trying to access its properties for task creation
+        if existing_suggestion and match_suggestion_id_for_task and final_quantitative_score >= MIN_SCORE_FOR_QUALITATIVE_REVIEW:
+            # Only create a new qualitative review task if the suggestion is now pending qualitative assessment
+            if existing_suggestion.get("status") == "pending_qualitative_assessment":
+                review_task_payload = {
+                    "task_type": "match_suggestion_qualitative_review",
+                    "related_id": match_suggestion_id_for_task,
+                    "campaign_id": campaign_id,
+                    "status": "pending", 
+                    "notes": f"Qualitative review needed for match (score: {final_quantitative_score:.3f}) Suggestion ID: {match_suggestion_id_for_task}"
+                }
+                # Check for existing *pending* task of this type for this match_id
+                already_pending_task = await review_task_queries.get_pending_review_task_by_related_id_and_type(
+                    related_id=match_suggestion_id_for_task,
+                    task_type="match_suggestion_qualitative_review"
+                )
+                if not already_pending_task:
+                    created_task = await review_task_queries.create_review_task_in_db(review_task_payload)
+                    if created_task:
+                        logger.info(f"Created 'match_suggestion_qualitative_review' task for match_id {match_suggestion_id_for_task}.")
+                    else:
+                        logger.error(f"Failed to create 'match_suggestion_qualitative_review' task for match_id {match_suggestion_id_for_task}.")
+                else:
+                    logger.info(f"Pending 'match_suggestion_qualitative_review' task already exists for match_id {match_suggestion_id_for_task}. Skipping creation.")
+            else:
+                 logger.info(f"Match suggestion {match_suggestion_id_for_task} status is '{existing_suggestion.get('status')}', not creating new qualitative review task.")
+        
+        return existing_suggestion 

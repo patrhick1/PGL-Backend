@@ -30,9 +30,9 @@ from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import pitch_generations as pitch_gen_queries
 from podcast_outreach.database.queries import pitches as pitch_queries
 from podcast_outreach.database.queries import review_tasks as review_task_queries
+from podcast_outreach.database.queries import pitch_templates as pitch_template_queries
 from podcast_outreach.integrations import google_docs as google_docs_integration
 from podcast_outreach.services.ai import tracker as ai_tracker
-from podcast_outreach.services.ai import templates as ai_templates_loader
 from podcast_outreach.api.schemas.pitch_schemas import PitchEmail, SubjectLine
  
 logger = get_logger(__name__)
@@ -180,20 +180,24 @@ class PitchGeneratorService:
         campaign_data: Dict[str, Any],
         media_data: Dict[str, Any],
         episode_data: Dict[str, Any],
-        pitch_template_name: str,
+        pitch_template_id_str: str,
         media_kit_content: Optional[str] = None
     ) -> Tuple[Optional[str], Optional[str], Dict[str, int], float]:
         """
-        Generates a pitch email and subject line using an LLM and a specified template.
+        Generates a pitch email and subject line using an LLM and a specified template ID from the database.
         """
         start_time = time.time()
         total_token_usage = {"input_tokens": 0, "output_tokens": 0}
         
-        pitch_template_content = await ai_templates_loader.load_pitch_template(pitch_template_name)
-        if not pitch_template_content:
-            logger.error(f"Pitch template '{pitch_template_name}' not found.")
+        # Fetch template from DB
+        db_template = await pitch_template_queries.get_template_by_id(pitch_template_id_str)
+        if not db_template or not db_template.get('prompt_body'):
+            logger.error(f"Pitch template with ID '{pitch_template_id_str}' not found in DB or has no prompt_body.")
             return None, None, total_token_usage, 0.0
- 
+        
+        pitch_template_content = db_template['prompt_body']
+        # Potentially use other fields from db_template like 'tone' or 'language_code' to adjust LLM call if needed
+
         inputs = {
             "podcast_name": media_data.get('name', 'the podcast'),
             "host_name": media_data.get('host_names', [''])[0] if media_data.get('host_names') else 'the host',
@@ -201,19 +205,15 @@ class PitchGeneratorService:
             "episode_summary": episode_data.get('episode_summary', ''),
             "ai_summary": episode_data.get('ai_episode_summary', ''),
             "client_name": campaign_data.get('campaign_name', 'our client'),
-            "client_bio": campaign_data.get('campaign_bio', ''),
-            "client_bio_summary": campaign_data.get('campaign_bio', '')[:500],
-            "pitch_topics": campaign_data.get('campaign_angles', ''),
+            "client_bio": campaign_data.get('campaign_bio', ''), # Full bio from campaign
+            "client_bio_summary": campaign_data.get('campaign_bio', '')[:500], # Summary from campaign bio
+            "pitch_topics": campaign_data.get('campaign_angles', ''), # Angles from campaign
             "media_kit_content": media_kit_content if media_kit_content else "No content available"
         }
  
         pitch_prompt_template = PromptTemplate(
             template=pitch_template_content,
-            input_variables=[
-                "podcast_name", "host_name", "episode_title", "episode_summary", 
-                "ai_summary", "client_name", "client_bio", "client_bio_summary", 
-                "pitch_topics", "media_kit_content"
-            ]
+            input_variables=list(inputs.keys()) # Dynamically set input_variables based on actual inputs dict
         )
         
         pitch_chain = (
@@ -253,21 +253,29 @@ class PitchGeneratorService:
             logger.error(f"Error generating pitch email for {media_data.get('name')}: {e}", exc_info=True)
             generated_email_body = f"ERROR: Failed to generate pitch email. {str(e)}"
  
-        subject_line_template_content = await ai_templates_loader.load_pitch_template("subject_line_template")
-        if subject_line_template_content:
+        # Subject line generation can also be made template-driven from DB if desired
+        # For now, keeping existing logic or assuming a fixed DB template for subject lines e.g. 'default_subject_template'
+        subject_template_id_for_db = "default_subject_template" # Example ID for a subject template
+        db_subject_template = await pitch_template_queries.get_template_by_id(subject_template_id_for_db)
+
+        if db_subject_template and db_subject_template.get('prompt_body'):
+            subject_line_template_content = db_subject_template['prompt_body']
+            subject_inputs = {
+                "episode_summary": episode_data.get('episode_summary', '')[:500], # Keep summaries concise for subject
+                "ai_summary": episode_data.get('ai_episode_summary', '')[:500],
+                "podcast_name": media_data.get('name', 'your podcast'),
+                "client_name": campaign_data.get('campaign_name', 'a relevant guest'),
+                # Add any other placeholders your subject template might use
+            }
             subject_prompt_template = PromptTemplate(
                 template=subject_line_template_content,
-                input_variables=["episode_summary", "ai_summary"]
+                input_variables=list(subject_inputs.keys())
             )
             subject_chain = (
                 subject_prompt_template
                 | self.llm.with_structured_output(SubjectLine)
             )
             try:
-                subject_inputs = {
-                    "episode_summary": episode_data.get('episode_summary', ''),
-                    "ai_summary": episode_data.get('ai_episode_summary', '')
-                }
                 formatted_subject_prompt = subject_prompt_template.format(**subject_inputs)
                 subject_result = await subject_chain.ainvoke(subject_inputs)
                 generated_subject_line = subject_result.subject
@@ -291,22 +299,23 @@ class PitchGeneratorService:
  
             except OutputParserException as ope:
                 logger.error(f"LLM output parsing failed for subject line: {ope}. Raw content: {ope.llm_output}")
-                generated_subject_line = f"ERROR: Subject line parsing failed. {ope.llm_output}"
+                generated_subject_line = f"Regarding {media_data.get('name', 'your podcast')}: Guest idea - {campaign_data.get('campaign_name', 'Expert Guest')}"
             except Exception as e:
                 logger.error(f"Error generating subject line for {media_data.get('name')}: {e}", exc_info=True)
-                generated_subject_line = f"ERROR: Subject line generation failed. {str(e)}"
+                generated_subject_line = f"Regarding {media_data.get('name', 'your podcast')}: Guest idea - {campaign_data.get('campaign_name', 'Expert Guest')}"
         else:
             logger.warning("Subject line template not found. Using default subject line.")
-            generated_subject_line = f"Great episode about {episode_data.get('title', 'your podcast')}"
+            generated_subject_line = f"Regarding {media_data.get('name', 'your podcast')}: Guest idea - {campaign_data.get('campaign_name', 'Expert Guest')}"
  
         execution_time = time.time() - start_time
         return generated_email_body, generated_subject_line, total_token_usage, execution_time
  
-    async def generate_pitch_for_match(self, match_id: int, pitch_template_name: str = "friendly_intro_template") -> Dict[str, Any]:
+    async def generate_pitch_for_match(self, match_id: int, pitch_template_id: str = "default_pitch_template") -> Dict[str, Any]:
         """
         Orchestrates the pitch generation process for an approved match suggestion.
+        Uses the specified pitch_template_id from the database.
         """
-        logger.info(f"Starting pitch generation for match_id: {match_id} using template: {pitch_template_name}")
+        logger.info(f"Starting pitch generation for match_id: {match_id} using template_id: {pitch_template_id}")
         
         result = {
             "status": "failed",
@@ -357,7 +366,7 @@ class PitchGeneratorService:
                 if doc_id:
                     try:
                         media_kit_content = await asyncio.to_thread(self.google_docs_service.get_document_content, doc_id)
-                        logger.info(f"Fetched media kit content (length: {len(media_kit_content)} chars).")
+                        logger.info(f"Fetched media kit content (length: {len(media_kit_content) if media_kit_content else 0} chars).")
                     except Exception as e:
                         logger.warning(f"Failed to fetch media kit content from {media_kit_url}: {e}")
                         media_kit_content = "Error fetching media kit content."
@@ -365,7 +374,7 @@ class PitchGeneratorService:
                     logger.warning(f"Could not extract Google Doc ID from media kit URL: {media_kit_url}")
  
             email_body, subject_line, token_usage, exec_time = await self.generate_pitch_from_template(
-                campaign_data, media_data, best_episode_data, pitch_template_name, media_kit_content
+                campaign_data, media_data, best_episode_data, pitch_template_id, media_kit_content
             )
  
             if not email_body or not subject_line:
@@ -376,7 +385,7 @@ class PitchGeneratorService:
             pitch_gen_data = {
                 "campaign_id": campaign_id,
                 "media_id": media_id,
-                "template_id": pitch_template_name,
+                "template_id": pitch_template_id,
                 "draft_text": email_body,
                 "ai_model_used": self.model_name,
                 "pitch_topic": best_episode_data.get('title'),

@@ -40,7 +40,7 @@ async def generate_pitch_for_match_api(
     try:
         result = await generator_service.generate_pitch_for_match(
             match_id=request_data.match_id,
-            pitch_template_name=request_data.pitch_template_name
+            pitch_template_id=request_data.pitch_template_id
         )
         
         if result.get("status") == "failed":
@@ -126,17 +126,30 @@ async def list_pitch_generations_api(skip: int = 0, limit: int = 100, user: dict
 
 @router.get("/generations/{pitch_gen_id}", response_model=PitchGenerationInDB, summary="Get Specific Pitch Generation by ID")
 async def get_pitch_generation_api(pitch_gen_id: int, user: dict = Depends(get_current_user)):
-    """
-    Retrieves a specific pitch generation record by ID. Staff or Admin access required.
-    """
+    logger.info(f"API: Attempting to fetch pitch generation with ID: {pitch_gen_id}")
     try:
         generation_from_db = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+
         if not generation_from_db:
+            logger.warning(f"API: Pitch generation with ID {pitch_gen_id} not found in DB.")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation with ID {pitch_gen_id} not found.")
-        return PitchGenerationInDB(**generation_from_db)
-    except Exception as e:
-        logger.exception(f"Error in get_pitch_generation_api for ID {pitch_gen_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+        logger.debug(f"API: Raw data from DB for pitch_gen_id {pitch_gen_id}: {generation_from_db}") # Log raw data
+
+        # Attempt Pydantic validation and catch potential errors
+        try:
+            validated_data = PitchGenerationInDB(**generation_from_db)
+            logger.info(f"API: Successfully validated data for pitch_gen_id {pitch_gen_id}.")
+            return validated_data
+        except Exception as pydantic_exc: # Catch Pydantic validation errors specifically
+            logger.error(f"API: Pydantic validation error for pitch_gen_id {pitch_gen_id}. Data: {generation_from_db}. Error: {pydantic_exc}", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Data validation error for pitch generation: {pydantic_exc}")
+
+    except HTTPException: # Re-raise known HTTPExceptions
+        raise
+    except Exception as e: # Catch other unexpected errors
+        logger.exception(f"API: Unexpected error in get_pitch_generation_api for ID {pitch_gen_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
 
 @router.get("/", response_model=List[PitchInDB], summary="List All Pitches (Enriched)")
 async def list_pitches_api(

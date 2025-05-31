@@ -19,6 +19,9 @@ from functools import partial
 # Import modular queries
 from podcast_outreach.database.queries import episodes as episode_queries
 from podcast_outreach.database.connection import get_db_pool, close_db_pool # For main function
+from podcast_outreach.services.ai.openai_client import OpenAIService # Added for embeddings
+from podcast_outreach.services.matches.match_creation import MatchCreationService # Added for triggering matching
+from podcast_outreach.database.queries import campaigns as campaign_queries # Added for fetching campaigns
 
 # Configure logging for the MediaTranscriber class
 logger = logging.getLogger(__name__)
@@ -57,6 +60,8 @@ class MediaTranscriber:
     DEFAULT_CHUNK_MINUTES = 45
     # Default overlap between chunks (in seconds)
     DEFAULT_OVERLAP_SECONDS = 30
+    # Max characters of transcript to use for embedding
+    MAX_TRANSCRIPT_CHARS_FOR_EMBEDDING = 10000
  
     def __init__(self, api_key: Optional[str] = None):
         """
@@ -68,6 +73,7 @@ class MediaTranscriber:
             logger.error("GEMINI_API_KEY environment variable not set or api_key not provided.")
             raise ValueError("Please set the GEMINI_API_KEY environment variable or provide it to the constructor.")
  
+        self._openai_service = OpenAIService() # Initialize OpenAIService
         self._gemini_api_semaphore = asyncio.Semaphore(int(os.getenv("GEMINI_API_CONCURRENCY", "10")))
  
         self._setup_gemini_api()
@@ -312,24 +318,29 @@ class MediaTranscriber:
     async def transcribe_audio(
         self,
         audio_path: str,
+        episode_id: int, # Added episode_id
         episode_title: Optional[str] = None,
         speakers: Optional[List[str]] = None
-    ) -> str:
+    ) -> Tuple[str, Optional[str], Optional[List[float]]]: # Return transcript, summary, embedding
         """
         Transcribe audio using Gemini. Handles both short and long audio files by chunking.
+        Also generates a summary and an embedding for the episode.
         """
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found at: {audio_path}")
  
-        logger.info("Starting transcription for %s", audio_path)
+        logger.info(f"Starting transcription for episode_id {episode_id}, audio_path {audio_path}")
+        transcript = ""
+        summary = None
+        embedding = None
  
         try:
             audio = await asyncio.to_thread(AudioSegment.from_file, audio_path)
             duration_minutes = len(audio) / (60 * 1000)
-            logger.info(f"Audio duration: {duration_minutes:.2f} minutes")
+            logger.info(f"Audio duration: {duration_minutes:.2f} minutes for episode_id {episode_id}")
  
             if duration_minutes > self.MAX_SINGLE_CHUNK_DURATION_MINUTES:
-                logger.info(f"Long audio detected ({duration_minutes:.2f} min > {self.MAX_SINGLE_CHUNK_DURATION_MINUTES} min), processing in parallel chunks")
+                logger.info(f"Long audio detected ({duration_minutes:.2f} min > {self.MAX_SINGLE_CHUNK_DURATION_MINUTES} min) for ep {episode_id}, processing in parallel chunks")
                 transcript = await self._process_long_audio(
                     audio_path,
                     chunk_minutes=self.DEFAULT_CHUNK_MINUTES,
@@ -338,15 +349,49 @@ class MediaTranscriber:
                     speakers=speakers
                 )
             else:
-                logger.info(f"Processing audio as a single file ({duration_minutes:.2f} min)")
+                logger.info(f"Processing audio as a single file ({duration_minutes:.2f} min) for episode_id {episode_id}")
                 audio_content = await self._process_audio_file_for_gemini(audio_path)
                 transcript = await self._transcribe_gemini_api_call(audio_content, episode_title, speakers)
  
             if "ERROR in chunk" in transcript:
-                logger.error(f"Transcription completed with errors in some chunks for {audio_path}. Review transcript for 'ERROR in chunk' messages.")
+                logger.error(f"Transcription completed with errors in some chunks for episode_id {episode_id}. Review transcript for 'ERROR in chunk' messages.")
+            else:
+                logger.info(f"Transcription completed successfully for episode_id {episode_id}")
  
-            logger.info("Transcription completed successfully for %s", audio_path)
-            return transcript
+            # Generate summary
+            if transcript and not "ERROR in chunk" in transcript: # Only summarize if transcription was somewhat successful
+                summary = await self.summarize_transcript(transcript)
+                logger.info(f"Summary generated for episode_id {episode_id}")
+ 
+                # Generate embedding
+                embedding_text_parts = []
+                if episode_title:
+                    embedding_text_parts.append(episode_title)
+                if summary:
+                    embedding_text_parts.append(summary)
+                
+                # Add first N chars of transcript if available and not only errors
+                # Check if transcript is not just error messages before appending
+                meaningful_transcript_segment = transcript[:self.MAX_TRANSCRIPT_CHARS_FOR_EMBEDDING]
+                if transcript and not all("ERROR in chunk" in line for line in transcript.split('\n') if line.strip()):
+                     embedding_text_parts.append(meaningful_transcript_segment)
+ 
+                if embedding_text_parts:
+                    embedding_text = " \n\n ".join(embedding_text_parts)
+                    logger.info(f"Generating embedding for episode_id {episode_id} from text (first 200 chars): '{embedding_text[:200]}...'")
+                    embedding = await self._openai_service.get_embedding(
+                        text=embedding_text,
+                        workflow="episode_embedding",
+                        related_ids={"episode_id": episode_id}
+                    )
+                    if embedding:
+                        logger.info(f"Embedding generated successfully for episode_id {episode_id}")
+                    else:
+                        logger.error(f"Failed to generate embedding for episode_id {episode_id}")
+                else:
+                    logger.warning(f"Not enough content to generate embedding for episode_id {episode_id}")
+ 
+            return transcript, summary, embedding
  
         except ValueError as e:
             error_str = str(e).lower()
@@ -383,3 +428,117 @@ class MediaTranscriber:
             summary = transcript[:500] + "..." if len(transcript) > 500 else transcript
             logger.warning("Failed to get Gemini summary, returning truncated transcript.")
             return summary
+
+async def process_single_episode_for_transcription(
+    transcriber: MediaTranscriber, 
+    episode: Dict[str, Any],
+    media_analyzer_service: Optional[Any] = None,
+    match_creation_service: Optional[MatchCreationService] = None # Added MatchCreationService instance
+) -> None:
+    logger.info(f"Processing episode_id: {episode['episode_id']} - '{episode['title']}' from media_id: {episode['media_id']}")
+    local_audio_path = None
+    try:
+        local_audio_path = await transcriber.download_audio(episode["episode_url"])
+        transcript, summary, embedding = await transcriber.transcribe_audio(
+            local_audio_path, 
+            episode_id=episode["episode_id"], 
+            episode_title=episode["title"]
+        )
+
+        # Update episode with transcript, summary, and embedding
+        updated_episode = await episode_queries.update_episode_transcription(
+            episode_id=episode["episode_id"],
+            transcript=transcript,
+            summary=summary,
+            embedding=embedding
+        )
+        logger.info(f"Successfully transcribed and updated episode {episode['episode_id']}")
+
+        # If episode was successfully updated with an embedding, trigger matching for its media_id
+        if updated_episode and updated_episode.get('embedding') and match_creation_service:
+            media_id_for_match = updated_episode.get('media_id')
+            if media_id_for_match:
+                try:
+                    logger.info(f"Triggering match creation for media_id {media_id_for_match} due to new/updated episode {episode['episode_id']}.")
+                    # Fetch all active campaigns with embeddings to match against
+                    # This is an example, you might want more specific filtering for campaigns
+                    active_campaigns, total_campaigns = await campaign_queries.get_campaigns_with_embeddings(limit=200, offset=0) 
+                    
+                    if active_campaigns:
+                        logger.info(f"Media {media_id_for_match} will be matched against {len(active_campaigns)} campaigns.")
+                        await match_creation_service.create_and_score_match_suggestions_for_media(
+                            media_id=media_id_for_match,
+                            campaign_records=active_campaigns
+                        )
+                        logger.info(f"Match creation/update process initiated for media {media_id_for_match}.")
+                    else:
+                        logger.info(f"No active campaigns with embeddings found to match against media {media_id_for_match}.")
+                except Exception as e_match_media:
+                    logger.error(f"Error triggering match creation for media {media_id_for_match}: {e_match_media}", exc_info=True)
+            else:
+                logger.warning(f"Updated episode {episode['episode_id']} has no media_id, cannot trigger matching.")
+
+        # If MediaAnalyzerService is provided and transcription was successful
+        if media_analyzer_service and transcript and not "ERROR in chunk" in transcript:
+            logger.info(f"Analyzing episode {episode['episode_id']} with MediaAnalyzerService.")
+            try:
+                analysis_result = await media_analyzer_service.analyze_episode(
+                    transcript=transcript,
+                    episode_title=episode.get("title"),
+                    # Pass other relevant details if your analyzer uses them, e.g., episode_summary
+                )
+                if analysis_result:
+                    await episode_queries.update_episode_analysis_data(
+                        episode_id=episode["episode_id"],
+                        host_names=analysis_result.get("host_names_identified"),
+                        guest_names=analysis_result.get("guest_names_identified"),
+                        episode_themes=analysis_result.get("episode_themes"),
+                        episode_keywords=analysis_result.get("episode_keywords"),
+                        ai_analysis_done=True
+                    )
+                    logger.info(f"Successfully updated analysis data for episode {episode['episode_id']}")
+                else:
+                    logger.warning(f"MediaAnalyzerService returned no result for episode {episode['episode_id']}")
+            except Exception as e_analyze:
+                logger.error(f"Error during MediaAnalyzerService processing for episode {episode['episode_id']}: {e_analyze}", exc_info=True)
+
+    except FileNotFoundError:
+        logger.error(f"File not found for episode_id {episode['episode_id']}: {episode['episode_url']}")
+    except Exception as e:
+        logger.error(f"Error processing episode_id {episode['episode_id']}: {e}", exc_info=True)
+
+async def main_transcribe_orchestrator(limit: int = 20, use_analyzer: bool = True): # Added use_analyzer flag
+    logger.info("--- Starting Episode Transcription and Analysis Process ---")
+    await get_db_pool()
+
+    transcriber = MediaTranscriber()
+    match_creation_serv = MatchCreationService() # Instantiate MatchCreationService
+    media_analyzer = None
+    if use_analyzer:
+        try:
+            from podcast_outreach.services.media.analyzer import MediaAnalyzerService # Import here to avoid circular deps if analyzer uses transcriber models
+            media_analyzer = MediaAnalyzerService() # Initialize your analyzer
+            logger.info("MediaAnalyzerService initialized.")
+        except ImportError as e:
+            logger.warning(f"Could not import MediaAnalyzerService: {e}. Analysis will be skipped.")
+        except Exception as e_analyzer_init:
+            logger.error(f"Could not initialize MediaAnalyzerService: {e_analyzer_init}. Analysis will be skipped.")
+
+    episodes_to_process = await episode_queries.fetch_episodes_for_transcription(limit=limit)
+
+    if not episodes_to_process:
+        logger.info("No episodes to process.")
+        return
+
+    transcription_tasks = [
+        process_single_episode_for_transcription(transcriber, episode, media_analyzer, match_creation_serv) # Pass services
+        for episode in episodes_to_process
+    ]
+
+    await asyncio.gather(*transcription_tasks)
+
+if __name__ == "__main__":
+    # Example of how to run the orchestrator
+    # asyncio.run(main_transcribe_orchestrator(limit=5))
+    # To run with analyzer (assuming it's set up):
+    asyncio.run(main_transcribe_orchestrator(limit=5, use_analyzer=True)) # Example with analyzer

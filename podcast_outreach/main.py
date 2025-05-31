@@ -39,8 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
 from starlette.middleware.sessions import SessionMiddleware # Import SessionMiddleware
 
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits # ADDED media_kits
-
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates, episodes as episodes_router
 
 setup_logging()
 logger = get_logger(__name__)
@@ -206,7 +205,8 @@ app.include_router(users.router)
 app.include_router(dashboard.router)
 app.include_router(client.router)
 app.include_router(media_kits.router)
-
+app.include_router(pitch_templates.router)
+app.include_router(episodes_router.router)
 
 @app.get("/login")
 def login_page(request: Request):

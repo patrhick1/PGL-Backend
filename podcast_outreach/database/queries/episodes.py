@@ -350,3 +350,42 @@ async def fetch_episodes_for_analysis(limit: int = 20) -> List[Dict[str, Any]]:
         except Exception as e:
             logger.exception(f"Error fetching episodes for AI analysis: {e}")
             return []
+
+async def get_episodes_for_media_with_embeddings(media_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Fetches recent episodes for a given media_id that have embeddings.
+    Orders by publish_date descending to get the most recent ones.
+    """
+    query = """
+    SELECT episode_id, title, publish_date, episode_summary, ai_episode_summary, transcript, embedding
+    FROM episodes
+    WHERE media_id = $1 AND embedding IS NOT NULL
+    ORDER BY publish_date DESC, episode_id DESC
+    LIMIT $2;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_id, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching episodes with embeddings for media_id {media_id}: {e}", exc_info=True)
+            return []
+
+async def get_episodes_for_media_paginated(media_id: int, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+    """Fetches episodes for a given media_id with pagination, ordered by publish_date descending."""
+    query = """
+    SELECT *
+    FROM episodes
+    WHERE media_id = $1
+    ORDER BY publish_date DESC, episode_id DESC
+    LIMIT $2 OFFSET $3;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_id, limit, offset)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching paginated episodes for media_id {media_id}: {e}", exc_info=True)
+            return []

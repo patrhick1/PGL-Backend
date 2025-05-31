@@ -1,5 +1,5 @@
 """Campaign related database queries."""
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import uuid
 import json
 from datetime import date, datetime, timezone # Ensure timezone is imported
@@ -154,3 +154,40 @@ async def count_active_campaigns(person_id: Optional[int] = None) -> int:
         except Exception as e:
             logger.exception(f"Error counting active campaigns (person_id: {person_id}): {e}")
             return 0
+
+async def get_campaigns_with_embeddings(limit: int = 200, offset: int = 0) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Fetches campaigns that have an embedding, ordered by creation date.
+    Returns a list of campaign records and the total count of such campaigns.
+    """
+    query = """
+    SELECT *
+    FROM campaigns
+    WHERE embedding IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT $1 OFFSET $2;
+    """
+    count_query = "SELECT COUNT(*) FROM campaigns WHERE embedding IS NOT NULL;"
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, limit, offset)
+            total_count_record = await conn.fetchrow(count_query)
+            total = total_count_record['count'] if total_count_record else 0
+            return [dict(row) for row in rows], total
+        except Exception as e:
+            logger.error(f"Error fetching campaigns with embeddings: {e}", exc_info=True)
+            return [], 0
+
+async def update_campaign_status(campaign_id: uuid.UUID, status: str, status_message: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Updates the status of a campaign. Assumes 'status' and 'status_message' columns exist or are handled by other means.
+    This is a placeholder; actual implementation depends on how campaign status is stored.
+    If campaigns table has 'campaign_status' and 'status_notes' fields, it would be:
+    """
+    # Example: UPDATE campaigns SET campaign_status = $1, status_notes = $2, updated_at = NOW() 
+    #          WHERE campaign_id = $3 RETURNING *;
+    logger.info(f"Attempting to update status for campaign {campaign_id} to '{status}' with message: '{status_message}'. This function is a placeholder.")
+    # For now, just fetch and return the campaign as no actual status fields are defined for update here.
+    return await get_campaign_by_id(campaign_id)

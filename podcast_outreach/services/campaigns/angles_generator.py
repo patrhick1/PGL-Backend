@@ -22,6 +22,7 @@ from podcast_outreach.integrations.google_docs import GoogleDocsService # Use ne
 from podcast_outreach.services.ai.openai_client import OpenAIService # Use new AI service path
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker # Use new AI tracker path
 from podcast_outreach.utils.data_processor import extract_document_id # Use new utils path
+from podcast_outreach.services.tasks.manager import task_manager # Corrected import path
 
 # Setup logging
 logging.basicConfig(
@@ -60,32 +61,32 @@ class AnglesProcessorPG:
         ---
         Craft an Effective Bio:
         One of the most important questions you need to address when you reach out to a host is: Who are you?
-        To answer that question and make a great first impression, you’ll need a rock solid bio that tells the podcast host a bit about you and why you’re an authority within your niche. You’ll want to prepare several different versions of your bio, each with a specific purpose:
+        To answer that question and make a great first impression, you'll need a rock solid bio that tells the podcast host a bit about you and why you're an authority within your niche. You'll want to prepare several different versions of your bio, each with a specific purpose:
 
         *   **Full Bio**: A detailed bio you would put up on a website or a blog. It can be up to several paragraphs long and should cover your background, accomplishments, and authority in detail.
-        *   **Summary Bio**: A succinct bio that’s generally just two paragraphs covering your background and current work. Hosts may use this version for show notes, on-air intros, and more.
-        *   **Short Bio**: A bio that’s less than 280 characters so it can be used for social media and short blogs.
+        *   **Summary Bio**: A succinct bio that's generally just two paragraphs covering your background and current work. Hosts may use this version for show notes, on-air intros, and more.
+        *   **Short Bio**: A bio that's less than 280 characters so it can be used for social media and short blogs.
 
         Creating your bios before you start reaching out to hosts allows you to take time to think things through and create strong, descriptive bios. You also have them on-hand and ready to send when a guest application or host inevitably asks for them.
 
-        In addition to your bios, you need to tell hosts what topics you’re available to talk about.
+        In addition to your bios, you need to tell hosts what topics you're available to talk about.
 
         ---
         Developing Your Angles:
         When it comes to podcast guest placement, angles are prepared topics and unique perspectives you can offer the hosts to whom you reach out. Angles are important because they narrow your expertise into a tangible subject for a podcast episode. After all, the hosts might not be experts in your industry — you are the expert.
 
-        Providing angles in your pitches is vital for getting booked. Start your conversation with the host by being specific; it allows you to provide them with multiple options in case your initial angle doesn’t resonate with them or they already have someone lined up for a similar discussion.
+        Providing angles in your pitches is vital for getting booked. Start your conversation with the host by being specific; it allows you to provide them with multiple options in case your initial angle doesn't resonate with them or they already have someone lined up for a similar discussion.
 
         You should prepare at least 10 angle options to use. Each angle should include the following:
 
-        *   **Topic**: The subject in which you’re an authority and about which you can talk as a guest.
+        *   **Topic**: The subject in which you're an authority and about which you can talk as a guest.
         *   **Outcome**: The outcome(s) podcast listeners can expect to see or learn.
-        *   **Description**: More information about the topic and your unique perspective, as well as why you’re the authority to have on the show for such a discussion.
+        *   **Description**: More information about the topic and your unique perspective, as well as why you're the authority to have on the show for such a discussion.
 
         Examples of angles in the following format (Topic; Outcome; Description), separated by a semi-colon:
-        Topic: Content Creation: Quality vs. Quantity; Outcome: High Value engaged audience, more leads, clients that respect your more. ; Description: Discussing the importance of quality content creation over quantity for lead flow. We’ve just published our 5th piece of content coming up on our 3rd year in business as a content marketing agency.
+        Topic: Content Creation: Quality vs. Quantity; Outcome: High Value engaged audience, more leads, clients that respect your more. ; Description: Discussing the importance of quality content creation over quantity for lead flow. We've just published our 5th piece of content coming up on our 3rd year in business as a content marketing agency.
         Topic: Educating clients vs. Traditional sales; Outcome: High Value engaged audience, more leads, clients that respect you more. ; Description: How educational content establishes authority and speeds sales when the traditional methods fall flat. We used this strategy to build Call For Content into a 6 figure agency.
-        Topic: Is college worth the cost? ; Outcome: Who college isn’t for, how to hack the best parts for free ; Description: Michael, a two time college dropout and recent graduate discusses how individuals can establish themselves without formal education and the importance of ROI in education.
+        Topic: Is college worth the cost? ; Outcome: Who college isn't for, how to hack the best parts for free ; Description: Michael, a two time college dropout and recent graduate discusses how individuals can establish themselves without formal education and the importance of ROI in education.
 
         ---
         Now, craft the 3 bios (Full, Summary, Short) following the guidelines provided, and then give me at least 10 topics the client can speak on, with the outcome for each and a description for each, based on the method outlined in the examples provided.
@@ -376,10 +377,20 @@ class AnglesProcessorPG:
             update_payload = {
                 "campaign_bio": bio_gdoc_link if bio_gdoc_link else "Bio GDoc creation failed",
                 "campaign_angles": angles_gdoc_link if angles_gdoc_link else "Angles GDoc creation failed",
-                "campaign_keywords": keywords_list # Pass the list of keywords
+                "gdoc_keywords": keywords_list # Save to gdoc_keywords
             }
-            logger.info(f"Updating campaign {campaign_id} in PostgreSQL with generated content links and keywords list: {keywords_list}")
-            await campaign_queries.update_campaign(uuid.UUID(campaign_id), update_payload)
+            logger.info(f"Updating campaign {campaign_id} in PostgreSQL with generated content links and gdoc_keywords list: {keywords_list}")
+            updated_campaign_record = await campaign_queries.update_campaign(uuid.UUID(campaign_id), update_payload)
+
+            if updated_campaign_record:
+                # Enqueue the process_campaign_content task
+                task_id_process = str(uuid.uuid4())
+                task_manager.start_task(
+                    task_id_process,
+                    "process_campaign_content",
+                    args={"campaign_id": str(campaign_id)}
+                )
+                logger.info(f"Enqueued process_campaign_content task {task_id_process} for campaign {campaign_id} after GDoc processing.")
 
             self.stats["successful_generations"] += 1
             execution_time = time.time() - start_time

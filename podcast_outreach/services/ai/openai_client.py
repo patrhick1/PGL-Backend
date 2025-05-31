@@ -13,7 +13,7 @@ from typing import List, Optional, Any, Dict
 import uuid # For UUID types
 
 # Import our AI usage tracker from its new location
-from podcast_outreach.services.ai.tracker import tracker as ai_tracker
+from podcast_outreach.services.ai.tracker import tracker as ai_tracker # Corrected import path
 from podcast_outreach.logging_config import get_logger # Use new logging config
 from podcast_outreach.utils.file_manipulation import read_txt_file # Use new utils path
 
@@ -103,16 +103,17 @@ class OpenAIService: # Keeping original class name for compatibility
     A service that communicates with OpenAI's API to perform various text-related tasks.
     """
 
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
         """
         Initialize the OpenAI client using the API key from your environment variables.
         """
-        OPENAI_API_KEY = os.getenv('OPENAI_API')
-        if not OPENAI_API_KEY:
-            logger.error("OPENAI_API environment variable not set.")
-            raise ValueError("Please set the OPENAI_API environment variable.")
+        if api_key is None:
+            api_key = os.getenv('OPENAI_API')
+            if not api_key:
+                logger.error("OPENAI_API environment variable not set.")
+                raise ValueError("Please set the OPENAI_API environment variable.")
         try:
-            self.client = OpenAI(api_key=OPENAI_API_KEY)
+            self.client = OpenAI(api_key=api_key)
             logger.info("OpenAIService initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}")
@@ -316,3 +317,30 @@ class OpenAIService: # Keeping original class name for compatibility
                 else:
                     logger.error(f"Error in create_chat_completion after {max_retries} retries: {e}")
                     raise Exception(f"Failed to generate chat completion using OpenAI API: {e}") from last_exception
+
+    async def get_embedding(self, text: str, model: str = "text-embedding-ada-002", workflow: str = "embedding", **kwargs) -> Optional[List[float]]:
+        start_time = time.time()
+        try:
+            text = text.replace("\n", " ") # OpenAI recommends replacing newlines
+            response = await asyncio.to_thread(
+                self.client.embeddings.create, input=[text], model=model
+            )
+            embedding = response.data[0].embedding
+            
+            # Estimate tokens for embeddings (input only)
+            # OpenAI's ada-002 counts tokens differently, but this is a rough estimate for logging
+            tokens_in = len(text) // 4 
+            
+            await ai_tracker.log_usage(
+                workflow=workflow,
+                model=model,
+                tokens_in=tokens_in, 
+                tokens_out=0, # Embeddings don't have "output tokens" in the same way
+                execution_time=(time.time() - start_time),
+                endpoint="openai.embeddings.create",
+                **kwargs # Pass related_ids
+            )
+            return embedding
+        except Exception as e:
+            logger.error(f"Error getting embedding for text (first 100 chars): '{text[:100]}...': {e}", exc_info=True)
+            return None

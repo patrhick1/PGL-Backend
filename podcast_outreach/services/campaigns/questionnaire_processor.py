@@ -4,6 +4,7 @@ import uuid
 from typing import Dict, Any
 from podcast_outreach.database.queries import campaigns as campaign_queries
 import json # For storing as JSONB
+from podcast_outreach.services.tasks.manager import task_manager # Corrected import path
 
 logger = logging.getLogger(__name__)
 
@@ -51,29 +52,37 @@ async def process_campaign_questionnaire_submission(campaign_id: uuid.UUID, ques
 
         # Extract keywords (example logic, adjust based on your questionnaire structure)
         # This assumes your questionnaire_data might have keys like 'expertise', 'preferredTopics' etc.
-        current_keywords = set(campaign.get("campaign_keywords", []) or []) 
+        questionnaire_keywords_set = set() 
         
         # Example: Extracting from a nested structure
         personal_info = questionnaire_data.get("personalInfo", {})
         if isinstance(personal_info, dict) and personal_info.get("expertise"):
             expertise_list = personal_info["expertise"]
             if isinstance(expertise_list, list):
-                 current_keywords.update(kw for kw in expertise_list if isinstance(kw, str))
+                 questionnaire_keywords_set.update(kw for kw in expertise_list if isinstance(kw, str))
 
         preferences = questionnaire_data.get("preferences", {})
         if isinstance(preferences, dict) and preferences.get("preferredTopics"):
             topics_list = preferences["preferredTopics"]
             if isinstance(topics_list, list):
-                current_keywords.update(topic for topic in topics_list if isinstance(topic, str))
+                questionnaire_keywords_set.update(topic for topic in topics_list if isinstance(topic, str))
         
         # Add more keyword extraction logic as needed from other parts of questionnaire_data
 
-        if current_keywords: # Only update if new keywords were found or existing ones were present
-            update_payload["campaign_keywords"] = sorted(list(current_keywords))
+        if questionnaire_keywords_set: # Only update if new keywords were found
+            update_payload["questionnaire_keywords"] = sorted(list(questionnaire_keywords_set))
 
         updated_campaign = await campaign_queries.update_campaign(campaign_id, update_payload)
         if updated_campaign:
-            logger.info(f"Successfully processed questionnaire and updated campaign {campaign_id}.")
+            logger.info(f"Successfully processed questionnaire and updated campaign {campaign_id} with questionnaire_keywords.")
+            # Enqueue the process_campaign_content task
+            task_id = str(uuid.uuid4())
+            task_manager.start_task(
+                task_id,
+                "process_campaign_content",
+                args={"campaign_id": str(campaign_id)}
+            )
+            logger.info(f"Enqueued process_campaign_content task {task_id} for campaign {campaign_id}.")
             return True
         else:
             logger.error(f"Failed to update campaign {campaign_id} after processing questionnaire.")

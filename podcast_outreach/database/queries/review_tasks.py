@@ -241,3 +241,23 @@ async def count_review_tasks_by_status(status: str, person_id: Optional[int] = N
         except Exception as e:
             logger.exception(f"Error counting review tasks (person_id: {person_id}, status: {status}): {e}")
             return 0
+
+async def get_pending_review_task_by_related_id_and_type(
+    related_id: int,
+    task_type: str
+) -> Optional[Dict[str, Any]]:
+    """Fetches a PENDING review task by its related_id and task_type."""
+    query = """
+    SELECT *
+    FROM review_tasks
+    WHERE related_id = $1 AND task_type = $2 AND status = 'pending'
+    LIMIT 1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, related_id, task_type)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching pending review task by related_id {related_id} and type {task_type}: {e}")
+            return None

@@ -261,6 +261,8 @@ def create_campaigns_table(conn):
         campaign_bio TEXT,
         campaign_angles TEXT,
         campaign_keywords TEXT[],
+        questionnaire_keywords TEXT[] NULL, -- New field
+        gdoc_keywords TEXT[] NULL, -- New field
         compiled_social_posts TEXT,
         podcast_transcript_link TEXT,
         compiled_articles_link TEXT,
@@ -324,10 +326,12 @@ def create_match_suggestions(conn):
         client_approved BOOLEAN DEFAULT FALSE, 
         approved_at TIMESTAMPTZ,
         status VARCHAR(50) DEFAULT 'pending',  
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        best_matching_episode_id INTEGER REFERENCES episodes(episode_id) ON DELETE SET NULL -- New field
     );
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaignS_id);
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_media_id ON match_suggestions (media_id);
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_best_episode_id ON match_suggestions (best_matching_episode_id); -- Index for new field
     """
     execute_sql(conn, sql_statement)
     print("Table MATCH_SUGGESTIONS created/ensured.")
