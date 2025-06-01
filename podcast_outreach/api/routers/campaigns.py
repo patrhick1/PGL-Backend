@@ -1,7 +1,7 @@
 # podcast_outreach/api/routers/campaigns.py
 
 import uuid
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 import logging
@@ -73,16 +73,47 @@ async def create_campaign_api(campaign: CampaignCreate, user: dict = Depends(get
         logger.exception(f"Error in create_campaign_api for campaign name {campaign.campaign_name}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-@router.get("/", response_model=List[CampaignInDB], summary="List All Campaigns")
-async def list_campaigns_api(skip: int = 0, limit: int = 100, user: dict = Depends(get_current_user)):
+@router.get("/", response_model=List[CampaignInDB], summary="List Campaigns")
+async def list_campaigns_api(
+    person_id_query: Optional[int] = Query(None, alias="person_id", description="Filter campaigns by person ID (client ID). Admin/Staff can use this. Clients are auto-filtered."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=10, le=500),
+    user: Dict[str, Any] = Depends(get_current_user)
+):
     """
-    Lists all campaign records with pagination. Staff or Admin access required.
+    Lists campaign records with pagination.
+    - Clients will only see their own campaigns.
+    - Staff/Admins can see all or filter by person_id.
     """
+    target_person_id: Optional[int] = None
+
+    if user.get("role") == "client":
+        user_person_id = user.get("person_id")
+        if not user_person_id:
+            logger.error(f"Client user {user.get('username')} missing person_id in token/session.")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User profile incomplete.")
+        
+        if person_id_query is not None and person_id_query != user_person_id:
+            logger.warning(f"Client {user_person_id} attempted to access campaigns for person_id {person_id_query}.")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Clients can only access their own campaigns.")
+        target_person_id = user_person_id
+    elif user.get("role") in ["staff", "admin"]:
+        if person_id_query is not None:
+            target_person_id = person_id_query
+        # If person_id_query is None, target_person_id remains None, fetching all campaigns (respecting pagination)
+    else: # Should not happen if roles are well-defined and get_current_user enforces valid roles
+        logger.error(f"User with unrecognized role '{user.get("role")}' attempted to list campaigns.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
     try:
-        campaigns_from_db = await campaign_queries.get_all_campaigns_from_db(skip=skip, limit=limit)
+        campaigns_from_db = await campaign_queries.get_all_campaigns_from_db(
+            skip=skip, 
+            limit=limit, 
+            person_id=target_person_id
+        )
         return [CampaignInDB(**c) for c in campaigns_from_db]
     except Exception as e:
-        logger.exception(f"Error in list_campaigns_api: {e}")
+        logger.exception(f"Error in list_campaigns_api (target_person_id: {target_person_id}): {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.get("/{campaign_id}", response_model=CampaignInDB, summary="Get Specific Campaign")

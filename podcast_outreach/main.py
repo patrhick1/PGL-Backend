@@ -40,6 +40,8 @@ from starlette.middleware.sessions import SessionMiddleware # Import SessionMidd
 
 # Import the new API routers
 from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates, episodes as episodes_router
+# Add the new public_lead_magnet router import
+from podcast_outreach.api.routers import public_lead_magnet
 
 setup_logging()
 logger = get_logger(__name__)
@@ -127,7 +129,13 @@ if not SESSION_SECRET_KEY:
 
 app.add_middleware(
     SessionMiddleware,
-    secret_key=SESSION_SECRET_KEY,
+    secret_key=SESSION_SECRET_KEY
+    # max_age=ONE_HOUR_IN_SECONDS,  # Temporarily commented out
+    # session_cookie="pgl_session_id", 
+    # path="/",
+    # same_site="lax", 
+    # httponly=True,   
+    # secure=IS_PRODUCTION 
 )
 
 # --- Session Middleware Configuration ---
@@ -207,6 +215,8 @@ app.include_router(client.router)
 app.include_router(media_kits.router)
 app.include_router(pitch_templates.router)
 app.include_router(episodes_router.router)
+# Include the new public_lead_magnet router
+app.include_router(public_lead_magnet.router)
 
 @app.get("/login")
 def login_page(request: Request):

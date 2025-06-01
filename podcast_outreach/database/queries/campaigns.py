@@ -63,15 +63,59 @@ async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]
             logger.exception(f"Error fetching campaign {campaign_id}: {e}")
             raise
 
-async def get_all_campaigns_from_db(skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
-    query = "SELECT * FROM campaigns ORDER BY created_at DESC OFFSET $1 LIMIT $2;"
+async def get_all_campaigns_from_db(
+    skip: int = 0, 
+    limit: int = 100,
+    person_id: Optional[int] = None # New parameter
+) -> List[Dict[str, Any]]:
+    """Fetches campaigns with pagination, optionally filtered by person_id."""
+    params = [skip, limit]
+    where_clauses = []
+    
+    param_idx = 3 # Start after skip and limit
+    if person_id is not None:
+        where_clauses.append(f"person_id = ${param_idx}")
+        params.append(person_id)
+        param_idx +=1
+
+    where_sql = ""
+    if where_clauses:
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+    
+    # Note: Parameter order for LIMIT and OFFSET is $1, $2 in the final query if no WHERE. 
+    # If WHERE exists, they shift. It's safer to build params list carefully.
+    # Corrected approach: query parameters for WHERE first, then pagination.
+    
+    final_params = []
+    final_where_clauses = []
+    current_param_idx = 1
+
+    if person_id is not None:
+        final_where_clauses.append(f"person_id = ${current_param_idx}")
+        final_params.append(person_id)
+        current_param_idx += 1
+    
+    final_where_sql = ""
+    if final_where_clauses:
+        final_where_sql = "WHERE " + " AND ".join(final_where_clauses)
+
+    final_params.extend([limit, skip]) # limit is $N, offset is $N+1
+    limit_param_num = current_param_idx
+    offset_param_num = current_param_idx + 1
+
+    query = f"""SELECT * FROM campaigns 
+                 {final_where_sql} 
+                 ORDER BY created_at DESC 
+                 LIMIT ${limit_param_num} OFFSET ${offset_param_num};"""
+    
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, skip, limit)
+            rows = await conn.fetch(query, *final_params)
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.exception(f"Error fetching all campaigns: {e}")
+            logger.exception(f"Error fetching campaigns (person_id: {person_id}): {e}")
+            # Consider re-raising or returning empty list based on desired error handling
             raise
 
 async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -155,29 +199,42 @@ async def count_active_campaigns(person_id: Optional[int] = None) -> int:
             logger.exception(f"Error counting active campaigns (person_id: {person_id}): {e}")
             return 0
 
-async def get_campaigns_with_embeddings(limit: int = 200, offset: int = 0) -> Tuple[List[Dict[str, Any]], int]:
+async def get_campaigns_with_embeddings(limit: int = 200, offset: int = 0, person_id: Optional[int] = None) -> Tuple[List[Dict[str, Any]], int]:
     """
-    Fetches campaigns that have an embedding, ordered by creation date.
+    Fetches campaigns that have an embedding, ordered by creation date, optionally filtered by person_id.
     Returns a list of campaign records and the total count of such campaigns.
     """
-    query = """
-    SELECT *
-    FROM campaigns
-    WHERE embedding IS NOT NULL
-    ORDER BY created_at DESC
-    LIMIT $1 OFFSET $2;
-    """
-    count_query = "SELECT COUNT(*) FROM campaigns WHERE embedding IS NOT NULL;"
+    base_query = "FROM campaigns WHERE embedding IS NOT NULL"
+    count_base_query = "SELECT COUNT(*) FROM campaigns WHERE embedding IS NOT NULL"
     
+    params = []
+    conditions = []
+    param_idx = 1
+
+    if person_id is not None:
+        conditions.append(f"person_id = ${param_idx}")
+        params.append(person_id)
+        param_idx += 1
+    
+    where_clause = ""
+    if conditions:
+        where_clause = " AND " + " AND ".join(conditions) # Add to existing WHERE embedding IS NOT NULL
+
+    query_sql = f"SELECT * {base_query} {where_clause} ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1};"
+    count_sql = f"{count_base_query} {where_clause};"
+    
+    final_query_params = params + [limit, offset]
+    final_count_params = params
+
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, limit, offset)
-            total_count_record = await conn.fetchrow(count_query)
+            rows = await conn.fetch(query_sql, *final_query_params)
+            total_count_record = await conn.fetchrow(count_sql, *final_count_params)
             total = total_count_record['count'] if total_count_record else 0
             return [dict(row) for row in rows], total
         except Exception as e:
-            logger.error(f"Error fetching campaigns with embeddings: {e}", exc_info=True)
+            logger.error(f"Error fetching campaigns with embeddings (person_id: {person_id}): {e}", exc_info=True)
             return [], 0
 
 async def update_campaign_status(campaign_id: uuid.UUID, status: str, status_message: Optional[str] = None) -> Optional[Dict[str, Any]]:
