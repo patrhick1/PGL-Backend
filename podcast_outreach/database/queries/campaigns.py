@@ -26,10 +26,20 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
     async with pool.acquire() as conn:
         try:
             keywords = campaign_data.get("campaign_keywords", []) or []
-            # For JSONB, asyncpg can take a Python dict directly.
-            # If campaign_data['questionnaire_responses'] is already a dict, it's fine.
-            # If it might be a JSON string, you'd parse it: json.loads(campaign_data.get('questionnaire_responses'))
-            q_responses = campaign_data.get('questionnaire_responses') # Should be a dict or None
+            
+            q_responses_dict = campaign_data.get('questionnaire_responses')
+            
+            # --- SOLUTION: Explicitly serialize the dictionary to a JSON string ---
+            q_responses_json_str = None
+            if isinstance(q_responses_dict, dict):
+                q_responses_json_str = json.dumps(q_responses_dict)
+            elif q_responses_dict is None:
+                q_responses_json_str = None # Or 'null'::jsonb if your DB requires it for NULLs
+            else:
+                # If it's already a string, assume it's valid JSON or handle error
+                # For safety, if it's not a dict or None, log a warning and set to None
+                logger.warning(f"questionnaire_responses for campaign {campaign_data.get('campaign_id')} is not a dict or None, type: {type(q_responses_dict)}. Setting to NULL for DB.")
+                q_responses_json_str = None
 
             row = await conn.fetchrow(
                 query,
@@ -41,7 +51,7 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
                 campaign_data.get('start_date'), campaign_data.get('end_date'),
                 campaign_data.get('goal_note'), campaign_data.get('media_kit_url'),
                 campaign_data.get('instantly_campaign_id'),
-                q_responses # <<< NEW VALUE
+                q_responses_json_str # <<< PASS THE JSON STRING
             )
             logger.info(f"Campaign created: {campaign_data.get('campaign_id')}")
             return dict(row) if row else None
@@ -58,7 +68,16 @@ async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]
             if not row:
                 logger.warning(f"Campaign not found: {campaign_id}")
                 return None
-            return dict(row)
+            
+            # Process the row to convert JSON string to dict if necessary
+            processed_row = dict(row)
+            if "questionnaire_responses" in processed_row and isinstance(processed_row["questionnaire_responses"], str):
+                try:
+                    processed_row["questionnaire_responses"] = json.loads(processed_row["questionnaire_responses"])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse questionnaire_responses for campaign {campaign_id}: {e}. Leaving as string or None.")
+                    # Depending on strictness, you might set it to None or leave as is, or re-raise
+            return processed_row
         except Exception as e:
             logger.exception(f"Error fetching campaign {campaign_id}: {e}")
             raise
@@ -112,7 +131,17 @@ async def get_all_campaigns_from_db(
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(query, *final_params)
-            return [dict(row) for row in rows]
+            processed_rows = []
+            for row in rows:
+                processed_row = dict(row)
+                if "questionnaire_responses" in processed_row and isinstance(processed_row["questionnaire_responses"], str):
+                    try:
+                        processed_row["questionnaire_responses"] = json.loads(processed_row["questionnaire_responses"])
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse questionnaire_responses for campaign {processed_row.get('campaign_id')}: {e}. Leaving as string or None.")
+                        # Depending on strictness, you might set it to None or leave as is, or re-raise
+                processed_rows.append(processed_row)
+            return processed_rows
         except Exception as e:
             logger.exception(f"Error fetching campaigns (person_id: {person_id}): {e}")
             # Consider re-raising or returning empty list based on desired error handling
@@ -137,12 +166,15 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
         # If 'val' for 'questionnaire_responses' is a dict, it's fine.
         # If it's a JSON string, you might need json.loads(val) if asyncpg doesn't auto-cast.
         # However, Pydantic model should ensure it's a dict if coming from API.
-        if key == "questionnaire_responses" and isinstance(val, str):
-            try:
-                val = json.loads(val) # Ensure it's a dict if it came as a string
-            except json.JSONDecodeError:
-                logger.warning(f"Could not parse questionnaire_responses string for campaign {campaign_id}, storing as NULL or original if not string.")
-                val = None # Or handle error appropriately
+        if key == "questionnaire_responses":
+            if isinstance(val, dict):
+                val = json.dumps(val) # Serialize to JSON string for update
+            elif val is None:
+                pass # Keep as None
+            else:
+                logger.warning(f"Updating questionnaire_responses for campaign {campaign_id} with non-dict/non-None value of type {type(val)}. This might cause issues if not a valid JSON string.")
+                # If `val` is already a string, assume it's a valid JSON string.
+                # If it's something else, it might error or be cast by DB.
 
         set_clauses.append(f"{key} = ${idx}")
         values.append(val)
@@ -159,8 +191,20 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *values)
+            if not row:
+                logger.warning(f"Campaign {campaign_id} not found after update or update returned no rows.")
+                return None
+            
+            processed_row = dict(row)
+            if "questionnaire_responses" in processed_row and isinstance(processed_row["questionnaire_responses"], str):
+                try:
+                    processed_row["questionnaire_responses"] = json.loads(processed_row["questionnaire_responses"])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse questionnaire_responses for updated campaign {campaign_id}: {e}. Leaving as string or None.")
+            
             logger.info(f"Campaign updated: {campaign_id} with fields: {list(update_fields.keys())}")
-            return dict(row) if row else None
+            return processed_row
+
         except Exception as e:
             logger.exception(f"Error updating campaign {campaign_id}: {e}")
             raise

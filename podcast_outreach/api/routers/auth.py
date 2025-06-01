@@ -1,19 +1,25 @@
 # podcast_outreach/api/routers/auth.py
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Request # Added Request
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Dict, Any, Optional
 import uuid
+import secrets
+import asyncio
+from datetime import datetime, timedelta, timezone
+import logging
+import bcrypt
+
+logger = logging.getLogger(__name__)
 
 # Import dependencies for authentication
-from podcast_outreach.api.dependencies import authenticate_user_details, prepare_session_data, get_current_user # Ensured full path for clarity
+from podcast_outreach.api.dependencies import authenticate_user_details, prepare_session_data, get_current_user
 from pydantic import BaseModel, EmailStr, Field
 from podcast_outreach.database.queries import people as people_queries
-from podcast_outreach.api.dependencies import hash_password # For hashing
+from podcast_outreach.api.dependencies import hash_password
 from podcast_outreach.database.queries import campaigns as campaign_queries
-
-import logging
-logger = logging.getLogger(__name__)
+from ...services.email_service import email_service
+from ...database.queries import auth_queries
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -21,12 +27,19 @@ class UserRegistration(BaseModel):
     full_name: str = Field(..., min_length=2)
     email: EmailStr
     password: str = Field(..., min_length=8)
-    # company_name: Optional[str] = None # Add other fields as needed
-    prospect_person_id: Optional[int] = Field(None, description="ID of an existing prospect person to convert.")
-    prospect_campaign_id: Optional[uuid.UUID] = Field(None, description="ID of an existing prospect campaign to convert.")
+    
+    # Optional fields - ONLY needed when converting a prospect (from lead magnet signup)
+    prospect_person_id: Optional[int] = Field(None, description="ONLY for lead magnet conversions: ID of existing prospect person to convert to client.")
+    prospect_campaign_id: Optional[uuid.UUID] = Field(None, description="ONLY for lead magnet conversions: ID of existing prospect campaign to update.")
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, summary="Register New User or Convert Prospect")
 async def register_user(registration_data: UserRegistration):
+    """
+    Register a new user account.
+    
+    For NEW USERS: Just provide full_name, email, and password.
+    For PROSPECT CONVERSION (from lead magnet): Also provide prospect_person_id and prospect_campaign_id.
+    """
     hashed_password = hash_password(registration_data.password)
 
     if registration_data.prospect_person_id:
@@ -46,19 +59,19 @@ async def register_user(registration_data: UserRegistration):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User record cannot be converted in this way.")
 
         person_update_data = {
-            "full_name": registration_data.full_name, # Allow name update
+            "full_name": registration_data.full_name,
             "dashboard_password_hash": hashed_password,
-            "role": "client", # Upgrade role
-            "dashboard_username": registration_data.email # Ensure username is email
+            "role": "client",
+            "dashboard_username": registration_data.email
         }
         updated_person = await people_queries.update_person_in_db(registration_data.prospect_person_id, person_update_data)
         if not updated_person:
             logger.error(f"Failed to update prospect person {registration_data.prospect_person_id} to client.")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not update user account.")
 
-        # Optionally, update the associated campaign's type
+        # Update associated campaign type if provided
         if registration_data.prospect_campaign_id:
-            campaign_update_data = {"campaign_type": "converted_client"} # Or some other standard type
+            campaign_update_data = {"campaign_type": "converted_client"}
             updated_campaign = await campaign_queries.update_campaign(registration_data.prospect_campaign_id, campaign_update_data)
             if updated_campaign:
                 logger.info(f"Prospect campaign {registration_data.prospect_campaign_id} type updated for converted client {updated_person['email']}.")
@@ -73,11 +86,9 @@ async def register_user(registration_data: UserRegistration):
         logger.info(f"Attempting standard new user registration for email: {registration_data.email}")
         existing_user = await people_queries.get_person_by_email_from_db(registration_data.email)
         if existing_user:
-            # This case should ideally be caught by frontend or the lead-magnet flow if email already exists.
-            # But good to have a safeguard here.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="User with this email already exists. If you started with a media kit preview, please ensure you use the correct sign-up link or contact support."
+                detail="User with this email already exists. Please log in instead, or use password reset if you forgot your password."
             )
 
         new_person_data = {
@@ -96,12 +107,12 @@ async def register_user(registration_data: UserRegistration):
                 detail="Could not create user account."
             )
         
-        # Optionally, create a default blank campaign for a brand new client
+        # Create a default campaign for new client
         default_campaign_data = {
             "campaign_id": uuid.uuid4(),
             "person_id": created_person['person_id'],
             "campaign_name": f"{created_person['full_name']}'s First Campaign",
-            "campaign_type": "general" # or a default type
+            "campaign_type": "general"
         }
         await campaign_queries.create_campaign_in_db(default_campaign_data)
         logger.info(f"Default campaign created for new client {created_person['email']}.")
@@ -109,12 +120,13 @@ async def register_user(registration_data: UserRegistration):
         logger.info(f"New client registered: {created_person['email']} (ID: {created_person['person_id']})")
         return {"message": "User registered successfully. Please log in.", "user_id": created_person["person_id"]}
 
-@router.post("/token", summary="Authenticate User and Get Session Token")
+@router.post("/token", summary="Login - Get Session Token")
 async def login_for_access_token(
-    request: Request, # Inject request to access request.session
-    response: Response, # Keep for potential direct cookie manipulation if needed, though SessionMiddleware handles it
+    request: Request,
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends()
 ):
+    """Standard login endpoint. Use email as username."""
     email = form_data.username
     password = form_data.password
 
@@ -127,14 +139,12 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Prepare data and set it in the session
     session_data = prepare_session_data(user_details)
-    request.session.update(session_data) # This sets the data for SessionMiddleware to save
+    request.session.update(session_data)
 
-    logger.info(f"User with email '{user_details['username']}' authenticated via /token. Session data set for middleware.")
+    logger.info(f"User with email '{user_details['username']}' authenticated via /token.")
     
     return {
-        # "access_token": session_id_val, # If you were managing a separate token
         "message": "Login successful. Session initiated.",
         "role": user_details["role"],
         "person_id": user_details.get("person_id"),
@@ -142,21 +152,99 @@ async def login_for_access_token(
         "email": user_details["username"]
     }
 
+@router.post("/request-password-reset", status_code=status.HTTP_202_ACCEPTED, summary="Request Password Reset (Forgot Password)")
+async def request_password_reset(request: Request, email: EmailStr = Form(...)):
+    """Request password reset for user who forgot their password"""
+    try:
+        # Check if user exists
+        user = await people_queries.get_person_by_email_from_db(email)
+        
+        if user:
+            # Generate secure reset token
+            reset_token = secrets.token_urlsafe(32)
+            
+            # Get client IP for logging
+            client_ip = request.client.host if request.client else None
+            
+            # Store token in database
+            token_created = await auth_queries.create_password_reset_token(
+                person_id=user['person_id'],
+                token=reset_token,
+                client_ip=client_ip
+            )
+            
+            if token_created:
+                # Send password reset email
+                email_sent = await email_service.send_password_reset_email(email, reset_token)
+                
+                if not email_sent:
+                    logger.error(f"Failed to send password reset email to {email}")
+                    # Don't reveal email sending failure to user for security
+            else:
+                logger.error(f"Failed to create password reset token for {email}")
+        
+        # Always return success message for security (don't reveal if email exists)
+        return {
+            "message": "If an account with this email exists, a password reset link has been sent to your email address."
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in password reset request: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing your request"
+        )
+
+@router.post("/reset-password", summary="Reset Password with Token")
+async def reset_password_with_token(
+    token: str = Form(...),
+    new_password: str = Form(..., min_length=8)
+):
+    """Reset user password using a valid reset token"""
+    try:
+        # Validate token and get person_id
+        person_id = await auth_queries.validate_and_use_reset_token(token)
+        
+        if not person_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token"
+            )
+        
+        # Hash the new password
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Update user's password
+        updated = await people_queries.update_person_password_hash(person_id, hashed_password)
+        
+        if not updated:
+            logger.error(f"Failed to update password for person_id: {person_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update password"
+            )
+        
+        logger.info(f"Password successfully reset for person_id: {person_id}")
+        return {"message": "Password reset successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in password reset: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while resetting your password"
+        )
+
 @router.post("/logout", summary="Logout User")
 async def logout_api(request: Request, response: Response):
-    """
-    Logs out the current user by invalidating their session cookie.
-    Requires authentication.
-    """
+    """Logout the current user by clearing their session."""
     username = request.session.get("username", "Unknown user")
     request.session.clear()
-    logger.info(f"User {username} logged out via /auth/logout. Session cleared.")
-    # response.delete_cookie(key="session") # Middleware handles this
+    logger.info(f"User {username} logged out via /auth/logout.")
     return {"message": "Successfully logged out"}
 
 @router.get("/me", response_model=Dict[str, Any], summary="Get Current User Info")
 async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """
-    Retrieves information about the currently authenticated user.
-    """
+    """Get information about the currently authenticated user."""
     return current_user

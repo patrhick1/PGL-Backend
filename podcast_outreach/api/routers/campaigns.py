@@ -119,13 +119,23 @@ async def list_campaigns_api(
 @router.get("/{campaign_id}", response_model=CampaignInDB, summary="Get Specific Campaign")
 async def get_campaign_api(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
     """
-    Retrieves a specific campaign record by ID. Staff or Admin access required.
+    Retrieves a specific campaign record by ID. 
+    Clients can view their own campaigns. Staff/Admin can view any campaign.
     """
     try:
         campaign_from_db = await campaign_queries.get_campaign_by_id(campaign_id)
         if not campaign_from_db:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign with ID {campaign_id} not found.")
+        
+        # Authorization: Ensure user can access this campaign
+        if user.get("role") == "client":
+            if campaign_from_db.get("person_id") != user.get("person_id"):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view your own campaigns.")
+        # Admin/staff can view any campaign
+        
         return CampaignInDB(**campaign_from_db)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Error in get_campaign_api for ID {campaign_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
@@ -153,6 +163,48 @@ async def update_campaign_api(campaign_id: uuid.UUID, campaign_update: CampaignU
         raise
     except Exception as e:
         logger.exception(f"Error in update_campaign_api for ID {campaign_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.patch("/me/{campaign_id}", response_model=CampaignInDB, summary="Update My Campaign")
+async def update_my_campaign_api(
+    campaign_id: uuid.UUID, 
+    campaign_update: CampaignUpdate, 
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Updates a campaign owned by the current user. Clients can only edit their own campaigns.
+    Restricted fields like person_id cannot be changed by clients.
+    """
+    # First check if campaign exists and user owns it
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
+    
+    # Authorization: Ensure user owns this campaign (unless admin/staff)
+    if user.get("role") == "client":
+        if campaign.get("person_id") != user.get("person_id"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own campaigns.")
+    # Admin/staff can edit any campaign via this endpoint too
+    
+    update_data = campaign_update.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update data provided.")
+    
+    # Prevent clients from changing restricted fields
+    if user.get("role") == "client":
+        restricted_fields = ["person_id", "attio_client_id"]
+        for field in restricted_fields:
+            if field in update_data:
+                del update_data[field]
+                logger.warning(f"Client {user.get('person_id')} attempted to update restricted field '{field}' on campaign {campaign_id}")
+    
+    try:
+        updated_db_campaign = await campaign_queries.update_campaign(campaign_id, update_data)
+        if not updated_db_campaign:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign update failed.")
+        return CampaignInDB(**updated_db_campaign)
+    except Exception as e:
+        logger.exception(f"Error in update_my_campaign_api for ID {campaign_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete Campaign")

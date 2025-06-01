@@ -199,54 +199,39 @@ async def verify_email_with_token(token: str = Query(..., min_length=32)):
     # Placeholder response
     return {"message": f"Email verification for token {token} would be processed here. User would be marked as verified."}
 
-# Example structure for a password reset request
-# You would need similar token generation, storage, and email sending logic
-@router.post("/request-password-reset", status_code=status.HTTP_202_ACCEPTED, summary="Request Password Reset")
-async def request_password_reset(email: EmailStr = Form(...)):
-    person = await people_queries.get_person_by_email_from_db(email)
-    if not person:
-        # Even if user not found, return a generic message for security
-        logger.info(f"Password reset requested for non-existent email: {email}")
-        return {"message": "If an account with this email exists, a password reset link has been sent."}
-
-    reset_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
-    # Store reset_token and expires_at for the user (e.g., in people table or a dedicated table)
-    # await people_queries.store_password_reset_token(person['person_id'], reset_token, expires_at)
-    logger.info(f"Generated password reset token for {email} (person_id: {person['person_id']}): {reset_token}, expires: {expires_at.isoformat()}")
-
-    # Send email with reset_token (use background task)
-    # background_tasks.add_task(send_password_reset_email, email, reset_token)
-    await send_verification_email_task(email, f"Password Reset Token: {reset_token}") # Reusing for simulation
-
-    return {"message": "If an account with this email exists, a password reset link has been sent."}
-
-@router.post("/reset-password", summary="Reset Password with Token")
-async def reset_password_with_token(
-    token: str = Form(...),
-    new_password: str = Form(..., min_length=8)
+@router.post("/me/change-password", status_code=status.HTTP_200_OK, summary="Change My Password")
+async def change_my_password(
+    current_password: str = Form(...),
+    new_password: str = Form(..., min_length=8),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    # Validate token, find user, check expiry
-    # Example: user_id = await people_queries.get_user_id_from_reset_token(token)
-    # if not user_id:
-    #     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired password reset token.")
+    """
+    Change password for the currently logged-in user.
+    Requires current password for verification.
+    """
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not authenticated.")
 
-    logger.info(f"Attempting to reset password with token: {token}")
-    # For this placeholder, we'll assume token is valid and we have a user_id (e.g., 1)
-    placeholder_user_id = 1 
-    
+    # Get user record to verify current password
+    user_record = await people_queries.get_person_by_id_from_db(person_id)
+    if not user_record or not user_record.get("dashboard_password_hash"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User account issue or password not set.")
+
+    # Verify current password
+    if not verify_password(current_password, user_record["dashboard_password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect.")
+
+    # Hash new password and update
     new_password_hash = hash_password(new_password)
-    success = await people_queries.update_person_password_hash(placeholder_user_id, new_password_hash)
+    success = await people_queries.update_person_password_hash(person_id, new_password_hash)
 
     if not success:
-        # This might happen if user_id was invalid or DB error
-        logger.error(f"Failed to update password for user (placeholder_id: {placeholder_user_id}) using reset token.")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not reset password.")
+        logger.error(f"Failed to update password for user {person_id}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not update password.")
     
-    # Optionally, invalidate the reset token after successful use
-    # await people_queries.invalidate_reset_token(token)
-
-    return {"message": "Password has been reset successfully. You can now log in with your new password."}
+    logger.info(f"Password successfully changed for user {person_id} ({current_user.get('username')})")
+    return {"message": "Password updated successfully."}
 
 # --- Data Export Endpoint ---
 async def perform_data_export_task(user_id: int, user_email: str, stop_flag: threading.Event):

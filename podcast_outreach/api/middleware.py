@@ -25,6 +25,10 @@ PUBLIC_PATHS = [
     "/token",  # Login endpoint (without prefix - what middleware sees)
     "/auth/register",  # Registration endpoint (with prefix)
     "/register",  # Registration endpoint (without prefix - what middleware sees)
+    "/auth/request-password-reset",  # Password reset request (with prefix)
+    "/request-password-reset",  # Password reset request (without prefix - what middleware sees)
+    "/auth/reset-password",  # Password reset (with prefix)
+    "/reset-password",  # Password reset (without prefix - what middleware sees)
 ]
 
 # Paths that only admins can access

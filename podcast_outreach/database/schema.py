@@ -532,6 +532,31 @@ def create_media_kits_table(conn): # NEW FUNCTION
     print("Table MEDIA_KITS created/ensured.")
     apply_timestamp_update_trigger(conn, "media_kits")
 
+def create_password_reset_tokens_table(conn):
+    """Create password_reset_tokens table"""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id SERIAL PRIMARY KEY,
+            person_id INTEGER NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+            token VARCHAR(255) NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_by_ip VARCHAR(45)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token 
+        ON password_reset_tokens(token);
+        
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_person_id 
+        ON password_reset_tokens(person_id);
+        
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at 
+        ON password_reset_tokens(expires_at);
+    """)
+
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
@@ -621,6 +646,7 @@ def create_all_tables():
         create_status_history_table(conn) # Depends on PLACEMENTS
         create_ai_usage_logs_table(conn) # NEW: Depends on PITCH_GENERATIONS, CAMPAIGNS, MEDIA
         create_media_kits_table(conn) # ADDED: Depends on CAMPAIGNS, PEOPLE
+        create_password_reset_tokens_table(conn)
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:

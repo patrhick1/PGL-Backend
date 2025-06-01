@@ -140,23 +140,33 @@ class MediaKitService:
         campaign_id: uuid.UUID,
         editable_content: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
+        print(f"--- [MEDIA KIT SERVICE] --- Entering create_or_update_media_kit for campaign_id: {campaign_id}") # DEBUG PRINT
         logger.info(f"Creating/updating media kit for campaign_id: {campaign_id}")
         editable_content = editable_content or {}
+        print(f"--- [MEDIA KIT SERVICE] --- Editable content: {editable_content}") # DEBUG PRINT
 
+        print(f"--- [MEDIA KIT SERVICE] --- Getting campaign by ID: {campaign_id}") # DEBUG PRINT
         campaign = await campaign_queries.get_campaign_by_id(campaign_id)
         if not campaign:
             logger.error(f"Campaign {campaign_id} not found for media kit generation.")
+            print(f"--- [MEDIA KIT SERVICE] --- ERROR: Campaign {campaign_id} not found.") # DEBUG PRINT
             return None
+        print(f"--- [MEDIA KIT SERVICE] --- Campaign data: {campaign}") # DEBUG PRINT
         
         person_id = campaign.get("person_id")
         if not person_id:
             logger.error(f"Person ID not found for campaign {campaign_id}.")
+            print(f"--- [MEDIA KIT SERVICE] --- ERROR: Person ID not found in campaign {campaign_id}.") # DEBUG PRINT
             return None
+        print(f"--- [MEDIA KIT SERVICE] --- Person ID: {person_id}") # DEBUG PRINT
         
+        print(f"--- [MEDIA KIT SERVICE] --- Getting person by ID: {person_id}") # DEBUG PRINT
         person = await people_queries.get_person_by_id_from_db(person_id)
         if not person:
             logger.error(f"Person {person_id} not found for media kit generation.")
+            print(f"--- [MEDIA KIT SERVICE] --- ERROR: Person {person_id} not found.") # DEBUG PRINT
             return None
+        print(f"--- [MEDIA KIT SERVICE] --- Person data: {person}") # DEBUG PRINT
 
         kit_data = {
             "campaign_id": campaign_id,
@@ -181,16 +191,38 @@ class MediaKitService:
         # --- Determine Bio Content ---
         bio_gdoc_url = campaign.get("campaign_bio")
         parsed_bios_from_gdoc = None
+        print(f"--- [MEDIA KIT SERVICE] --- Bio GDoc URL: {bio_gdoc_url}") # DEBUG PRINT
         if bio_gdoc_url:
+            print(f"--- [MEDIA KIT SERVICE] --- Fetching GDoc content for bio from URL: {bio_gdoc_url}") # DEBUG PRINT
             bio_content_str = await self._get_content_from_gdoc(bio_gdoc_url)
             if bio_content_str and bio_content_str != "Error fetching content." and bio_content_str.strip():
+                print(f"--- [MEDIA KIT SERVICE] --- Parsing bio from GDoc content for campaign ID: {campaign_id}") # DEBUG PRINT
                 parsed_bios_from_gdoc = await self._parse_bio_from_gdoc_content(bio_content_str, campaign_id)
+                print(f"--- [MEDIA KIT SERVICE] --- Parsed bios from GDoc: {parsed_bios_from_gdoc}") # DEBUG PRINT
+            else:
+                print(f"--- [MEDIA KIT SERVICE] --- Bio GDoc content was empty or error for URL: {bio_gdoc_url}") # DEBUG PRINT
         
+        # --- MODIFICATION: Ensure questionnaire_responses is a dict before accessing --- 
+        questionnaire_responses_data = campaign.get("questionnaire_responses", {})
+        if isinstance(questionnaire_responses_data, str):
+            try:
+                questionnaire_responses_data = json.loads(questionnaire_responses_data)
+                print("--- [MEDIA KIT SERVICE] --- Successfully parsed questionnaire_responses string to dict for BIO.") # DEBUG PRINT
+            except json.JSONDecodeError as e_json:
+                logger.error(f"Failed to parse questionnaire_responses JSON string for campaign {campaign_id} (bio section): {e_json}. Using empty dict.")
+                print(f"--- [MEDIA KIT SERVICE] --- ERROR: Failed to parse questionnaire_responses JSON string to dict for BIO: {e_json}. Using empty dict.") # DEBUG PRINT
+                questionnaire_responses_data = {}
+        # --- END MODIFICATION ---
+
         if parsed_bios_from_gdoc and (parsed_bios_from_gdoc.get("full_bio_content") or parsed_bios_from_gdoc.get("summary_bio_content")):
             kit_data.update(parsed_bios_from_gdoc)
             kit_data["bio_source"] = "gdoc"
+            print(f"--- [MEDIA KIT SERVICE] --- Bio source set to GDoc. Parsed bios: {parsed_bios_from_gdoc}") # DEBUG PRINT
         else:
-            questionnaire_bio = campaign.get("questionnaire_responses", {}).get("personalInfo", {}).get("bio")
+            print(f"--- [MEDIA KIT SERVICE] --- No usable bio from GDoc. Checking questionnaire.") # DEBUG PRINT
+            # Use the (potentially parsed) questionnaire_responses_data
+            questionnaire_bio = questionnaire_responses_data.get("personalInfo", {}).get("bio")
+            print(f"--- [MEDIA KIT SERVICE] --- Questionnaire bio: '{questionnaire_bio[:100] if questionnaire_bio else None}...'") # DEBUG PRINT
             if questionnaire_bio and questionnaire_bio.strip():
                 kit_data["full_bio_content"] = questionnaire_bio
                 kit_data["summary_bio_content"] = self._generate_summary_from_text(questionnaire_bio)
@@ -207,18 +239,38 @@ class MediaKitService:
         # --- Determine Talking Points ---
         angles_gdoc_url = campaign.get("campaign_angles")
         parsed_talking_points_from_gdoc = None
+        print(f"--- [MEDIA KIT SERVICE] --- Angles GDoc URL: {angles_gdoc_url}") # DEBUG PRINT
         if angles_gdoc_url:
+            print(f"--- [MEDIA KIT SERVICE] --- Fetching GDoc content for angles from URL: {angles_gdoc_url}") # DEBUG PRINT
             angles_content_str = await self._get_content_from_gdoc(angles_gdoc_url)
             if angles_content_str and angles_content_str != "Error fetching content." and angles_content_str.strip():
+                print(f"--- [MEDIA KIT SERVICE] --- Parsing talking points from GDoc content for campaign ID: {campaign_id}") # DEBUG PRINT
                 parsed_talking_points_from_gdoc = await self._parse_talking_points_from_gdoc_content(angles_content_str, campaign_id)
+                print(f"--- [MEDIA KIT SERVICE] --- Parsed talking points from GDoc: {parsed_talking_points_from_gdoc}") # DEBUG PRINT
+            else:
+                print(f"--- [MEDIA KIT SERVICE] --- Angles GDoc content was empty or error for URL: {angles_gdoc_url}") # DEBUG PRINT
 
         if parsed_talking_points_from_gdoc:
             kit_data["talking_points"] = parsed_talking_points_from_gdoc
             kit_data["angles_source"] = "gdoc"
+            print(f"--- [MEDIA KIT SERVICE] --- Talking points source set to GDoc. Points: {parsed_talking_points_from_gdoc}") # DEBUG PRINT
         else:
-            q_responses = campaign.get("questionnaire_responses", {})
-            q_preferred_topics = q_responses.get("preferences", {}).get("preferredTopics", [])
-            q_key_messages = q_responses.get("goals", {}).get("keyMessages", "")
+            print(f"--- [MEDIA KIT SERVICE] --- No usable talking points from GDoc. Checking questionnaire.") # DEBUG PRINT
+            # questionnaire_responses_data should already be a dict from the bio section handling, or re-parse if necessary.
+            # Re-fetch and parse for safety/clarity, in case it wasn't processed or campaign object is different.
+            q_responses_for_angles = campaign.get("questionnaire_responses", {})
+            if isinstance(q_responses_for_angles, str):
+                try:
+                    q_responses_for_angles = json.loads(q_responses_for_angles)
+                    print("--- [MEDIA KIT SERVICE] --- Successfully parsed questionnaire_responses string to dict for ANGLES.") # DEBUG PRINT
+                except json.JSONDecodeError as e_json_angles:
+                    logger.error(f"Failed to parse questionnaire_responses JSON string for campaign {campaign_id} (angles section): {e_json_angles}. Using empty dict.")
+                    print(f"--- [MEDIA KIT SERVICE] --- ERROR: Failed to parse questionnaire_responses JSON string to dict for ANGLES: {e_json_angles}. Using empty dict.") # DEBUG PRINT
+                    q_responses_for_angles = {}
+            
+            q_preferred_topics = q_responses_for_angles.get("preferences", {}).get("preferredTopics", [])
+            q_key_messages = q_responses_for_angles.get("goals", {}).get("keyMessages", "")
+            print(f"--- [MEDIA KIT SERVICE] --- Questionnaire preferred topics: {q_preferred_topics}, key messages: '{q_key_messages[:100] if isinstance(q_key_messages, str) else q_key_messages}...'") # DEBUG PRINT
             if q_preferred_topics:
                 talking_points_from_q = []
                 for topic in q_preferred_topics:
@@ -243,31 +295,42 @@ class MediaKitService:
         # Slug generation and handling
         base_slug_text = kit_data["title"]
         generated_slug = generate_slug(base_slug_text)
+        print(f"--- [MEDIA KIT SERVICE] --- Generated base slug '{generated_slug}' from title '{base_slug_text}'") # DEBUG PRINT
         
         existing_kit = await media_kit_queries.get_media_kit_by_campaign_id_from_db(campaign_id)
         final_slug = generated_slug
         counter = 1
         
         slug_to_check = editable_content.get("slug") 
+        print(f"--- [MEDIA KIT SERVICE] --- Slug from editable_content: {slug_to_check}") # DEBUG PRINT
         if not slug_to_check and not existing_kit: 
             slug_to_check = generated_slug
+            print(f"--- [MEDIA KIT SERVICE] --- Slug to check (generated, no existing kit): {slug_to_check}") # DEBUG PRINT
         elif existing_kit and not slug_to_check: 
             slug_to_check = existing_kit.get("slug", generated_slug)
+            print(f"--- [MEDIA KIT SERVICE] --- Slug to check (from existing kit or generated): {slug_to_check}") # DEBUG PRINT
         elif not slug_to_check:
              slug_to_check = generate_slug(kit_data["title"]) if kit_data["title"] else "untitled-media-kit"
+             print(f"--- [MEDIA KIT SERVICE] --- Slug to check (generated from title as fallback): {slug_to_check}") # DEBUG PRINT
 
         final_slug = slug_to_check
+        print(f"--- [MEDIA KIT SERVICE] --- Initial final_slug: {final_slug}") # DEBUG PRINT
 
         is_new_slug = not existing_kit or (existing_kit and existing_kit.get("slug") != final_slug)
         if is_new_slug:
             temp_slug = final_slug
             current_excluded_id = existing_kit.get("media_kit_id") if existing_kit else None
+            print(f"--- [MEDIA KIT SERVICE] --- New slug '{final_slug}' or slug changed. Checking for duplicates. Exclude ID: {current_excluded_id}") # DEBUG PRINT
             while await media_kit_queries.check_slug_exists(temp_slug, exclude_media_kit_id=current_excluded_id):
                 final_slug = f"{slug_to_check}-{counter}"
                 temp_slug = final_slug
                 counter += 1
+                print(f"--- [MEDIA KIT SERVICE] --- Slug '{temp_slug}' exists. Trying next: {final_slug}") # DEBUG PRINT
+        else:
+            print(f"--- [MEDIA KIT SERVICE] --- Slug '{final_slug}' is not new or has not changed. Not checking for duplicates against itself.") # DEBUG PRINT
         
         kit_data["slug"] = final_slug
+        print(f"--- [MEDIA KIT SERVICE] --- Final slug for DB: {final_slug}") # DEBUG PRINT
 
         db_operation_successful = False
         result_kit_dict = None
@@ -275,35 +338,50 @@ class MediaKitService:
 
         if existing_kit:
             logger.info(f"Updating existing media kit (ID: {existing_kit['media_kit_id']}) for campaign {campaign_id}")
+            print(f"--- [MEDIA KIT SERVICE] --- Updating existing media kit ID: {existing_kit['media_kit_id']}") # DEBUG PRINT
             result_kit_dict = await media_kit_queries.update_media_kit_in_db(existing_kit['media_kit_id'], kit_data)
             if result_kit_dict:
                 db_operation_successful = True
                 media_kit_id_for_social_update = existing_kit['media_kit_id'] 
+                print(f"--- [MEDIA KIT SERVICE] --- Successfully updated media kit ID: {media_kit_id_for_social_update}") # DEBUG PRINT
+            else:
+                print(f"--- [MEDIA KIT SERVICE] --- ERROR: Failed to update media kit ID: {existing_kit['media_kit_id']}") # DEBUG PRINT
         else:
             logger.info(f"Creating new media kit for campaign {campaign_id}")
+            print(f"--- [MEDIA KIT SERVICE] --- Creating new media kit.") # DEBUG PRINT
             result_kit_dict = await media_kit_queries.create_media_kit_in_db(kit_data)
             if result_kit_dict:
                 db_operation_successful = True
                 media_kit_id_for_social_update = result_kit_dict['media_kit_id'] 
+                print(f"--- [MEDIA KIT SERVICE] --- Successfully created new media kit ID: {media_kit_id_for_social_update}") # DEBUG PRINT
+            else:
+                print(f"--- [MEDIA KIT SERVICE] --- ERROR: Failed to create new media kit.") # DEBUG PRINT
 
         if db_operation_successful and result_kit_dict and media_kit_id_for_social_update:
             # Check campaign type before updating social stats
+            print(f"--- [MEDIA KIT SERVICE] --- DB op successful. Campaign type: {campaign.get('campaign_type')}, Media Kit ID for social update: {media_kit_id_for_social_update}") # DEBUG PRINT
             if campaign.get("campaign_type") != "lead_magnet_prospect":
                 logger.info(f"Media kit DB operation successful for campaign {campaign_id}. Triggering social stats update for media_kit_id: {media_kit_id_for_social_update}.")
+                print(f"--- [MEDIA KIT SERVICE] --- Campaign type is NOT lead_magnet_prospect. Triggering social stats update for media kit ID: {media_kit_id_for_social_update}") # DEBUG PRINT
                 try:
                     updated_kit_with_stats = await self.update_social_stats_for_media_kit(media_kit_id_for_social_update)
+                    print(f"--- [MEDIA KIT SERVICE] --- Social stats update result: {updated_kit_with_stats}") # DEBUG PRINT
                     return updated_kit_with_stats if updated_kit_with_stats else result_kit_dict
                 except Exception as e_social:
                     logger.error(f"Error triggering social stats update for media_kit_id {media_kit_id_for_social_update}: {e_social}. Proceeding with original result.")
+                    print(f"--- [MEDIA KIT SERVICE] --- EXCEPTION during social stats update for media kit ID: {media_kit_id_for_social_update}: {e_social}") # DEBUG PRINT
                     return result_kit_dict
             else:
                 logger.info(f"Skipping social stats update for lead_magnet_prospect campaign {campaign_id}, media_kit_id: {media_kit_id_for_social_update}.")
+                print(f"--- [MEDIA KIT SERVICE] --- Skipping social stats update for lead_magnet_prospect campaign ID: {campaign_id}, media_kit_id: {media_kit_id_for_social_update}.") # DEBUG PRINT
                 return result_kit_dict # Return the kit without social stats update
         elif result_kit_dict:
              logger.warning(f"DB operation for media kit campaign {campaign_id} was successful, but could not proceed to social stats update (or it was skipped). ")
+             print(f"--- [MEDIA KIT SERVICE] --- DB op successful, but social stats update skipped or not possible. Returning kit: {result_kit_dict}") # DEBUG PRINT
              return result_kit_dict
         else:
             logger.error(f"Media kit DB operation FAILED for campaign {campaign_id}.")
+            print(f"--- [MEDIA KIT SERVICE] --- ERROR: Media kit DB operation FAILED for campaign ID: {campaign_id}. Returning None.") # DEBUG PRINT
             return None
 
     async def get_media_kit_by_campaign_id(self, campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]:

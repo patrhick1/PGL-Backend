@@ -1,5 +1,6 @@
 import logging
 import uuid
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -30,25 +31,51 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
+            # JSONB fields: serialize to JSON strings
+            talking_points_json = json.dumps(kit_data.get('talking_points', []))
+            key_achievements_json = json.dumps(kit_data.get('key_achievements', []))
+            previous_appearances_json = json.dumps(kit_data.get('previous_appearances', []))
+            social_media_stats_json = json.dumps(kit_data.get('social_media_stats', {}))
+            custom_sections_json = json.dumps(kit_data.get('custom_sections', []))
+            
+            # TEXT[] field: pass as Python list
+            headshot_image_urls_list = kit_data.get('headshot_image_urls', [])
+
             row = await conn.fetchrow(
                 query,
                 kit_data['campaign_id'], kit_data['person_id'], kit_data.get('title'), kit_data['slug'],
                 kit_data.get('is_public', False), kit_data.get('theme_preference', 'modern'),
                 kit_data.get('headline'), kit_data.get('introduction'),
                 kit_data.get('full_bio_content'), kit_data.get('summary_bio_content'), kit_data.get('short_bio_content'),
-                kit_data.get('talking_points', []), kit_data.get('key_achievements', []),
-                kit_data.get('previous_appearances', []), kit_data.get('social_media_stats', {}),
-                kit_data.get('headshot_image_urls', []),
-                kit_data.get('logo_image_url'), kit_data.get('call_to_action_text'),
-                kit_data.get('contact_information_for_booking'), kit_data.get('custom_sections', [])
+                talking_points_json, key_achievements_json, previous_appearances_json, social_media_stats_json,
+                headshot_image_urls_list, kit_data.get('logo_image_url'), 
+                kit_data.get('call_to_action_text'), kit_data.get('contact_information_for_booking'), 
+                custom_sections_json
             )
             if row:
                 logger.info(f"MediaKit created with ID: {row['media_kit_id']} for campaign {kit_data['campaign_id']}")
-                return dict(row)
+                # Deserialize fields when returning
+                return _process_media_kit_row(row)
             return None
         except Exception as e:
             logger.exception(f"Error creating MediaKit in DB for campaign {kit_data.get('campaign_id')}: {e}")
             raise
+
+def _process_media_kit_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    processed_row = dict(row)
+    # Only JSONB fields need JSON parsing, not TEXT[] fields
+    jsonb_fields = ['talking_points', 'key_achievements', 'previous_appearances', 
+                   'social_media_stats', 'custom_sections']
+    for field in jsonb_fields:
+        if field in processed_row and isinstance(processed_row[field], str):
+            try:
+                processed_row[field] = json.loads(processed_row[field])
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON field '{field}' for media kit {processed_row.get('media_kit_id')}: {e}. Leaving as string.")
+    # headshot_image_urls is TEXT[] and should already be a list from asyncpg
+    return processed_row
 
 async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Updates an existing media_kit record."""
@@ -58,11 +85,23 @@ async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str,
     set_clauses = []
     values = []
     idx = 1
+    
+    # JSONB fields that should be JSON serialized if they are dict/list
+    jsonb_fields_to_serialize = ['talking_points', 'key_achievements', 'previous_appearances', 
+                                'social_media_stats', 'custom_sections']
+
     for key, value in update_data.items():
         if key in ["media_kit_id", "campaign_id", "person_id", "created_at"]: # These shouldn't be updated this way
             continue
+        
+        if key in jsonb_fields_to_serialize and isinstance(value, (dict, list)):
+            values.append(json.dumps(value))
+        elif key == 'headshot_image_urls' and isinstance(value, list):
+            # TEXT[] field: pass as list directly
+            values.append(value)
+        else:
+            values.append(value)
         set_clauses.append(f"{key} = ${idx}")
-        values.append(value)
         idx += 1
     
     if not set_clauses:
@@ -80,7 +119,7 @@ async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str,
             row = await conn.fetchrow(query, *values)
             if row:
                 logger.info(f"MediaKit updated: {media_kit_id}")
-                return dict(row)
+                return _process_media_kit_row(row) # Deserialize fields when returning
             logger.warning(f"MediaKit {media_kit_id} not found for update.")
             return None
         except Exception as e:
@@ -93,7 +132,7 @@ async def get_media_kit_by_id_from_db(media_kit_id: uuid.UUID) -> Optional[Dict[
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, media_kit_id)
-            return dict(row) if row else None
+            return _process_media_kit_row(row) # Deserialize fields
         except Exception as e:
             logger.exception(f"Error fetching MediaKit by ID {media_kit_id}: {e}")
             raise
@@ -104,7 +143,7 @@ async def get_media_kit_by_campaign_id_from_db(campaign_id: uuid.UUID) -> Option
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, campaign_id)
-            return dict(row) if row else None
+            return _process_media_kit_row(row) # Deserialize fields
         except Exception as e:
             logger.exception(f"Error fetching MediaKit by campaign_id {campaign_id}: {e}")
             raise
@@ -115,7 +154,7 @@ async def get_media_kit_by_slug_from_db(slug: str) -> Optional[Dict[str, Any]]:
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, slug)
-            return dict(row) if row else None
+            return _process_media_kit_row(row) # Deserialize fields
         except Exception as e:
             logger.exception(f"Error fetching MediaKit by slug {slug}: {e}")
             raise
@@ -169,7 +208,11 @@ async def get_media_kit_by_slug_enriched(slug: str) -> Optional[Dict[str, Any]]:
             if not row:
                 logger.debug(f"Enriched media kit not found for slug: {slug}")
                 return None
-            return dict(row)
+            # For enriched queries, the _process_media_kit_row needs to be applied to the mk portion.
+            # However, direct dict(row) is fine if Pydantic models downstream handle parsing, 
+            # or ensure that the fields like mk.talking_points are correctly typed from DB already.
+            # Given our new _process_media_kit_row, it's safer to use it.
+            return _process_media_kit_row(dict(row)) # Process the row before returning
         except Exception as e:
             logger.exception(f"Error fetching enriched media kit by slug {slug}: {e}")
             return None # Or raise
