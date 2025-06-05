@@ -2,9 +2,10 @@
 
 import json
 from email.utils import parsedate_to_datetime
-from datetime import datetime, timedelta
+from datetime import datetime, date, timezone as dt_timezone
 import logging
 import html
+from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,57 +23,71 @@ def extract_document_id(google_doc_link):
         return None
 
 
-def parse_date(date_string):
+def parse_date(date_string: Any) -> Optional[datetime]:
     """
     Parse various date string formats into datetime objects.
-    Handles timezone information correctly.
+    Handles timezone information correctly, converting to UTC.
     Returns None if parsing fails.
     """
-    if not date_string:
+    if date_string is None:
         return None
 
-    # Handle milliseconds (common in ListenNotes)
-    if isinstance(date_string, int) and len(str(date_string)) == 13: # Check if it looks like a Unix timestamp in ms
-        try:
-            # Convert milliseconds to seconds
-            timestamp_sec = date_string / 1000
-            dt_object = datetime.fromtimestamp(timestamp_sec) # Assumes local timezone, adjust if UTC needed
-            # To make it timezone-aware (e.g., UTC):
-            # from datetime import timezone
-            # dt_object = datetime.fromtimestamp(timestamp_sec, tz=timezone.utc)
-            return dt_object
-        except ValueError:
-            logger.warning(f"Could not parse timestamp integer: {date_string}")
-            return None
+    if isinstance(date_string, datetime):
+        if date_string.tzinfo is None or date_string.tzinfo.utcoffset(date_string) is None:
+            return date_string.replace(tzinfo=dt_timezone.utc)
+        return date_string.astimezone(dt_timezone.utc)
 
-    # Standard string formats
+    if isinstance(date_string, date):
+        return datetime.combine(date_string, datetime.min.time()).replace(tzinfo=dt_timezone.utc)
+
+    if isinstance(date_string, int):
+        if len(str(date_string)) == 13:
+            try:
+                timestamp_sec = date_string / 1000
+                dt_object = datetime.fromtimestamp(timestamp_sec, tz=dt_timezone.utc)
+                return dt_object
+            except ValueError:
+                logger.warning(f"Could not parse 13-digit integer timestamp: {date_string}, will attempt as string.")
+                s_date_string = str(date_string)
+        else:
+            logger.warning(f"Integer value {date_string} is not a 13-digit ms timestamp. Cannot parse as date.")
+            return None
+    elif isinstance(date_string, float):
+        logger.warning(f"Float value {date_string} cannot be parsed as date.")
+        return None
+    else:
+        s_date_string = str(date_string).strip()
+
+    if not s_date_string:
+        return None
+
     formats = [
-        "%Y-%m-%dT%H:%M:%SZ",        # ISO 8601 UTC (Zulu)
-        "%Y-%m-%dT%H:%M:%S%z",       # ISO 8601 with timezone offset
-        "%Y-%m-%dT%H:%M:%S.%f%z",    # ISO 8601 with timezone offset and microseconds
-        "%a, %d %b %Y %H:%M:%S %Z",  # RFC 5322 (e.g., Tue, 10 Oct 2023 14:30:00 GMT)
-        "%a, %d %b %Y %H:%M:%S %z",  # RFC 5322 with numeric timezone offset
-        "%Y-%m-%d",                  # Simple date
-        # Add other formats as needed
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%m/%d/%Y",
     ]
 
     for fmt in formats:
         try:
-            # Attempt to parse with the current format
-            dt_object = datetime.strptime(str(date_string), fmt)
-
-            # If the format includes %z, the object is already timezone-aware
-            # If it's a naive object (like from %Y-%m-%d), you might want to assign a default timezone
-            # if dt_object.tzinfo is None:
-            #     from datetime import timezone
-            #     dt_object = dt_object.replace(tzinfo=timezone.utc) # Example: Assign UTC
-
+            dt_object = datetime.strptime(s_date_string, fmt)
+            if dt_object.tzinfo is None or dt_object.tzinfo.utcoffset(dt_object) is None:
+                dt_object = dt_object.replace(tzinfo=dt_timezone.utc)
+            else:
+                dt_object = dt_object.astimezone(dt_timezone.utc)
             return dt_object
         except ValueError:
-            continue # Try the next format
+            continue
         except TypeError:
-             logger.warning(f"Type error parsing date string: {date_string} (type: {type(date_string)})")
-             return None # Cannot parse this type
+             logger.warning(f"TypeError during strptime for: {s_date_string} (original type: {type(date_string)}) with format {fmt}")
+             return None
 
-    logger.warning(f"Could not parse date string with any known format: {date_string}")
+    logger.warning(f"Could not parse date string with any known format: '{s_date_string}' (original type: {type(date_string)})")
     return None

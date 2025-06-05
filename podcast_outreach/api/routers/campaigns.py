@@ -9,7 +9,7 @@ import logging
 # Import schemas
 from ..schemas.campaign_schemas import (
     CampaignCreate, CampaignUpdate, CampaignInDB, AnglesBioTriggerResponse,
-    QuestionnaireSubmitData # <<< NEW IMPORT
+    QuestionnaireSubmitData, QuestionnaireDraftData # <<< NEW IMPORT
 )
 
 # Import modular queries
@@ -221,38 +221,6 @@ async def delete_campaign_api(campaign_id: uuid.UUID, user: dict = Depends(get_a
         logger.exception(f"Error in delete_campaign_api for ID {campaign_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-@router.post("/{campaign_id}/generate-angles-bio", response_model=AnglesBioTriggerResponse, summary="Trigger Bio & Angles Generation")
-async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
-    """
-    Triggers the AI-powered generation of client bio and talking angles for a campaign.
-    Staff or Admin access required.
-    """
-    campaign_exists = await campaign_queries.get_campaign_by_id(campaign_id)
-    if not campaign_exists:
-         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found, cannot trigger generation.")
-
-    processor = AnglesProcessorPG() 
-    try:
-        result = await processor.process_campaign(str(campaign_id))
-        
-        response_status = result.get("status", "error")
-        response_message = result.get("reason") or result.get("bio_doc_link") or "Processing completed."
-        if response_status == "success":
-            response_message = f"Successfully generated Bio & Angles for campaign {campaign_id}."
-
-        return AnglesBioTriggerResponse(
-            campaign_id=campaign_id,
-            status=response_status,
-            message=response_message,
-            details=result
-        )
-    except Exception as e:
-        logger.exception(f"Unhandled exception during angles/bio generation trigger for campaign {campaign_id}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred during generation: {str(e)}")
-    finally:
-        processor.cleanup()
-
-
 @router.post("/{campaign_id}/submit-questionnaire", 
             response_model=CampaignInDB, # Or a more specific response
             summary="Submit Questionnaire Data for a Campaign")
@@ -285,6 +253,39 @@ async def submit_campaign_questionnaire_api(
     else:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process questionnaire data.")
     
+
+@router.post("/{campaign_id}/save-questionnaire-draft", 
+            response_model=CampaignInDB, 
+            summary="Save Questionnaire Draft")
+async def save_campaign_questionnaire_draft_api(
+    campaign_id: uuid.UUID,
+    draft_data: QuestionnaireDraftData,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Saves a draft of the questionnaire data for a specific campaign.
+    Accessible by the client who owns the campaign or staff/admin.
+    """
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    if user.get("role") not in ["admin", "staff"] and campaign.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to save draft for this campaign")
+
+    update_payload = {"questionnaire_responses": draft_data.questionnaire_data}
+    
+    try:
+        updated_campaign = await campaign_queries.update_campaign(campaign_id, update_payload)
+        if not updated_campaign:
+            # This case might indicate an issue with update_campaign or data itself, 
+            # though get_campaign_by_id right before should have caught non-existence.
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save questionnaire draft.")
+        return CampaignInDB(**updated_campaign)
+    except Exception as e:
+        logger.error(f"Error saving questionnaire draft for campaign {campaign_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error saving draft: {str(e)}")
+
 
 @router.post("/{campaign_id}/generate-angles-bio", response_model=AnglesBioTriggerResponse, summary="Trigger Bio & Angles Generation")
 async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_staff_user)): # Changed to get_staff_user
@@ -322,3 +323,5 @@ async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict =
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
     finally:
         processor.cleanup()
+
+

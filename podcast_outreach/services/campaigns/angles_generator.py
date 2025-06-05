@@ -23,6 +23,7 @@ from podcast_outreach.services.ai.openai_client import OpenAIService # Use new A
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker # Use new AI tracker path
 from podcast_outreach.utils.data_processor import extract_document_id # Use new utils path
 from podcast_outreach.services.tasks.manager import task_manager # Corrected import path
+from podcast_outreach.services.campaigns.content_processor import ClientContentProcessor # Import ClientContentProcessor
 
 # Setup logging
 logging.basicConfig(
@@ -159,7 +160,7 @@ class AnglesProcessorPG:
             tokens_in = len(prompt) // 4 
             tokens_out = len(text_response) // 4
 
-            ai_tracker.log_usage(
+            await ai_tracker.log_usage(
                 workflow=workflow_name,
                 model="gemini-2.0-flash", # or whichever model is configured
                 tokens_in=tokens_in,
@@ -310,12 +311,12 @@ class AnglesProcessorPG:
 
             # 3. Structure the output (e.g., using OpenAI or a more robust Gemini prompt for JSON)
             logger.info(f"Structuring Gemini output for '{campaign_name}'...")
-            structured_data = await self._run_in_executor(
-                self.openai_service.transform_text_to_structured_data,
-                "Parse the following text into a JSON object with two main keys: 'Bio' (string) and 'Angles' (string, containing all angles formatted nicely).", # Adjust prompt as needed
-                raw_gemini_output,
-                "Structured", # Corrected: data_type to match openai_service.py condition
-                "structure_bio_angles" # workflow for AI tracker
+            structured_data = await self.openai_service.transform_text_to_structured_data(
+                prompt="Parse the following text into a JSON object with two main keys: 'Bio' (string) and 'Angles' (string, containing all angles formatted nicely).", # Adjust prompt as needed
+                raw_text=raw_gemini_output,
+                data_type="Structured", # Corrected: data_type to match openai_service.py condition
+                workflow="structure_bio_angles", # workflow for AI tracker
+                related_campaign_id=uuid.UUID(campaign_id) # Pass campaign_id for tracking
             )
 
             if not structured_data or "Bio" not in structured_data or "Angles" not in structured_data:
@@ -383,14 +384,16 @@ class AnglesProcessorPG:
             updated_campaign_record = await campaign_queries.update_campaign(uuid.UUID(campaign_id), update_payload)
 
             if updated_campaign_record:
-                # Enqueue the process_campaign_content task
-                task_id_process = str(uuid.uuid4())
-                task_manager.start_task(
-                    task_id_process,
-                    "process_campaign_content",
-                    args={"campaign_id": str(campaign_id)}
-                )
-                logger.info(f"Enqueued process_campaign_content task {task_id_process} for campaign {campaign_id} after GDoc processing.")
+                # Directly call the content processor's main logic
+                logger.info(f"Directly calling content processing for campaign {campaign_id} after GDoc processing.")
+                content_processor = ClientContentProcessor()
+                processing_success = await content_processor.process_and_embed_campaign_data(uuid.UUID(campaign_id))
+                if processing_success:
+                    logger.info(f"Content processing and embedding successful for campaign {campaign_id}.")
+                else:
+                    logger.warning(f"Content processing and embedding failed or returned False for campaign {campaign_id}.")
+            else:
+                logger.error(f"Failed to update campaign {campaign_id} with GDoc links and keywords, cannot proceed to content processing.")
 
             self.stats["successful_generations"] += 1
             execution_time = time.time() - start_time

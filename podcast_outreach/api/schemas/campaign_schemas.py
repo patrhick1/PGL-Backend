@@ -13,6 +13,7 @@ class CampaignBase(BaseModel):
     campaign_bio: Optional[str] = None # Link to GDoc or text
     campaign_angles: Optional[str] = None # Link to GDoc or text
     campaign_keywords: Optional[List[str]] = None # Stored as TEXT[] in DB
+    questionnaire_keywords: Optional[List[str]] = None # LLM generated keywords from questionnaire
     compiled_social_posts: Optional[str] = None # Link to GDoc or text
     podcast_transcript_link: Optional[str] = None # Link to GDoc
     compiled_articles_link: Optional[str] = None # Link to GDoc
@@ -35,6 +36,7 @@ class CampaignUpdate(BaseModel):
     campaign_bio: Optional[str] = None
     campaign_angles: Optional[str] = None
     campaign_keywords: Optional[List[str]] = None
+    questionnaire_keywords: Optional[List[str]] = None # Allow updating this field too
     compiled_social_posts: Optional[str] = None
     podcast_transcript_link: Optional[str] = None
     compiled_articles_link: Optional[str] = None
@@ -51,6 +53,9 @@ class CampaignInDB(CampaignBase):
 
     class Config:
         from_attributes = True # For SQLAlchemy or other ORMs; helps map to DB objects
+
+class QuestionnaireDraftData(BaseModel):
+    questionnaire_data: Dict[str, Any] = Field(..., description="Partial or complete questionnaire data to be saved as a draft.")
 
 class AnglesBioTriggerResponse(BaseModel):
     campaign_id: uuid.UUID

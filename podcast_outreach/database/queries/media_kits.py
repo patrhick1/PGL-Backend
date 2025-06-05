@@ -22,10 +22,13 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
         headline, introduction, full_bio_content, summary_bio_content, short_bio_content,
         talking_points, key_achievements, previous_appearances, social_media_stats,
         headshot_image_urls, logo_image_url, call_to_action_text, contact_information_for_booking,
-        custom_sections
-        -- media_kit_id, created_at, updated_at have defaults or are generated
+        custom_sections,
+        tagline, bio_source, keywords,
+        angles_source, sample_questions, testimonials_section,
+        person_social_links
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+        $21, $22, $23, $24, $25, $26, $27
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -37,6 +40,8 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
             previous_appearances_json = json.dumps(kit_data.get('previous_appearances', []))
             social_media_stats_json = json.dumps(kit_data.get('social_media_stats', {}))
             custom_sections_json = json.dumps(kit_data.get('custom_sections', []))
+            sample_questions_json = json.dumps(kit_data.get('sample_questions', []))
+            person_social_links_json = json.dumps(kit_data.get('person_social_links', {}))
             
             # TEXT[] field: pass as Python list
             headshot_image_urls_list = kit_data.get('headshot_image_urls', [])
@@ -50,7 +55,10 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
                 talking_points_json, key_achievements_json, previous_appearances_json, social_media_stats_json,
                 headshot_image_urls_list, kit_data.get('logo_image_url'), 
                 kit_data.get('call_to_action_text'), kit_data.get('contact_information_for_booking'), 
-                custom_sections_json
+                custom_sections_json,
+                kit_data.get('tagline'), kit_data.get('bio_source'), kit_data.get('keywords', []),
+                kit_data.get('angles_source'), sample_questions_json, kit_data.get('testimonials_section'),
+                person_social_links_json
             )
             if row:
                 logger.info(f"MediaKit created with ID: {row['media_kit_id']} for campaign {kit_data['campaign_id']}")
@@ -67,7 +75,8 @@ def _process_media_kit_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     processed_row = dict(row)
     # Only JSONB fields need JSON parsing, not TEXT[] fields
     jsonb_fields = ['talking_points', 'key_achievements', 'previous_appearances', 
-                   'social_media_stats', 'custom_sections']
+                   'social_media_stats', 'custom_sections', 'sample_questions', 
+                   'person_social_links']
     for field in jsonb_fields:
         if field in processed_row and isinstance(processed_row[field], str):
             try:
@@ -88,7 +97,8 @@ async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str,
     
     # JSONB fields that should be JSON serialized if they are dict/list
     jsonb_fields_to_serialize = ['talking_points', 'key_achievements', 'previous_appearances', 
-                                'social_media_stats', 'custom_sections']
+                                'social_media_stats', 'custom_sections', 'sample_questions',
+                                'person_social_links']
 
     for key, value in update_data.items():
         if key in ["media_kit_id", "campaign_id", "person_id", "created_at"]: # These shouldn't be updated this way
@@ -190,6 +200,7 @@ async def get_media_kit_by_slug_enriched(slug: str) -> Optional[Dict[str, Any]]:
         p.twitter_profile_url AS client_twitter_profile_url,
         p.instagram_profile_url AS client_instagram_profile_url,
         p.tiktok_profile_url AS client_tiktok_profile_url,
+        p.role AS client_role,
         c.campaign_name
     FROM media_kits mk
     JOIN campaigns c ON mk.campaign_id = c.campaign_id

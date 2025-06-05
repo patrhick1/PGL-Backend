@@ -137,3 +137,38 @@ class ListenNotesAPIClient(PodcastAPIClient):
         except Exception as e:
             logger.exception(f"Unexpected error in ListenNotes get_recommendations for {podcast_id}: {e}")
             return None
+
+    def get_podcast_episodes(self, podcast_ln_id: str, sort: str = 'recent_first', next_episode_pub_date: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
+        """Fetches episodes for a given ListenNotes podcast ID.
+        The free plan for ListenNotes GET /podcasts/{id} returns up to 10 latest episodes.
+        Paid plans can use next_episode_pub_date for pagination.
+        """
+        if not podcast_ln_id:
+            logger.warning("ListenNotes get_podcast_episodes: podcast_ln_id not provided.")
+            return None
+        
+        endpoint = f"podcasts/{podcast_ln_id}"
+        params = {"sort": sort}
+        if next_episode_pub_date: # For pagination if ever needed beyond the default 10
+            params["next_episode_pub_date"] = next_episode_pub_date
+
+        logger.info(f"Fetching ListenNotes episodes for podcast ID: {podcast_ln_id} with params: {params}")
+        try:
+            response_data = self._request("GET", endpoint, params=params)
+            # The 'episodes' list is directly under the podcast object in the response
+            episodes = response_data.get('episodes')
+            if isinstance(episodes, list):
+                logger.info(f"Successfully fetched {len(episodes)} episodes for ListenNotes podcast {podcast_ln_id}.")
+                return episodes
+            else:
+                logger.warning(f"ListenNotes get_podcast_episodes for {podcast_ln_id} did not return a list of episodes. Response: {response_data}")
+                return None # Or an empty list: []
+        except NotFoundError:
+            logger.warning(f"ListenNotes podcast with ID {podcast_ln_id} not found when fetching episodes.")
+            return None
+        except APIClientError as e:
+            logger.error(f"ListenNotes API error fetching episodes for {podcast_ln_id}: {e}")
+            return None # Or raise, depending on desired error handling for individual fetches
+        except Exception as e:
+            logger.exception(f"Unexpected error fetching ListenNotes episodes for {podcast_ln_id}: {e}")
+            return None

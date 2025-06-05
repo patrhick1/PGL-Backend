@@ -11,17 +11,30 @@ from podcast_outreach.integrations.google_docs import GoogleDocsService
 from podcast_outreach.services.ai.openai_client import OpenAIService
 from podcast_outreach.utils.data_processor import extract_document_id
 from podcast_outreach.services.matches.match_creation import MatchCreationService
+from podcast_outreach.services.media_kits.generator import MediaKitService
+from podcast_outreach.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+# Optional import for podcast transcriber
+try:
+    from podcast_outreach.services.media.podcast_transcriber import PodcastTranscriberService
+    PODCAST_TRANSCRIBER_AVAILABLE = True
+except ImportError as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"PodcastTranscriberService not available: {e}")
+    PodcastTranscriberService = None
+    PODCAST_TRANSCRIBER_AVAILABLE = False
+
+logger = get_logger(__name__)
 
 class ClientContentProcessor:
-    """
-    Service to aggregate client information, consolidate keywords, and generate embeddings for campaigns.
-    """
+    """Enhanced client content processor that handles questionnaire data, podcast transcription, and triggers media kit generation."""
+
     def __init__(self):
         self.google_docs_service = GoogleDocsService()
-        self.openai_service = OpenAIService() # For embeddings and optional keyword refinement
-        self.match_creation_service = MatchCreationService() # Initialize MatchCreationService
+        self.openai_service = OpenAIService()
+        self.match_creation_service = MatchCreationService()
+        self.podcast_transcriber = PodcastTranscriberService() if PODCAST_TRANSCRIBER_AVAILABLE else None
+        self.media_kit_service = MediaKitService()
 
     def _is_gdoc_link(self, text: Optional[str]) -> bool:
         """Checks if the provided text is a Google Doc link."""
@@ -53,64 +66,133 @@ class ClientContentProcessor:
             return ""
 
     def _format_questionnaire_for_embedding(self, q_data: Optional[Dict[str, Any]]) -> str:
-        """
-        Selectively extracts and formats key answers from questionnaire_data into a coherent text block.
-        This is an example and should be tailored to the actual questionnaire structure.
-        """
-        if not q_data:
+        """Enhanced questionnaire formatting for embedding, following the detailed structure."""
+        if not q_data or not isinstance(q_data, dict):
             return ""
-
-        segments = []
         
-        # Example: Personal Information Section
-        personal_info = q_data.get("personalInfo", {})
-        if isinstance(personal_info, dict):
-            if personal_info.get("bio"):
-                segments.append(f"Client Bio (from Questionnaire):\n{personal_info['bio']}\n")
-            if personal_info.get("expertise"): # Assuming 'expertise' might be a list of strings
-                expertise_str = ", ".join(personal_info['expertise']) if isinstance(personal_info['expertise'], list) else str(personal_info['expertise'])
-                segments.append(f"Client Expertise (from Questionnaire):\n{expertise_str}\n")
-
-        # Example: Experience Section
-        experience = q_data.get("experience", {})
-        if isinstance(experience, dict):
-            if experience.get("achievements"): # Assuming 'achievements' is a list
-                achievements_str = "\n- " + "\n- ".join(experience['achievements']) if isinstance(experience['achievements'], list) else str(experience['achievements'])
-                segments.append(f"Key Achievements (from Questionnaire):{achievements_str}\n")
+        formatted_parts = []
         
-        # Example: Preferences Section
-        preferences = q_data.get("preferences", {})
-        if isinstance(preferences, dict):
-            if preferences.get("preferredTopics"):
-                topics_str = "\n- " + "\n- ".join(preferences['preferredTopics']) if isinstance(preferences['preferredTopics'], list) else str(preferences['preferredTopics'])
-                segments.append(f"Preferred Topics (from Questionnaire):{topics_str}\n")
-            if preferences.get("targetAudience"):
-                segments.append(f"Target Audience (from Questionnaire):\n{preferences['targetAudience']}\n")
+        try:
+            # Section 2: Contact & Basic Info
+            contact_info = q_data.get("contactInfo", {})
+            if isinstance(contact_info, dict):
+                full_name = contact_info.get("fullName", "")
+                website = contact_info.get("website", "")
+                if full_name:
+                    formatted_parts.append(f"Client Name: {full_name}")
+                if website:
+                    formatted_parts.append(f"Website: {website}")
+            
+            # Section 3: Professional Bio & Background
+            professional_bio = q_data.get("professionalBio", {})
+            if isinstance(professional_bio, dict):
+                about_work = professional_bio.get("aboutWork", "")
+                expertise = professional_bio.get("expertiseTopics", "")
+                achievements = professional_bio.get("achievements", "")
+                
+                if about_work:
+                    formatted_parts.append(f"About Their Work: {about_work}")
+                if expertise:
+                    expertise_str = expertise if isinstance(expertise, str) else ", ".join(expertise) if isinstance(expertise, list) else str(expertise)
+                    formatted_parts.append(f"Areas of Expertise: {expertise_str}")
+                if achievements:
+                    formatted_parts.append(f"Key Achievements: {achievements}")
+            
+            # Section 5: Suggested Topics & Talking Points
+            suggested_topics = q_data.get("suggestedTopics", {})
+            if isinstance(suggested_topics, dict):
+                topics = suggested_topics.get("topics", "")
+                key_stories = suggested_topics.get("keyStoriesOrMessages", "")
+                
+                if topics:
+                    topics_str = topics if isinstance(topics, str) else ", ".join(topics) if isinstance(topics, list) else str(topics)
+                    formatted_parts.append(f"Preferred Podcast Topics: {topics_str}")
+                if key_stories:
+                    formatted_parts.append(f"Key Stories and Messages: {key_stories}")
+            
+            # Section 7: Testimonials & Social Proof
+            social_proof = q_data.get("socialProof", {})
+            if isinstance(social_proof, dict):
+                testimonials = social_proof.get("testimonials", "")
+                stats = social_proof.get("notableStats", "")
+                
+                if testimonials:
+                    formatted_parts.append(f"Testimonials: {testimonials}")
+                if stats:
+                    formatted_parts.append(f"Notable Stats: {stats}")
+            
+            # Section 9: Promotion & Contact Preferences
+            promotion_prefs = q_data.get("promotionPrefs", {})
+            if isinstance(promotion_prefs, dict):
+                preferred_intro = promotion_prefs.get("preferredIntro", "")
+                items_to_promote = promotion_prefs.get("itemsToPromote", "")
+                
+                if preferred_intro:
+                    formatted_parts.append(f"Preferred Introduction: {preferred_intro}")
+                if items_to_promote:
+                    formatted_parts.append(f"Items to Promote: {items_to_promote}")
+        
+        except Exception as e:
+            logger.warning(f"Error formatting questionnaire data for embedding: {e}")
+        
+        return "\n".join(formatted_parts)
 
-        # Add more sections as needed based on your questionnaire_data structure
-        # e.g., q_data.get('goals'), q_data.get('messaging')
-
-        return "\n\n".join(segments).strip()
+    async def _process_podcast_transcriptions(self, campaign_id: uuid.UUID, questionnaire_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Process podcast URLs from questionnaire and add transcription insights to campaign data."""
+        try:
+            logger.info(f"Processing podcast transcriptions for campaign {campaign_id}")
+            
+            if not self.podcast_transcriber:
+                logger.warning(f"Podcast transcriber not available for campaign {campaign_id} - skipping transcription")
+                return []
+            
+            # Process podcast URLs using the transcriber service
+            transcription_results = await self.podcast_transcriber.process_podcast_urls_from_questionnaire(
+                questionnaire_data, campaign_id
+            )
+            
+            if transcription_results:
+                logger.info(f"Processed {len(transcription_results)} podcast URLs for campaign {campaign_id}")
+                
+                # Store transcription results back to campaign for future reference
+                # You might want to create a dedicated field for this or include it in questionnaire_responses
+                transcription_summary = {
+                    "podcast_transcriptions": transcription_results,
+                    "total_processed": len(transcription_results),
+                    "successful_transcriptions": len([r for r in transcription_results if r.get("status") == "completed"]),
+                    "processed_at": str(uuid.uuid4())  # Using UUID as timestamp placeholder
+                }
+                
+                # Update campaign with transcription results
+                await campaign_queries.update_campaign(campaign_id, {
+                    "podcast_transcription_results": transcription_summary
+                })
+                
+                logger.info(f"Stored transcription results for campaign {campaign_id}")
+            
+            return transcription_results
+            
+        except Exception as e:
+            logger.error(f"Error processing podcast transcriptions for campaign {campaign_id}: {e}")
+            return []
 
     async def _refine_keywords_with_llm(self, text_snippet: str, raw_keywords: List[str], campaign_id: uuid.UUID) -> List[str]:
-        """
-        Uses an LLM to refine and consolidate raw keywords.
-        Returns a list of refined keywords.
-        """
-        if not raw_keywords:
-            return []
-        if not text_snippet.strip() and len(raw_keywords) <= 30: # If no text and raw keywords are few, just use them
-             return sorted(list(set(raw_keywords)))
-
-
-        raw_keywords_str = ", ".join(raw_keywords)
-        # Limit text_snippet to avoid excessive token usage for keyword refinement
-        max_snippet_len = 8000 # Approx 2k tokens, adjust as needed
+        """Refine keywords using LLM with enhanced prompt for podcast guest context."""
+        max_snippet_len = 2000  # Limit text snippet to avoid token limits
+        raw_keywords_str = ", ".join(raw_keywords) if raw_keywords else "No keywords provided"
+        
         if len(text_snippet) > max_snippet_len:
             text_snippet = text_snippet[:max_snippet_len] + "... (truncated)"
             
         prompt = f"""
-        Given the following client information text and a list of raw keywords, please refine and consolidate this into a final list of up to 20-30 highly relevant, concise keywords (2-3 words each) that best represent the client's expertise and potential podcast topics. Prioritize keywords that are likely to be searched by podcast hosts or listeners.
+        Given the following client information text and a list of raw keywords, please refine and consolidate this into a final list of up to 25-30 highly relevant, concise keywords (2-4 words each) that best represent the client's expertise and potential podcast topics. 
+
+        Focus on keywords that:
+        1. Represent their core expertise and talking points
+        2. Would be searched by podcast hosts looking for guests
+        3. Reflect topics they're passionate about discussing
+        4. Include both broad topics and specific niches
+        5. Are relevant to podcast audiences
 
         Client Information Snippet:
         {text_snippet if text_snippet.strip() else "No detailed text provided, focus on the raw keywords."}
@@ -118,17 +200,16 @@ class ClientContentProcessor:
         Raw Keywords:
         {raw_keywords_str}
 
-        Return ONLY a comma-separated list of the final keywords.
+        Return ONLY a comma-separated list of the final keywords, focusing on podcast-relevant topics and expertise areas.
         """
         try:
             logger.info(f"Refining keywords for campaign {campaign_id} using LLM.")
-            # Assuming create_chat_completion is an async method in OpenAIService
             response = await self.openai_service.create_chat_completion(
-                system_prompt="You are an expert keyword analyst. Your task is to refine a list of keywords based on provided text.",
+                system_prompt="You are an expert keyword analyst specializing in podcast guest expertise and topics. Your task is to refine keywords for optimal podcast matching.",
                 prompt=prompt,
-                workflow="keyword_refinement",
+                workflow="keyword_refinement_podcast",
                 related_campaign_id=campaign_id,
-                parse_json=False # Expecting comma-separated string
+                parse_json=False
             )
             if response:
                 refined_keywords = [kw.strip() for kw in response.split(',') if kw.strip()]
@@ -139,13 +220,15 @@ class ClientContentProcessor:
                 return sorted(list(set(raw_keywords)))
         except Exception as e:
             logger.error(f"Error during LLM keyword refinement for campaign {campaign_id}: {e}. Using raw keywords.")
-            return sorted(list(set(raw_keywords))) # Fallback to unique raw keywords
+            return sorted(list(set(raw_keywords)))
 
     async def process_and_embed_campaign_data(self, campaign_id: uuid.UUID, use_llm_keyword_refinement: bool = True) -> bool:
         """
-        Fetches campaign data, aggregates text, consolidates keywords, generates embedding, and updates the campaign.
+        Enhanced processing that fetches campaign data, processes podcast transcriptions,
+        aggregates text, consolidates keywords, generates embedding, updates the campaign,
+        and triggers media kit generation.
         """
-        logger.info(f"Starting content processing and embedding for campaign_id: {campaign_id}")
+        logger.info(f"Starting enhanced content processing and embedding for campaign_id: {campaign_id}")
 
         # 1. Fetch Core Data
         campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
@@ -160,7 +243,14 @@ class ClientContentProcessor:
             # For now, we'll allow it to proceed if other text sources exist.
             # return False 
 
-        # 2. Aggregate Text for Embedding
+        # 2. Process Podcast Transcriptions (if questionnaire data is available)
+        questionnaire_responses = campaign_data.get('questionnaire_responses')
+        if questionnaire_responses and isinstance(questionnaire_responses, dict):
+            transcription_results = await self._process_podcast_transcriptions(campaign_id, questionnaire_responses)
+            if transcription_results:
+                logger.info(f"Processed {len(transcription_results)} podcast transcriptions for campaign {campaign_id}")
+
+        # 3. Aggregate Text for Embedding
         text_segments = []
         campaign_name_for_logs = campaign_data.get("campaign_name", f"Campaign {campaign_id}")
 
@@ -191,12 +281,26 @@ class ClientContentProcessor:
         elif mock_interview_source: # Direct text
             text_segments.append(f"Mock Interview Transcript (direct):\n{mock_interview_source}\n")
 
-        # Questionnaire Responses
-        questionnaire_responses = campaign_data.get('questionnaire_responses')
+        # Enhanced Questionnaire Responses
         if questionnaire_responses and isinstance(questionnaire_responses, dict):
             q_text = self._format_questionnaire_for_embedding(questionnaire_responses)
             if q_text:
                 text_segments.append(f"Key Information from Questionnaire:\n{q_text}\n")
+        
+        # Add podcast transcription insights if available
+        transcription_results = campaign_data.get('podcast_transcription_results')
+        if transcription_results and isinstance(transcription_results, dict):
+            successful_transcriptions = [r for r in transcription_results.get('podcast_transcriptions', []) 
+                                       if r.get('status') == 'completed' and r.get('analysis')]
+            if successful_transcriptions:
+                transcription_insights = []
+                for result in successful_transcriptions:
+                    analysis = result.get('analysis', {})
+                    if isinstance(analysis, dict) and analysis.get('analysis'):
+                        transcription_insights.append(f"Podcast Analysis - {result.get('title', 'Unknown')}:\n{analysis['analysis']}")
+                
+                if transcription_insights:
+                    text_segments.append(f"Podcast Speaking Insights:\n" + "\n\n".join(transcription_insights) + "\n")
         
         # Other GDoc Links
         other_docs_map = {
@@ -212,7 +316,6 @@ class ClientContentProcessor:
             elif source: # Direct text
                  text_segments.append(f"{title_template.replace(' GDoc', '')} (direct):\n{source}\n")
 
-
         aggregated_text = "\n\n---\n\n".join(filter(None, text_segments)).strip()
 
         if not aggregated_text:
@@ -223,7 +326,7 @@ class ClientContentProcessor:
 
         logger.info(f"Aggregated text for campaign {campaign_id} (length: {len(aggregated_text)}). First 200 chars: '{aggregated_text[:200]}...'")
 
-        # 3. Consolidate and Refine Keywords
+        # 4. Consolidate and Refine Keywords
         q_keywords = campaign_data.get('questionnaire_keywords', []) or []
         g_keywords = campaign_data.get('gdoc_keywords', []) or []
         
@@ -233,8 +336,7 @@ class ClientContentProcessor:
         
         final_keywords_list: List[str] = []
         if use_llm_keyword_refinement:
-            # Provide a snippet of aggregated_text for context, or just keywords if text is too short/missing
-            text_snippet_for_kw_refinement = aggregated_text if len(aggregated_text) > 200 else "" # Arbitrary threshold
+            text_snippet_for_kw_refinement = aggregated_text if len(aggregated_text) > 200 else ""
             final_keywords_list = await self._refine_keywords_with_llm(text_snippet_for_kw_refinement, list(raw_keywords_set), campaign_id)
         else:
             final_keywords_list = sorted(list(raw_keywords_set))
@@ -247,13 +349,12 @@ class ClientContentProcessor:
         else:
             logger.info(f"Final keywords for campaign {campaign_id}: {final_keywords_list}")
 
-
         # Update campaign with consolidated keywords
         # We update keywords before embedding in case embedding fails, keywords are still useful
         await campaign_queries.update_campaign(campaign_id, {"campaign_keywords": final_keywords_list})
         logger.info(f"Updated campaign {campaign_id} with final keywords: {final_keywords_list}")
 
-        # 4. Generate Embedding for Aggregated Text
+        # 5. Generate Embedding for Aggregated Text
         logger.info(f"Generating embedding for aggregated text of campaign {campaign_id}...")
         campaign_embedding = await self.openai_service.get_embedding(
             aggregated_text, 
@@ -269,7 +370,7 @@ class ClientContentProcessor:
         
         logger.info(f"Embedding generated successfully for campaign {campaign_id}.")
 
-        # 5. Update Campaign with Embedding
+        # 6. Update Campaign with Embedding
         update_payload_embedding = {"embedding": campaign_embedding}
         # Optionally, set a status indicating successful processing
         # update_payload_embedding["status"] = "processed_for_embedding" 
@@ -280,26 +381,18 @@ class ClientContentProcessor:
             logger.info(f"Successfully processed, embedded, and updated campaign {campaign_id}.")
             await campaign_queries.update_campaign_status(campaign_id, "active_ Intelligenge Processed", "Content aggregated, keywords consolidated, and embedding generated.")
             
-            # After successful processing, trigger match creation against media
+            # 7. Trigger Media Kit Generation
             try:
-                logger.info(f"Triggering match creation for campaign {campaign_id} against media records.")
-                # Fetch a list of media to match against. 
-                # This could be all media, or filtered based on some criteria.
-                # For now, let's fetch a limited number of recent media as an example.
-                # In a real scenario, you might have more sophisticated logic for selecting media.
-                all_media_records, total_media = await media_queries.get_all_media_from_db(limit=500, offset=0) # Example: match against up to 500 media
+                logger.info(f"Triggering media kit generation for campaign {campaign_id}")
+                media_kit_result = await self.media_kit_service.create_or_update_media_kit(campaign_id)
                 
-                if all_media_records:
-                    logger.info(f"Campaign {campaign_id} will be matched against {len(all_media_records)} media records.")
-                    await self.match_creation_service.create_and_score_match_suggestions_for_campaign(
-                        campaign_id=campaign_id,
-                        media_records=all_media_records
-                    )
-                    logger.info(f"Match creation/update process initiated for campaign {campaign_id}.")
+                if media_kit_result:
+                    logger.info(f"Successfully generated/updated media kit for campaign {campaign_id}")
                 else:
-                    logger.info(f"No media records found to match against campaign {campaign_id}.")
-            except Exception as e_match:
-                logger.error(f"Error triggering match creation for campaign {campaign_id}: {e_match}", exc_info=True)
+                    logger.warning(f"Media kit generation returned no result for campaign {campaign_id}")
+                    
+            except Exception as e_media_kit:
+                logger.error(f"Error generating media kit for campaign {campaign_id}: {e_media_kit}", exc_info=True)
             
             return True
         else:

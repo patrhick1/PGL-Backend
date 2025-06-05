@@ -10,7 +10,7 @@ from podcast_outreach.database.queries import people as people_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.services.media_kits.generator import MediaKitService
 # Assuming this helper function exists or can be created, e.g., in questionnaire_processor or a utils file
-from podcast_outreach.services.campaigns.questionnaire_processor import _construct_mock_interview_from_questionnaire 
+from podcast_outreach.services.campaigns.questionnaire_processor import construct_mock_interview_from_questionnaire
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ async def submit_lead_magnet_questionnaire(submission_data: schemas.LeadMagnetSu
     mock_interview_text = ""
     if submission_data.questionnaire_data:
         print(f"--- [PUBLIC LEAD MAGNET] --- Constructing mock interview from questionnaire data: {submission_data.questionnaire_data}") # DEBUG PRINT
-        mock_interview_text = _construct_mock_interview_from_questionnaire(submission_data.questionnaire_data)
+        mock_interview_text = construct_mock_interview_from_questionnaire(submission_data.questionnaire_data)
     
     prospect_campaign_data = {
         "campaign_id": uuid.uuid4(), # Generate a new UUID for the campaign

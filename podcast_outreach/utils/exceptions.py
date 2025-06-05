@@ -25,6 +25,11 @@ class NotFoundError(APIClientError):
     # __init__ can be inherited if no new params
     pass
 
+class ServerError(APIClientError):
+    """Raised for server-side errors from the API (e.g., 5XX errors)."""
+    # __init__ can be inherited if no new params
+    pass
+
 class APIRequestError(APIClientError):
     """Raised for general API request errors (e.g., invalid parameters, server errors)."""
     pass

@@ -229,7 +229,7 @@ def create_media_table(conn):
  
     CREATE INDEX IF NOT EXISTS idx_media_company_id           ON media (company_id);
     CREATE INDEX IF NOT EXISTS idx_media_embedding_hnsw       ON media USING hnsw (embedding vector_cosine_ops);
-    CREATE INDEX IF NOT EXISTS idx_media_api_id               ON media (api_id); -- NEW: Index for api_id
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_media_api_id        ON media (api_id);
     """
     execute_sql(conn, sql_statement)
     print("Table MEDIA created/ensured with extended profile_data columns.")
@@ -298,6 +298,7 @@ def create_episodes_table(conn):
         transcribe BOOLEAN,
         downloaded BOOLEAN,
         guest_names TEXT,
+        host_names TEXT[],
         source_api TEXT,
         api_episode_id TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -504,21 +505,28 @@ def create_media_kits_table(conn): # NEW FUNCTION
         person_id INTEGER REFERENCES people(person_id) ON DELETE CASCADE NOT NULL,
         title TEXT,
         slug TEXT UNIQUE NOT NULL,
-        is_public BOOLEAN DEFAULT FALSE NOT NULL,
+        is_public BOOLEAN DEFAULT TRUE NOT NULL,
         theme_preference TEXT DEFAULT 'modern',
         headline TEXT,
+        tagline TEXT,
         introduction TEXT,
         full_bio_content TEXT,
         summary_bio_content TEXT,
         short_bio_content TEXT,
+        bio_source TEXT,
+        keywords TEXT[],
         talking_points JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
+        angles_source TEXT,
+        sample_questions JSONB DEFAULT '[]'::jsonb,
         key_achievements JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
         previous_appearances JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
-        social_media_stats JSONB DEFAULT '{}'::jsonb, -- Default to empty JSON object
+        person_social_links JSONB DEFAULT '{}'::jsonb, -- NEW: For client's own social media links
+        social_media_stats JSONB DEFAULT '{}'::jsonb, -- Default to empty JSON object (for follower counts etc)
+        testimonials_section TEXT,
         headshot_image_urls TEXT[],
         logo_image_url TEXT,
         call_to_action_text TEXT,
-        contact_information_for_booking TEXT,
+        contact_information_for_booking TEXT, -- General contact, email, phone, website from contactInfo
         custom_sections JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL

@@ -58,9 +58,19 @@ class SocialDiscoveryService:
             dataset_page = await asyncio.to_thread(dataset.list_items)
             dataset_items = dataset_page.items if dataset_page else []
             
-            logger.debug(
-                f"Raw dataset items retrieved from actor {actor_id} (count={len(dataset_items)}). First item if any: {str(dataset_items[0])[:300] if dataset_items else 'N/A'}"
-            )
+            # Enhanced debug logging for the first raw item
+            if dataset_items and logger.isEnabledFor(logging.DEBUG):
+                try:
+                    first_item_json = json.dumps(dataset_items[0], indent=2, default=str)
+                    logger.debug(
+                        f"Raw dataset items retrieved from actor {actor_id} (count={len(dataset_items)}). Full structure of first item:\n{first_item_json}"
+                    )
+                except Exception as e_json:
+                    logger.debug(
+                        f"Raw dataset items retrieved from actor {actor_id} (count={len(dataset_items)}). First item (non-JSON or serialization error: {e_json}): {str(dataset_items[0])[:500]}"
+                    )
+            elif logger.isEnabledFor(logging.DEBUG):
+                 logger.debug(f"No dataset items retrieved from actor {actor_id}.")
             
             logger.info(f"Retrieved {len(dataset_items)} items from dataset for actor {actor_id}.")
             return dataset_items
@@ -256,25 +266,7 @@ class SocialDiscoveryService:
             logger.info(f"No valid, unique, normalized URLs to process for actor {actor_id}.")
             return {orig_url: None for orig_url in urls} # Return None for all original inputs
 
-        # The actor_input_params should be structured according to what the specific actor expects.
-        # The `input_config` dict should contain the actor-specific keys for the URL list and any other params.
-        # Example: For an actor expecting {"startUrls": [...], "someOption": true}, 
-        # input_config would be {"startUrlsKey": "startUrls", "otherParams": {"someOption": true}}
-        # The actual list of URLs unique_norm_urls_for_run is now passed directly via input_config structure.
-        # This is a slight departure from the previous _fetch_social_data_batch_generic for more flexibility.
-        run_input = input_config.copy() # Start with other params
-        # The key for the URL list itself needs to be dynamic or passed in.
-        # Assuming `input_url_field_name` is the key within `run_input` where URLs should go.
-        # This was from previous; let's use user's `run_input_urls` structure for LinkedIn-like actors.
-        # The key for URL list is often "startUrls" or "urls" or specific to actor (e.g. "usernames")
-
-        # For actors like supreme_coder/linkedin-profile-scraper that take a list of dicts for URLs:
-        if actor_id == 'supreme_coder/linkedin-profile-scraper':
-            run_input['urls'] = run_input.pop('startUrls', []) # ensure urls field is used from input_config
-        elif actor_id == 'apify/instagram-profile-scraper': # Takes usernames
-             run_input['usernames'] = run_input.pop('startUrls', []) # Assume usernames are passed in unique_norm_urls_for_run
-        else: # Default for actors taking a simple list of URLs
-            run_input[input_config.get("url_list_field_name", "startUrls")] = unique_norm_urls_for_run
+        run_input = input_config.copy() # run_input is the correctly structured input from the calling function
 
         actor_results_list = await self._run_actor_async(actor_id, run_input)
         

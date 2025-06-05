@@ -31,6 +31,7 @@ router = APIRouter(prefix="/match-suggestions", tags=["Match Suggestions"])
 async def discover_matches_for_campaign_background(
     campaign_id: uuid.UUID, 
     background_tasks: BackgroundTasks,
+    max_matches: Optional[int] = Query(None, description="Maximum number of new match suggestions to create for this discovery run.", ge=1),
     user: dict = Depends(get_current_user)
 ):
     """
@@ -45,7 +46,7 @@ async def discover_matches_for_campaign_background(
     service = DiscoveryService()
     try:
         # Add the long-running task to background
-        background_tasks.add_task(service.discover_for_campaign, str(campaign_id))
+        background_tasks.add_task(service.discover_for_campaign, str(campaign_id), max_matches=max_matches)
         return {"message": "Podcast discovery process started in the background.", "campaign_id": str(campaign_id)}
     except Exception as e: # Catch any immediate errors during task submission (rare)
         logger.exception(f"Error starting discovery task for campaign {campaign_id}: {e}")

@@ -158,23 +158,123 @@ def _run_send_pitch_task(stop_flag: threading.Event):
             await close_db_pool()
     _run_async_task_in_new_loop(_task())
 
-def _run_process_campaign_content_task(campaign_id_str: str, stop_flag: threading.Event):
+def _run_process_campaign_content_task(campaign_id_str: str, stop_flag: threading.Event, max_retries: int = 3, retry_delay: float = 60.0):
+    """
+    Enhanced background task for processing campaign content with robust error handling and retry mechanisms.
+    
+    Args:
+        campaign_id_str: Campaign ID as string
+        stop_flag: Threading event to signal task stopping
+        max_retries: Maximum number of retry attempts (default: 3)
+        retry_delay: Delay in seconds between retries (default: 60.0)
+    """
     async def _task():
         await init_db_pool()
         processor = ClientContentProcessor()
+        campaign_id = uuid.UUID(campaign_id_str)
+        
+        retry_count = 0
+        last_error = None
+        
+        while retry_count <= max_retries:
+            if stop_flag.is_set():
+                logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped by signal.")
+                break
+                
+            try:
+                logger.info(f"Background task: Processing content for campaign {campaign_id_str} (attempt {retry_count + 1}/{max_retries + 1})")
+                
+                # Mark processing start in database if it's the first attempt
+                if retry_count == 0:
+                    try:
+                        from podcast_outreach.database.queries import campaigns as campaign_queries
+                        await campaign_queries.update_campaign_status(
+                            campaign_id, 
+                            "processing_content", 
+                            f"Content processing started at attempt {retry_count + 1}"
+                        )
+                    except Exception as status_error:
+                        logger.warning(f"Could not update campaign status for {campaign_id_str}: {status_error}")
+                
+                # Execute the enhanced processing that includes podcast transcription and media kit generation
+                success = await processor.process_and_embed_campaign_data(campaign_id)
+                
+                if success:
+                    logger.info(f"Background task: Content processing for {campaign_id_str} completed successfully on attempt {retry_count + 1}.")
+                    
+                    # Update campaign status to indicate successful processing
+                    try:
+                        from podcast_outreach.database.queries import campaigns as campaign_queries
+                        await campaign_queries.update_campaign_status(
+                            campaign_id, 
+                            "content_processed", 
+                            f"Content processing completed successfully with media kit generation on attempt {retry_count + 1}"
+                        )
+                    except Exception as status_error:
+                        logger.warning(f"Could not update final campaign status for {campaign_id_str}: {status_error}")
+                    
+                    return  # Success - exit the retry loop
+                else:
+                    error_msg = f"Content processing for {campaign_id_str} did not complete successfully or found no data on attempt {retry_count + 1}"
+                    logger.warning(f"Background task: {error_msg}")
+                    last_error = Exception(error_msg)
+                    
+            except Exception as e:
+                last_error = e
+                logger.error(f"Background task: Error processing content for {campaign_id_str} on attempt {retry_count + 1}: {e}", exc_info=True)
+                
+                # Update campaign status with error information
+                try:
+                    from podcast_outreach.database.queries import campaigns as campaign_queries
+                    await campaign_queries.update_campaign_status(
+                        campaign_id, 
+                        "processing_error", 
+                        f"Error on attempt {retry_count + 1}: {str(e)[:200]}..."  # Truncate long error messages
+                    )
+                except Exception as status_error:
+                    logger.warning(f"Could not update error campaign status for {campaign_id_str}: {status_error}")
+            
+            retry_count += 1
+            
+            # If we haven't reached max retries and haven't been signaled to stop, wait before retrying
+            if retry_count <= max_retries and not stop_flag.is_set():
+                logger.info(f"Background task: Retrying campaign content processing for {campaign_id_str} in {retry_delay} seconds...")
+                
+                # Wait with stop_flag checking (break wait early if stop is signaled)
+                wait_time = 0
+                while wait_time < retry_delay and not stop_flag.is_set():
+                    await asyncio.sleep(min(5.0, retry_delay - wait_time))  # Check every 5 seconds
+                    wait_time += 5.0
+                
+                if stop_flag.is_set():
+                    logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped during retry wait.")
+                    break
+        
+        # If we've exhausted all retries, log final failure and update status
+        if retry_count > max_retries:
+            final_error_msg = f"Campaign content processing for {campaign_id_str} failed after {max_retries + 1} attempts. Last error: {str(last_error)}"
+            logger.error(f"Background task: {final_error_msg}")
+            
+            try:
+                from podcast_outreach.database.queries import campaigns as campaign_queries
+                await campaign_queries.update_campaign_status(
+                    campaign_id, 
+                    "processing_failed", 
+                    f"Processing failed after {max_retries + 1} attempts. Last error: {str(last_error)[:150]}..."
+                )
+                
+                # Optionally, you could queue this campaign for manual review or re-queue for later processing
+                logger.info(f"Campaign {campaign_id_str} marked as 'processing_failed' and may need manual intervention.")
+                
+            except Exception as status_error:
+                logger.warning(f"Could not update final failure status for campaign {campaign_id_str}: {status_error}")
+        
+        # Clean up database pool
         try:
-            logger.info(f"Background task: Processing content for campaign {campaign_id_str}")
-            # The stop_flag is not directly used by process_and_embed_campaign_data in current design
-            # but kept for consistency if long-running sub-steps were to check it.
-            success = await processor.process_and_embed_campaign_data(uuid.UUID(campaign_id_str))
-            if success:
-                logger.info(f"Background task: Content processing for {campaign_id_str} completed successfully.")
-            else:
-                logger.warning(f"Background task: Content processing for {campaign_id_str} did not complete successfully or found no data.")
-        except Exception as e:
-            logger.error(f"Background task: Error processing content for {campaign_id_str}: {e}", exc_info=True)
-        finally:
             await close_db_pool()
+        except Exception as pool_error:
+            logger.warning(f"Error closing database pool for campaign processing task {campaign_id_str}: {pool_error}")
+    
     _run_async_task_in_new_loop(_task())
 
 def _run_qualitative_match_assessment_task(stop_flag: threading.Event):

@@ -13,9 +13,9 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
     INSERT INTO episodes (
         media_id, title, publish_date, duration_sec, episode_summary,
         episode_url, transcript, transcribe, downloaded, guest_names,
-        source_api, api_episode_id, ai_episode_summary, embedding,
+        host_names, source_api, api_episode_id, ai_episode_summary, embedding,
         episode_themes, episode_keywords, ai_analysis_done
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
     RETURNING *;
     """
     pool = await get_db_pool()
@@ -33,13 +33,14 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
                 episode_data.get("transcribe", False),
                 episode_data.get("downloaded", False),
                 episode_data.get("guest_names"),
+                episode_data.get("host_names"),
                 episode_data.get("source_api"),
                 episode_data.get("api_episode_id"),
                 episode_data.get("ai_episode_summary"),
                 episode_data.get("embedding"),
-                episode_data.get("episode_themes"), # NEW
-                episode_data.get("episode_keywords"), # NEW
-                episode_data.get("ai_analysis_done", False), # NEW
+                episode_data.get("episode_themes"),
+                episode_data.get("episode_keywords"),
+                episode_data.get("ai_analysis_done", False),
             )
             return dict(row) if row else None
         except Exception as e:
@@ -51,41 +52,43 @@ async def insert_episodes_batch(episodes_data: List[Dict[str, Any]]) -> List[Dic
     if not episodes_data:
         return []
 
-    query = """
-    INSERT INTO episodes (
-        media_id, title, publish_date, duration_sec, episode_summary,
-        episode_url, transcript, transcribe, downloaded, guest_names,
-        source_api, api_episode_id, ai_episode_summary, embedding,
-        episode_themes, episode_keywords, ai_analysis_done
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    # Column list for clarity and easier modification
+    columns = [
+        "media_id", "title", "publish_date", "duration_sec", "episode_summary",
+        "episode_url", "transcript", "transcribe", "downloaded", "guest_names",
+        "host_names", "source_api", "api_episode_id", "ai_episode_summary", "embedding",
+        "episode_themes", "episode_keywords", "ai_analysis_done"
+    ]
+    
+    # Generate placeholders like $1, $2, ..., $N
+    placeholders = ", ".join([f"${i+1}" for i in range(len(columns))])
+    
+    query = f"""
+    INSERT INTO episodes ({', '.join(columns)}) 
+    VALUES ({placeholders})
     RETURNING *;
     """
+    
     records = []
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             try:
                 for episode_data in episodes_data:
-                    row = await conn.fetchrow(
-                        query,
-                        episode_data["media_id"],
-                        episode_data["title"],
-                        episode_data["publish_date"],
-                        episode_data.get("duration_sec"),
-                        episode_data.get("episode_summary"),
-                        episode_data.get("episode_url"),
-                        episode_data.get("transcript"),
-                        episode_data.get("transcribe", False),
-                        episode_data.get("downloaded", False),
-                        episode_data.get("guest_names"),
-                        episode_data.get("source_api"),
-                        episode_data.get("api_episode_id"),
-                        episode_data.get("ai_episode_summary"),
-                        episode_data.get("embedding"),
-                        episode_data.get("episode_themes"), # NEW
-                        episode_data.get("episode_keywords"), # NEW
-                        episode_data.get("ai_analysis_done", False), # NEW
-                    )
+                    # Prepare values in the correct order corresponding to columns list
+                    values_tuple = tuple(episode_data.get(col) for col in columns)
+                    # Special handling for boolean defaults if not present in episode_data
+                    # This is a bit verbose; ideally, episode_data would always have these keys or DB defaults handle them.
+                    # For this specific function, let's ensure defaults are applied if keys are missing.
+                    current_values = list(values_tuple)
+                    if episode_data.get("transcribe") is None:
+                        current_values[columns.index("transcribe")] = False
+                    if episode_data.get("downloaded") is None:
+                        current_values[columns.index("downloaded")] = False
+                    if episode_data.get("ai_analysis_done") is None:
+                        current_values[columns.index("ai_analysis_done")] = False
+                    
+                    row = await conn.fetchrow(query, *current_values)
                     if row:
                         records.append(dict(row))
                 logger.info(f"Successfully inserted {len(records)} episodes in batch.")
@@ -389,3 +392,18 @@ async def get_episodes_for_media_paginated(media_id: int, offset: int = 0, limit
         except Exception as e:
             logger.error(f"Error fetching paginated episodes for media_id {media_id}: {e}", exc_info=True)
             return []
+
+async def get_episode_by_api_id(api_episode_id: str, media_id: int, source_api: str) -> Optional[Dict[str, Any]]:
+    """Fetches a single episode by its API-specific ID, media_id, and source_api."""
+    query = """
+    SELECT * FROM episodes 
+    WHERE api_episode_id = $1 AND media_id = $2 AND source_api = $3;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, api_episode_id, media_id, source_api)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching episode by api_episode_id '{api_episode_id}' for media_id {media_id}: {e}")
+            return None

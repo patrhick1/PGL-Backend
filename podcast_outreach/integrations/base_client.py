@@ -8,10 +8,12 @@ from typing import Dict, Any, Optional
 
 # Import exceptions (UPDATED IMPORT)
 from podcast_outreach.utils.exceptions import (
-    APIClientError, AuthenticationError, RateLimitError, APIRequestError, APIParsingError
+    APIClientError, AuthenticationError, RateLimitError, APIRequestError, APIParsingError, NotFoundError, ServerError
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_RESPONSE_LOG_LENGTH = 1000  # Max characters to log for a response
 
 class PodcastAPIClient(abc.ABC):
     """Abstract base class for podcast API clients."""
@@ -71,7 +73,13 @@ class PodcastAPIClient(abc.ABC):
 
                 try:
                     json_response = response.json()
-                    logger.debug(f"Request successful. Response from {url}: {json_response}")
+                    # Log truncated response
+                    response_text = response.text
+                    if len(response_text) > MAX_RESPONSE_LOG_LENGTH:
+                        logged_response = response_text[:MAX_RESPONSE_LOG_LENGTH] + "... (truncated)"
+                    else:
+                        logged_response = response_text
+                    logger.debug(f"Request successful. Response from {url}: {logged_response}")
                     return json_response
                 except ValueError:
                      logger.error(f"Failed to parse JSON response from {url}. Response text: {response.text[:500]}...")

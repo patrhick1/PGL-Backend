@@ -5,26 +5,43 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from pydantic import EmailStr
 
+# --- Define CustomSection before MediaKitBase ---
+class CustomSectionSchema(BaseModel):
+    title: str
+    content: Any # Allows str, dict, list, etc.
+
+class SocialLinkSchema(BaseModel):
+    handle: Optional[str] = None
+    platform: Optional[str] = None
+    url: Optional[str] = None # Fallback or primary link
+
 # --- Core Media Kit Schemas ---
 class MediaKitBase(BaseModel):
     title: Optional[str] = None
     # slug: str # Slug is part of MediaKitInDB and handled by service, not directly in base for user input here
-    is_public: bool = Field(default=False)
+    is_public: bool = Field(default=True)
     theme_preference: Optional[str] = Field(default='modern')
     headline: Optional[str] = None
     introduction: Optional[str] = None
     full_bio_content: Optional[str] = None # Populated by service from GDocs
     summary_bio_content: Optional[str] = None # Populated by service
     short_bio_content: Optional[str] = None # Populated by service
+    # bio_source: Optional[str] = None # Added to DB, will be in MediaKitInDB if directly added or via base if here
+    # keywords: Optional[List[str]] = Field(default_factory=list) # Added to DB, similar logic
     talking_points: Optional[List[Dict[str, str]]] = Field(default_factory=list) # Populated by service
+    # angles_source: Optional[str] = None # Added to DB
+    sample_questions: Optional[List[str]] = Field(default_factory=list) # <<< ADDED
     key_achievements: Optional[List[str]] = Field(default_factory=list)
     previous_appearances: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     social_media_stats: Optional[Dict[str, Any]] = Field(default_factory=dict) # Can be user-provided or service-fetched
+    testimonials_section: Optional[str] = None # <<< ADDED
     headshot_image_urls: Optional[List[str]] = Field(default_factory=list)
     logo_image_url: Optional[str] = None
     call_to_action_text: Optional[str] = None
     contact_information_for_booking: Optional[str] = None
-    custom_sections: Optional[List[Dict[str, str]]] = Field(default_factory=list)
+    # custom_sections: Optional[List[Dict[str, str]]] = Field(default_factory=list) # Old definition
+    custom_sections: Optional[List[CustomSectionSchema]] = Field(default_factory=list) # New definition
+    person_social_links: Optional[List[SocialLinkSchema]] = Field(default_factory=list)
 
 # Schema for what user can directly edit/provide when creating/updating via API
 class MediaKitEditableContentSchema(BaseModel):
@@ -38,7 +55,8 @@ class MediaKitEditableContentSchema(BaseModel):
     logo_image_url: Optional[str] = Field(None, description="URL for the client/company logo.")
     call_to_action_text: Optional[str] = Field(None, description="Custom call to action text.")
     contact_information_for_booking: Optional[str] = Field(None, description="Contact info for bookings.")
-    custom_sections: Optional[List[Dict[str, str]]] = Field(None, description="Custom sections with title and content.")
+    # custom_sections: Optional[List[Dict[str, str]]] = Field(None, description="Custom sections with title and content.") # Old definition
+    custom_sections: Optional[List[CustomSectionSchema]] = Field(None, description="Custom sections with title and content.") # New definition
     theme_preference: Optional[str] = Field(None, description="Preferred theme for the public media kit page.")
     # Bio and Angles are pulled from campaign GDocs by the service, not directly set here.
 
@@ -66,18 +84,26 @@ class MediaKitInDB(MediaKitBase):
     campaign_id: uuid.UUID
     person_id: int
     slug: str # Slug is essential and unique
+    # Fields from schema that are not in MediaKitBase but should be in the response
+    tagline: Optional[str] = None
+    bio_source: Optional[str] = None
+    keywords: Optional[List[str]] = Field(default_factory=list)
+    angles_source: Optional[str] = None
+    # sample_questions: Optional[List[str]] = Field(default_factory=list) # Now in MediaKitBase
+    # testimonials_section: Optional[str] = None # Now in MediaKitBase
     created_at: datetime
     updated_at: datetime
 
     # Enriched fields that will be populated by the _enriched queries
     campaign_name: Optional[str] = None
     client_full_name: Optional[str] = None 
-    client_email: Optional[EmailStr] = None # Assuming EmailStr is imported from pydantic
+    client_email: Optional[EmailStr] = None
     client_website: Optional[str] = None
     client_linkedin_profile_url: Optional[str] = None
     client_twitter_profile_url: Optional[str] = None
     client_instagram_profile_url: Optional[str] = None
     client_tiktok_profile_url: Optional[str] = None
+    client_role: Optional[str] = None
     # Note: social_media_stats is already in MediaKitBase for client-specific stats
 
     class Config:

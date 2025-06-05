@@ -162,10 +162,17 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
                 keywords_list = [kw.strip() for kw in str(val).split() if kw.strip()]
             val = keywords_list
         
-        # For JSONB fields, asyncpg handles Python dicts directly.
-        # If 'val' for 'questionnaire_responses' is a dict, it's fine.
-        # If it's a JSON string, you might need json.loads(val) if asyncpg doesn't auto-cast.
-        # However, Pydantic model should ensure it's a dict if coming from API.
+        if key == "questionnaire_keywords" and val is not None and not isinstance(val, list):
+            # Similar handling for questionnaire_keywords if it can come as a string
+            q_keywords_list = [kw.strip() for kw in str(val).split(',') if kw.strip()]
+            if not q_keywords_list and str(val).strip():
+                q_keywords_list = [kw.strip() for kw in str(val).split() if kw.strip()]
+            val = q_keywords_list
+
+        if key == "embedding" and isinstance(val, list):
+            # Convert list of floats to pgvector-compatible string format '[f1,f2,...]'
+            val = str(val).replace(" ", "") # Ensure no spaces, pgvector is sensitive
+
         if key == "questionnaire_responses":
             if isinstance(val, dict):
                 val = json.dumps(val) # Serialize to JSON string for update
