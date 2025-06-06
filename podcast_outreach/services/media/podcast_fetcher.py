@@ -9,7 +9,7 @@ import html
 import functools
 import logging
 from datetime import datetime, timezone as dt_timezone
- 
+
 # Import modular queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import media as media_queries
@@ -24,12 +24,12 @@ from podcast_outreach.utils.exceptions import APIClientError, RateLimitError
 from podcast_outreach.services.ai.utils import generate_genre_ids, generate_podscan_category_ids
 from podcast_outreach.utils.data_processor import parse_date
 from podcast_outreach.services.media.episode_handler import EpisodeHandlerService # ENSURED IMPORT
- 
+
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
- 
+
 # --- Constants ---
 LISTENNOTES_PAGE_SIZE = 10
 PODSCAN_PAGE_SIZE = 20
@@ -37,8 +37,8 @@ API_CALL_DELAY = 1.2
 KEYWORD_PROCESSING_DELAY = 2
 ENRICHMENT_FRESHNESS_THRESHOLD_DAYS = 180
 TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD = 10 # For testing purposes
- 
- 
+
+
 def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[Any]:
     """Convert strings like '10%' or 'N/A' to numbers."""
     if value is None:
@@ -53,11 +53,11 @@ def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[
     except ValueError:
         logger.warning("Could not convert sanitized string '%s' to %s", s_value, target_type)
         return None
- 
- 
+
+
 class MediaFetcher:
     """Fetch podcasts from external APIs and store them in PostgreSQL."""
- 
+
     def __init__(self) -> None:
         self.openai_service = OpenAIService()
         self.listennotes_client = ListenNotesAPIClient()
@@ -65,12 +65,12 @@ class MediaFetcher:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         self.episode_handler_service = EpisodeHandlerService() # ENSURED INITIALIZATION
         logger.info("MediaFetcher services initialized")
- 
+
     async def _run_in_executor(self, func, *args, **kwargs):
         loop = asyncio.get_running_loop()
         func_with_args = functools.partial(func, *args, **kwargs)
         return await loop.run_in_executor(self.executor, func_with_args)
- 
+
     async def _generate_genre_ids_async(self, keyword: str, campaign_id_str: str) -> Optional[str]:
         try:
             logger.info(f"Generating ListenNotes genre IDs for '{keyword}' (context: {campaign_id_str})")
@@ -117,7 +117,7 @@ class MediaFetcher:
             else:
                 social_map.setdefault('podcast_other_social_url', url)
         return social_map
- 
+
     async def _get_existing_media_by_identifiers(self, initial_data: Dict[str, Any], source_api: str) -> Optional[Dict[str, Any]]:
         rss_url = None
         api_id_val = None
@@ -265,28 +265,26 @@ class MediaFetcher:
                         match = await self._run_in_executor(self.podscan_client.search_podcast_by_rss, rss_for_cross_enrich)
                     
                     if match:
-                        logger.debug(f"Podscan match found for ListenNotes item {enriched.get('name')}: {match.get('podcast_name')}")
-                        enriched.setdefault('website', match.get('podcast_url'))
-                        enriched.setdefault('podcast_spotify_id', match.get('podcast_spotify_id'))
+                        logger.info(f"Podscan match found for ListenNotes item '{enriched.get('name')}'. Promoting to Podscan as primary source.")
+                        # *** PROMOTION LOGIC ***
+                        enriched['source_api'] = "PodscanFM"
+                        enriched['api_id'] = str(match.get('podcast_id')).strip()
+                        # Now merge Podscan data, overwriting ListenNotes data where Podscan is likely better
+                        enriched['name'] = html.unescape(str(match.get('podcast_name', enriched.get('name', '')))).strip()
+                        enriched['description'] = html.unescape(str(match.get('podcast_description', enriched.get('description', '')))).strip() or None
+                        enriched['website'] = match.get('podcast_url') or enriched.get('website')
+                        enriched['podcast_spotify_id'] = match.get('podcast_spotify_id') or enriched.get('podcast_spotify_id')
                         reach = match.get('reach') or {}
-                        enriched.setdefault('audience_size', _sanitize_numeric_string(reach.get('audience_size'), int))
-                        if reach.get('email') and not enriched.get('contact_email'): # Only set if original email was empty
-                            enriched['contact_email'] = reach.get('email')
+                        enriched['audience_size'] = _sanitize_numeric_string(reach.get('audience_size'), int) if reach.get('audience_size') is not None else enriched.get('audience_size')
+                        if reach.get('email'): enriched['contact_email'] = reach.get('email')
                         for k, v in self._extract_social_links(reach.get('social_links', [])).items():
-                            enriched.setdefault(k, v) # setdefault preserves existing values if any
+                            enriched.setdefault(k, v)
                         parsed_cross_ps_date = parse_date(match.get('last_posted_at'))
                         if parsed_cross_ps_date is not None:
-                            # Update if Podscan has a more recent or if current is None
                             if current_last_posted_at is None or parsed_cross_ps_date > current_last_posted_at:
                                 enriched['last_posted_at'] = parsed_cross_ps_date
-                        enriched.setdefault('image_url', match.get('podcast_image_url')) # Prefer Podscan image if LN was missing/bad?
-                        if match.get('podcast_itunes_id') and not enriched.get('itunes_id'): # If LN was missing itunes_id
-                             enriched['itunes_id'] = str(match.get('podcast_itunes_id')).strip()
-                        if match.get('podcast_description') and not enriched.get('description'): # If LN desc was empty
-                            enriched['description'] = html.unescape(match['podcast_description'])
-                        # Add other Podscan fields to ListenNotes record if missing or preferred
-                        if match.get('podcast_categories') and not enriched.get('category'):
-                             enriched['category'] = match['podcast_categories'][0].get('category_name')
+                        enriched['image_url'] = match.get('podcast_image_url') or enriched.get('image_url')
+                        if match.get('podcast_categories'): enriched['category'] = match['podcast_categories'][0].get('category_name')
 
                 elif source_api == "PodscanFM": # Enrich WITH ListenNotes
                     match = None
@@ -334,7 +332,7 @@ class MediaFetcher:
             enriched['last_posted_at'] = None
 
         return enriched
- 
+
     async def merge_and_upsert_media(self, podcast_data: Dict[str, Any], source_api: str,
                                      campaign_uuid: uuid.UUID, keyword: str) -> Optional[int]:
         # Enhanced logging within this function
@@ -397,7 +395,7 @@ class MediaFetcher:
         except Exception as e:
             logger.error("Error creating match suggestion for media %s: %s", media_id, e, exc_info=True)
             return False
- 
+
     async def search_listen_notes_for_media(self, keyword: str, genre_ids_str: Optional[str], campaign_uuid: uuid.UUID, # Renamed for clarity
                                             processed_ids_session: set) -> List[int]:
         if not genre_ids_str:
@@ -433,35 +431,37 @@ class MediaFetcher:
                         logger.info(f"ListenNotes: TEST LIMIT MET ({TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD}) for '{keyword}'. Halting.")
                         ln_has_more = False 
                         break 
+                    
+                    # *** CORRECTED INDENTATION STARTS HERE ***
+                    ln_api_id = str(item.get('id', '')).strip()
+                    ln_rss = item.get('rss')
+                    current_item_source_identifier = ln_rss or ln_api_id
+                    if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
+                        logger.debug(f"ListenNotes: Item ID {ln_api_id}/RSS {ln_rss} already in processed_ids_session for '{keyword}'. Skipping.")
+                        continue
 
-                        ln_api_id = str(item.get('id', '')).strip()
-                        ln_rss = item.get('rss')
-                        current_item_source_identifier = ln_rss or ln_api_id
-                        if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
-                            logger.debug(f"ListenNotes: Item ID {ln_api_id}/RSS {ln_rss} already in processed_ids_session for '{keyword}'. Skipping.")
-                            continue
+                    existing_media_in_db = await self._get_existing_media_by_identifiers(item, "ListenNotes")
+                    logger.debug(f"ListenNotes: For item '{item.get('title_original')}', result of _get_existing_media_by_identifiers is None? {existing_media_in_db is None}")
+                    
+                    enriched = await self._enrich_podcast_data(item, "ListenNotes", existing_media_from_db=existing_media_in_db)
+                    media_id = await self.merge_and_upsert_media(enriched, "ListenNotes", campaign_uuid, keyword)
+                    
+                    if media_id:
+                        upserted_media_ids_this_call.append(media_id)
+                        processed_podcasts_count_for_test += 1 
+                        logger.debug(f"ListenNotes: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
 
-                        existing_media_in_db = await self._get_existing_media_by_identifiers(item, "ListenNotes")
-                        logger.debug(f"ListenNotes: For item '{item.get('title_original')}', result of _get_existing_media_by_identifiers is None? {existing_media_in_db is None}")
-                        
-                        enriched = await self._enrich_podcast_data(item, "ListenNotes", existing_media_from_db=existing_media_in_db)
-                        media_id = await self.merge_and_upsert_media(enriched, "ListenNotes", campaign_uuid, keyword)
-                        
-                        if media_id:
-                            upserted_media_ids_this_call.append(media_id)
-                            processed_podcasts_count_for_test += 1 
-                            logger.debug(f"ListenNotes: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
-
-                            if existing_media_in_db is None: 
-                                logger.info(f"New media_id {media_id} (ListenNotes) for '{enriched.get('name')}'. Fetching episodes...")
-                                await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
-                            else:
-                                logger.info(f"Media_id {media_id} (ListenNotes) for '{enriched.get('name')}' already existed. DB Name: {existing_media_in_db.get('name', 'N/A')}, DB ID: {existing_media_in_db.get('media_id', 'N/A')}")
-                            
-                            if current_item_source_identifier: 
-                                processed_ids_session.add(current_item_source_identifier)
+                        if existing_media_in_db is None: 
+                            logger.info(f"New media_id {media_id} (ListenNotes) for '{enriched.get('name')}'. Fetching episodes...")
+                            await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
                         else:
-                            logger.warning(f"ListenNotes: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
+                            logger.info(f"Media_id {media_id} (ListenNotes) for '{enriched.get('name')}' already existed. DB Name: {existing_media_in_db.get('name', 'N/A')}, DB ID: {existing_media_in_db.get('media_id', 'N/A')}")
+                        
+                        if current_item_source_identifier: 
+                            processed_ids_session.add(current_item_source_identifier)
+                    else:
+                        logger.warning(f"ListenNotes: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
+                    # *** CORRECTED INDENTATION ENDS HERE ***
                                 
                 if not ln_has_more: 
                     logger.debug(f"ListenNotes: Breaking outer pagination loop for '{keyword}' (ln_has_more is False).")
@@ -522,47 +522,49 @@ class MediaFetcher:
                         logger.info(f"PodscanFM: TEST LIMIT MET ({TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD}) for '{keyword}'. Halting.")
                         ps_has_more = False
                         break 
+                    
+                    # *** CORRECTED INDENTATION STARTS HERE ***
+                    ps_api_id = str(item.get('podcast_id', '')).strip()
+                    ps_rss = item.get('rss_url')
+                    current_item_source_identifier = ps_rss or ps_api_id
 
-                        ps_api_id = str(item.get('podcast_id', '')).strip()
-                        ps_rss = item.get('rss_url')
-                        current_item_source_identifier = ps_rss or ps_api_id
+                    if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
+                        logger.debug(f"PodscanFM: Item ID {ps_api_id}/RSS {ps_rss} already in processed_ids_session for '{keyword}'. Skipping.")
+                        continue
 
-                        if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
-                            logger.debug(f"PodscanFM: Item ID {ps_api_id}/RSS {ps_rss} already in processed_ids_session for '{keyword}'. Skipping.")
-                            continue
+                    existing_media_in_db = await self._get_existing_media_by_identifiers(item, "PodscanFM")
+                    logger.debug(f"PodscanFM: For item '{item.get('podcast_name')}', result of _get_existing_media_by_identifiers is None? {existing_media_in_db is None}")
+                    
+                    enriched = await self._enrich_podcast_data(item, "PodscanFM", existing_media_from_db=existing_media_in_db)
+                    media_id = await self.merge_and_upsert_media(enriched, "PodscanFM", campaign_uuid, keyword)
+                    
+                    if media_id:
+                        upserted_media_ids_this_call.append(media_id)
+                        processed_podcasts_count_for_test += 1 
+                        logger.debug(f"PodscanFM: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
 
-                        existing_media_in_db = await self._get_existing_media_by_identifiers(item, "PodscanFM")
-                        logger.debug(f"PodscanFM: For item '{item.get('podcast_name')}', result of _get_existing_media_by_identifiers is None? {existing_media_in_db is None}")
-                        
-                        enriched = await self._enrich_podcast_data(item, "PodscanFM", existing_media_from_db=existing_media_in_db)
-                        media_id = await self.merge_and_upsert_media(enriched, "PodscanFM", campaign_uuid, keyword)
-                        
-                        if media_id:
-                            upserted_media_ids_this_call.append(media_id)
-                            processed_podcasts_count_for_test += 1 
-                            logger.debug(f"PodscanFM: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
-
-                            if existing_media_in_db is None: 
-                                logger.info(f"New media_id {media_id} (PodscanFM) for '{enriched.get('name')}'. Fetching episodes...")
-                                await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
-                            else:
-                                logger.info(f"Media_id {media_id} (PodscanFM) for '{enriched.get('name')}' already existed. DB Name: {existing_media_in_db.get('name', 'N/A')}, DB ID: {existing_media_in_db.get('media_id', 'N/A')}")
-                                
-                            if current_item_source_identifier:
-                                processed_ids_session.add(current_item_source_identifier)
+                        if existing_media_in_db is None: 
+                            logger.info(f"New media_id {media_id} (PodscanFM) for '{enriched.get('name')}'. Fetching episodes...")
+                            await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
                         else:
-                            logger.warning(f"PodscanFM: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
+                            logger.info(f"Media_id {media_id} (PodscanFM) for '{enriched.get('name')}' already existed. DB Name: {existing_media_in_db.get('name', 'N/A')}, DB ID: {existing_media_in_db.get('media_id', 'N/A')}")
+                            
+                        if current_item_source_identifier:
+                            processed_ids_session.add(current_item_source_identifier)
+                    else:
+                        logger.warning(f"PodscanFM: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
+                    # *** CORRECTED INDENTATION ENDS HERE ***
 
-                    if not ps_has_more: 
-                        logger.debug(f"PodscanFM: Breaking outer pagination loop for '{keyword}' (ps_has_more is False).")
-                        break
+                if not ps_has_more: 
+                    logger.debug(f"PodscanFM: Breaking outer pagination loop for '{keyword}' (ps_has_more is False).")
+                    break
                                 
-                    ps_has_more = len(results) >= PODSCAN_PAGE_SIZE 
-                    if not ps_has_more:
-                        logger.info(f"PodscanFM: No more pages from API for keyword '{keyword}' (processed all results from current page, and page size indicates no more).")
-                    if ps_has_more:
-                        ps_page += 1
-                        await asyncio.sleep(API_CALL_DELAY)
+                ps_has_more = len(results) >= PODSCAN_PAGE_SIZE 
+                if not ps_has_more:
+                    logger.info(f"PodscanFM: No more pages from API for keyword '{keyword}' (processed all results from current page, and page size indicates no more).")
+                if ps_has_more:
+                    ps_page += 1
+                    await asyncio.sleep(API_CALL_DELAY)
             except RateLimitError as rle:
                 logger.warning(f"PodscanFM rate limit for '{keyword}': {rle}")
                 await asyncio.sleep(60)
@@ -639,7 +641,7 @@ class MediaFetcher:
             logger.info(f"No new or existing media candidates found for campaign {campaign_uuid}. No match suggestions to create.")
         else:
             logger.info(f"Phase 2: Creating match suggestions for campaign {campaign_uuid} from {len(unique_candidate_media_map)} candidates. Limit for this run: {max_matches if max_matches is not None else 'unlimited'}.")
-            
+        
             # The create_match_suggestions method internally checks if a suggestion already exists for this (campaign, media) pair.
             # We iterate through the unique media found in this discovery run.
             for media_id_map_key, originating_keyword in unique_candidate_media_map.items(): 
@@ -797,13 +799,13 @@ class MediaFetcher:
         if self.executor:
             self.executor.shutdown(wait=True)
             logger.info("MediaFetcher executor shut down")
- 
- 
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch & store podcasts for a campaign")
     parser.add_argument("campaign_id", help="PostgreSQL Campaign UUID")
     args = parser.parse_args()
- 
+
     async def run():
         await get_db_pool() # Use modular connection
         fetcher = MediaFetcher()
@@ -813,9 +815,9 @@ def main() -> None:
             fetcher.cleanup()
             await close_db_pool() # Use modular connection
             logger.info("Script finished for Campaign ID: %s", args.campaign_id)
- 
+
     asyncio.run(run())
- 
- 
+
+
 if __name__ == "__main__":
     main()

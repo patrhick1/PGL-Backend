@@ -30,7 +30,7 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
                 episode_data.get("episode_summary"),
                 episode_data.get("episode_url"),
                 episode_data.get("transcript"),
-                episode_data.get("transcribe", False),
+                episode_data.get("transcribe", False), # Default to False
                 episode_data.get("downloaded", False),
                 episode_data.get("guest_names"),
                 episode_data.get("host_names"),
@@ -66,6 +66,7 @@ async def insert_episodes_batch(episodes_data: List[Dict[str, Any]]) -> List[Dic
     query = f"""
     INSERT INTO episodes ({', '.join(columns)}) 
     VALUES ({placeholders})
+    ON CONFLICT DO NOTHING -- Added to prevent errors if an episode is somehow processed twice
     RETURNING *;
     """
     
@@ -77,9 +78,6 @@ async def insert_episodes_batch(episodes_data: List[Dict[str, Any]]) -> List[Dic
                 for episode_data in episodes_data:
                     # Prepare values in the correct order corresponding to columns list
                     values_tuple = tuple(episode_data.get(col) for col in columns)
-                    # Special handling for boolean defaults if not present in episode_data
-                    # This is a bit verbose; ideally, episode_data would always have these keys or DB defaults handle them.
-                    # For this specific function, let's ensure defaults are applied if keys are missing.
                     current_values = list(values_tuple)
                     if episode_data.get("transcribe") is None:
                         current_values[columns.index("transcribe")] = False
@@ -120,59 +118,38 @@ async def delete_oldest_episodes(media_id: int, keep_count: int = 10) -> int:
             logger.exception("Error deleting old episodes for media_id %s: %s", media_id, e)
             return 0
  
-async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) -> int:
-    """Flag the most recent episodes for transcription."""
+async def flag_specific_episodes_for_transcription(media_id: int, episode_ids_to_flag: List[int]) -> int:
+    """
+    Atomically sets `transcribe` to TRUE for specific episode IDs and FALSE for all others of that media.
+    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             try:
-                candidate_rows = await conn.fetch(
-                    """
-                    SELECT episode_id FROM episodes
-                    WHERE media_id = $1 AND downloaded = FALSE
-                          AND (transcript IS NULL OR transcript = '')
-                    ORDER BY COALESCE(publish_date, '1970-01-01') DESC, episode_id DESC
-                    LIMIT $2;
-                    """,
-                    media_id,
-                    count,
+                # Step 1: Set all to FALSE first for this media_id
+                await conn.execute(
+                    "UPDATE episodes SET transcribe = FALSE WHERE media_id = $1",
+                    media_id
                 )
-                candidate_ids = [row["episode_id"] for row in candidate_rows]
- 
-                if candidate_ids:
-                    # Set existing 'transcribe = TRUE' episodes to FALSE if they are not in the new candidate list
-                    await conn.execute(
-                        f"""
-                        UPDATE episodes
-                        SET transcribe = FALSE, updated_at = NOW()
-                        WHERE media_id = $1 AND transcribe = TRUE AND downloaded = FALSE
-                              AND episode_id NOT IN ({','.join(map(str, candidate_ids))});
-                        """,
-                        media_id,
-                    )
-                    # Set new candidates to TRUE
-                    flagged = await conn.fetch(
-                        f"""
-                        UPDATE episodes
-                        SET transcribe = TRUE, updated_at = NOW()
-                        WHERE episode_id IN ({','.join(map(str, candidate_ids))})
-                        RETURNING episode_id;
-                        """
-                    )
-                    logger.info("Flagged %s episodes for transcription for media_id %s", len(flagged), media_id)
-                    return len(flagged)
-                else:
-                    # If no candidates, ensure all existing 'transcribe = TRUE' episodes are set to FALSE
-                    await conn.execute(
-                        "UPDATE episodes SET transcribe = FALSE, updated_at = NOW() "
-                        "WHERE media_id = $1 AND transcribe = TRUE AND downloaded = FALSE;",
-                        media_id,
-                    )
-                    return 0
+                
+                # Step 2: Set specific episodes to TRUE
+                if episode_ids_to_flag:
+                    # Use `unnest` for performance with a list of IDs
+                    update_query = """
+                    UPDATE episodes
+                    SET transcribe = TRUE
+                    WHERE media_id = $1 AND episode_id = ANY($2::int[])
+                    RETURNING episode_id;
+                    """
+                    flagged_rows = await conn.fetch(update_query, media_id, episode_ids_to_flag)
+                    flagged_count = len(flagged_rows)
+                    logger.info(f"Specifically flagged {flagged_count} episodes for transcription for media_id {media_id}")
+                    return flagged_count
+                return 0
             except Exception as e:
-                logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
+                logger.exception(f"Error in flag_specific_episodes_for_transcription for media_id {media_id}: {e}")
                 raise
- 
+
 async def fetch_episodes_for_transcription(limit: int = 20) -> list[Dict[str, Any]]:
     """Return episodes that need transcription."""
     query = """
@@ -298,7 +275,7 @@ async def update_episode_analysis_data(
     if guest_names is not None:
         # If you want separate host_names and guest_names columns, you'd need to add them to schema
         # For now, I'll combine them into 'guest_names' or pick one.
-        # Let's update the existing 'guest_names' column with a combined list if both are present.
+        # Let's update the existing 'guest_names' column with a combined list of identified people.
         # Or, if 'guest_names' is specifically for guests, we need a new 'host_names' column.
         # Given the schema, 'guest_names' is TEXT, not TEXT[]. Let's update it to TEXT[] in schema.
         # For now, I'll use it as a combined list of identified people.
@@ -407,3 +384,58 @@ async def get_episode_by_api_id(api_episode_id: str, media_id: int, source_api: 
         except Exception as e:
             logger.exception(f"Error fetching episode by api_episode_id '{api_episode_id}' for media_id {media_id}: {e}")
             return None
+
+# DEPRECATED: This function is too broad. Use flag_specific_episodes_for_transcription instead.
+async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) -> int:
+    """DEPRECATED: Flag the most recent episodes for transcription."""
+    logger.warning("flag_recent_episodes_for_transcription is deprecated. Use flag_specific_episodes_for_transcription.")
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                candidate_rows = await conn.fetch(
+                    """
+                    SELECT episode_id FROM episodes
+                    WHERE media_id = $1 AND downloaded = FALSE
+                          AND (transcript IS NULL OR transcript = '')
+                    ORDER BY COALESCE(publish_date, '1970-01-01') DESC, episode_id DESC
+                    LIMIT $2;
+                    """,
+                    media_id,
+                    count,
+                )
+                candidate_ids = [row["episode_id"] for row in candidate_rows]
+ 
+                if candidate_ids:
+                    # Set existing 'transcribe = TRUE' episodes to FALSE if they are not in the new candidate list
+                    await conn.execute(
+                        f"""
+                        UPDATE episodes
+                        SET transcribe = FALSE, updated_at = NOW()
+                        WHERE media_id = $1 AND transcribe = TRUE AND downloaded = FALSE
+                              AND episode_id NOT IN ({','.join(map(str, candidate_ids))});
+                        """,
+                        media_id,
+                    )
+                    # Set new candidates to TRUE
+                    flagged = await conn.fetch(
+                        f"""
+                        UPDATE episodes
+                        SET transcribe = TRUE, updated_at = NOW()
+                        WHERE episode_id IN ({','.join(map(str, candidate_ids))})
+                        RETURNING episode_id;
+                        """
+                    )
+                    logger.info("Flagged %s episodes for transcription for media_id %s", len(flagged), media_id)
+                    return len(flagged)
+                else:
+                    # If no candidates, ensure all existing 'transcribe = TRUE' episodes are set to FALSE
+                    await conn.execute(
+                        "UPDATE episodes SET transcribe = FALSE, updated_at = NOW() "
+                        "WHERE media_id = $1 AND transcribe = TRUE AND downloaded = FALSE;",
+                        media_id,
+                    )
+                    return 0
+            except Exception as e:
+                logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
+                raise

@@ -311,3 +311,23 @@ async def get_media_for_recommendation(limit: int = 3, min_quality_score: Option
         except Exception as e:
             logger.exception(f"Error fetching media for recommendation: {e}")
             return []
+        
+async def link_person_to_media(media_id: int, person_id: int, role: str) -> bool:
+    """
+    Creates a link in the media_people table between a media and a person (e.g., a host).
+    Uses ON CONFLICT DO NOTHING to avoid errors if the link already exists.
+    """
+    query = """
+    INSERT INTO media_people (media_id, person_id, show_role)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (media_id, person_id) DO NOTHING;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(query, media_id, person_id, role)
+            logger.info(f"Ensured link between media_id {media_id} and person_id {person_id} with role '{role}'.")
+            return True
+        except Exception as e:
+            logger.error(f"Error linking person {person_id} to media {media_id}: {e}", exc_info=True)
+            return False

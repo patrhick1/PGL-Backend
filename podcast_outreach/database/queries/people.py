@@ -224,4 +224,20 @@ async def get_person_by_dashboard_username(dashboard_username: str) -> Optional[
             return _process_person_row(row_proxy)
         except Exception as e:
             logger.error(f"Error fetching person by dashboard username {dashboard_username}: {e}")
+            return 
+
+async def get_person_by_full_name(full_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches a person record by their full name.
+    NOTE: This is a simple case-sensitive match. For more robust matching,
+    consider using ILIKE or other text-matching functions.
+    """
+    query = "SELECT * FROM people WHERE full_name = $1 LIMIT 1;"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row_proxy = await conn.fetchrow(query, full_name)
+            return _process_person_row(row_proxy)
+        except Exception as e:
+            logger.error(f"Error fetching person by full name '{full_name}': {e}")
             return None

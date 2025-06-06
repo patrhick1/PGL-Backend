@@ -4,15 +4,17 @@ import logging
 import os
 import sys
 from typing import List
+import uuid
 
 # Add project root to sys.path to allow importing project modules
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
-    sys.path.insert(0, os.path.dirname(project_root)) # Add the parent of podcast_outreach, which is PGL - Postgres
+    # Add the parent of podcast_outreach, which is the project root
+    sys.path.insert(0, os.path.dirname(project_root)) 
 
 from dotenv import load_dotenv
 # Load .env from the directory containing the podcast_outreach package
-load_dotenv(os.path.join(os.path.dirname(project_root), '.env'))
+load_dotenv(os.path.join(project_root, '.env'))
 
 from podcast_outreach.database.connection import init_db_pool, close_db_pool
 from podcast_outreach.database.queries import media_kits as media_kit_queries
@@ -77,4 +79,4 @@ async def main_refresh_social_stats():
 if __name__ == "__main__":
     # Ensure the .env file is loaded relative to the script's location if run directly
     # The load_dotenv at the top should handle it if the script is in the correct project structure.
-    asyncio.run(main_refresh_social_stats()) 
+    asyncio.run(main_refresh_social_stats())
