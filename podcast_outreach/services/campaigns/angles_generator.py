@@ -22,7 +22,6 @@ from podcast_outreach.integrations.google_docs import GoogleDocsService # Use ne
 from podcast_outreach.services.ai.openai_client import OpenAIService # Use new AI service path
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker # Use new AI tracker path
 from podcast_outreach.utils.data_processor import extract_document_id # Use new utils path
-from podcast_outreach.services.tasks.manager import task_manager # Corrected import path
 from podcast_outreach.services.campaigns.content_processor import ClientContentProcessor # Import ClientContentProcessor
 
 # Setup logging

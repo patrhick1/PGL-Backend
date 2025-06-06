@@ -237,3 +237,23 @@ async def get_match_suggestion_by_id_enriched(match_id: int) -> Optional[Dict[st
         except Exception as e:
             logger.exception(f"Error fetching enriched match suggestion {match_id}: {e}")
             return None # Or raise, depending on desired error handling
+
+async def get_matches_needing_vetting(limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Fetches match suggestions that are in a state ready for vetting and haven't been vetted recently.
+    """
+    # Vet if status is 'pending_qualitative_assessment' and it hasn't been vetted yet.
+    query = """
+    SELECT * FROM match_suggestions
+    WHERE status = 'pending_qualitative_assessment' AND last_vetted_at IS NULL
+    ORDER BY created_at ASC
+    LIMIT $1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching matches needing vetting: {e}", exc_info=True)
+            return []

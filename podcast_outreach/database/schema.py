@@ -252,17 +252,17 @@ def create_media_people_table(conn):
  
 def create_campaigns_table(conn):
     sql_statement = """
-    CREATE TABLE campaigns (
+    CREATE TABLE IF NOT EXISTS campaigns (
         campaign_id UUID PRIMARY KEY,
-        person_id INTEGER REFERENCES people(person_id) ON DELETE RESTRICT, -- Client/Owner
+        person_id INTEGER REFERENCES people(person_id) ON DELETE RESTRICT,
         attio_client_id UUID,
         campaign_name TEXT,
         campaign_type TEXT,
         campaign_bio TEXT,
         campaign_angles TEXT,
         campaign_keywords TEXT[],
-        questionnaire_keywords TEXT[] NULL, -- New field
-        gdoc_keywords TEXT[] NULL, -- New field
+        questionnaire_keywords TEXT[] NULL,
+        gdoc_keywords TEXT[] NULL,
         compiled_social_posts TEXT,
         podcast_transcript_link TEXT,
         compiled_articles_link TEXT,
@@ -273,8 +273,9 @@ def create_campaigns_table(conn):
         goal_note TEXT,
         media_kit_url TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        instantly_campaign_id TEXT -- New column for Instantly campaign ID,
-        questionnaire_responses JSONB -- New column for questionnaire responses
+        instantly_campaign_id TEXT,
+        questionnaire_responses JSONB,
+        ideal_podcast_description TEXT  -- *** NEW FIELD ***
     );
     CREATE INDEX IF NOT EXISTS idx_campaigns_person_id ON CAMPAIGNS (person_id);
     CREATE INDEX IF NOT EXISTS idx_campaigns_embedding_hnsw ON CAMPAIGNS USING hnsw (embedding vector_cosine_ops);
@@ -317,10 +318,10 @@ def create_episodes_table(conn):
 # In schema_creation_extended.py
 def create_match_suggestions(conn):
     sql_statement = """
-    CREATE TABLE match_suggestions (
+    CREATE TABLE IF NOT EXISTS match_suggestions (
         match_id SERIAL PRIMARY KEY,
-        campaign_id UUID REFERENCES campaigns(campaign_id), -- Consider ON DELETE CASCADE or RESTRICT
-        media_id INTEGER REFERENCES media(media_id),       -- Consider ON DELETE CASCADE or RESTRICT
+        campaign_id UUID REFERENCES campaigns(campaign_id),
+        media_id INTEGER REFERENCES media(media_id),
         match_score NUMERIC,
         matched_keywords TEXT[],
         ai_reasoning TEXT,
@@ -328,11 +329,16 @@ def create_match_suggestions(conn):
         approved_at TIMESTAMPTZ,
         status VARCHAR(50) DEFAULT 'pending',  
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        best_matching_episode_id INTEGER REFERENCES episodes(episode_id) ON DELETE SET NULL -- New field
+        best_matching_episode_id INTEGER REFERENCES episodes(episode_id) ON DELETE SET NULL,
+        -- *** NEW VETTING FIELDS ***
+        vetting_score NUMERIC,
+        vetting_reasoning TEXT,
+        vetting_checklist JSONB,
+        last_vetted_at TIMESTAMPTZ
     );
-    CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaignS_id);
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaign_id);
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_media_id ON match_suggestions (media_id);
-    CREATE INDEX IF NOT EXISTS idx_match_suggestions_best_episode_id ON match_suggestions (best_matching_episode_id); -- Index for new field
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_best_episode_id ON match_suggestions (best_matching_episode_id);
     """
     execute_sql(conn, sql_statement)
     print("Table MATCH_SUGGESTIONS created/ensured.")
