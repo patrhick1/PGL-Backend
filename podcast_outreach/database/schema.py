@@ -124,6 +124,8 @@ def create_people_table(conn):
         website                   TEXT,
         location                  TEXT,
         timezone                  VARCHAR(100),
+        profile_image_url         TEXT,
+        profile_banner_url        TEXT,
         notification_settings     JSONB DEFAULT '{}'::jsonb,
         privacy_settings          JSONB DEFAULT '{}'::jsonb
     );

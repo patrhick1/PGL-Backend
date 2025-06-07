@@ -577,31 +577,29 @@ class MediaFetcher:
         logger.info(f"PodscanFM: Finished search for keyword '{keyword}'. Final test count: {processed_podcasts_count_for_test}.")
         return upserted_media_ids_this_call
 
-    async def fetch_podcasts_for_campaign(self, campaign_id_str: str, max_matches: Optional[int] = None) -> None:
+    async def fetch_podcasts_for_campaign(self, campaign_id_str: str, max_matches: Optional[int] = None) -> List[int]:
+        """
+        Main orchestration method. Returns a list of newly created media IDs.
+        """
         logger.info(f"Starting podcast fetch for campaign {campaign_id_str}. Max new match suggestions for this run: {max_matches if max_matches is not None else 'unlimited'}")
+        newly_created_media_ids: List[int] = []
         try:
             campaign_uuid = uuid.UUID(campaign_id_str)
         except ValueError:
             logger.error("Invalid campaign ID: %s", campaign_id_str)
-            return
+            return []
         
         campaign = await campaign_queries.get_campaign_by_id(campaign_uuid)
         if not campaign:
             logger.error("Campaign %s not found", campaign_uuid)
-            return
+            return []
         
         keywords: List[str] = campaign.get('campaign_keywords', [])
         if not keywords:
             logger.warning("No keywords for campaign %s. Nothing to discover.", campaign_uuid)
-            return
+            return []
         
-        # This set tracks (rss_url or api_id) for media items processed (fetched/enriched/upserted)
-        # across all keywords *for this specific campaign fetch run* to avoid redundant API calls and DB operations.
         processed_media_identifiers_this_run: set = set()
-        
-        # Stores details of all unique media found and upserted, along with the keyword that found them.
-        # Format: List of Dicts like {'media_id': int, 'keyword_source': str}
-        # We use a dictionary here to ensure media_id uniqueness and keep the first keyword that found it.
         unique_candidate_media_map: Dict[int, str] = {}
 
         logger.info(f"Phase 1: Discovering and upserting media for campaign {campaign_uuid} based on {len(keywords)} keywords.")
@@ -612,22 +610,22 @@ class MediaFetcher:
             
             logger.info(f"Discovering media for campaign '{campaign_uuid}', keyword: '{kw}'.")
             
-            # Generate ListenNotes Genre IDs
             listennotes_genre_ids = await self._generate_genre_ids_async(kw, str(campaign_uuid))
-            # Generate Podscan Category IDs
             podscan_category_ids = await self._generate_podscan_category_ids_async(kw, str(campaign_uuid))
             
-            # Search ListenNotes for this keyword (uses listennotes_genre_ids)
             ln_media_ids = await self.search_listen_notes_for_media(kw, listennotes_genre_ids, campaign_uuid, processed_media_identifiers_this_run)
             for media_id_from_ln in ln_media_ids: 
                 if media_id_from_ln not in unique_candidate_media_map: 
                     unique_candidate_media_map[media_id_from_ln] = kw
+                    if media_id_from_ln not in newly_created_media_ids: # Track all unique new IDs
+                        newly_created_media_ids.append(media_id_from_ln)
 
-            # Search Podscan for this keyword (uses podscan_category_ids)
             ps_media_ids = await self.search_podscan_for_media(kw, campaign_uuid, processed_media_identifiers_this_run, podscan_category_ids_override=podscan_category_ids)
             for media_id_from_ps in ps_media_ids: 
                 if media_id_from_ps not in unique_candidate_media_map: 
                     unique_candidate_media_map[media_id_from_ps] = kw
+                    if media_id_from_ps not in newly_created_media_ids:
+                        newly_created_media_ids.append(media_id_from_ps)
             
             logger.info(f"Finished media discovery for keyword '{kw}' for campaign {campaign_uuid}.")
             await asyncio.sleep(KEYWORD_PROCESSING_DELAY) 
@@ -635,21 +633,17 @@ class MediaFetcher:
         logger.info(f"Phase 1 (Media Discovery) completed for campaign {campaign_uuid}. "
                     f"{len(unique_candidate_media_map)} unique media items identified and upserted.")
 
-        # Phase 2: Create Match Suggestions, respecting the max_matches limit for this run
         new_matches_created_this_run = 0
         if not unique_candidate_media_map:
             logger.info(f"No new or existing media candidates found for campaign {campaign_uuid}. No match suggestions to create.")
         else:
             logger.info(f"Phase 2: Creating match suggestions for campaign {campaign_uuid} from {len(unique_candidate_media_map)} candidates. Limit for this run: {max_matches if max_matches is not None else 'unlimited'}.")
-        
-            # The create_match_suggestions method internally checks if a suggestion already exists for this (campaign, media) pair.
-            # We iterate through the unique media found in this discovery run.
+            
             for media_id_map_key, originating_keyword in unique_candidate_media_map.items(): 
                 if max_matches is not None and new_matches_created_this_run >= max_matches:
                     logger.info(f"Reached max_matches limit ({max_matches}) for new suggestions for campaign {campaign_uuid}. Halting further suggestion creation for this run.")
                     break
                 
-                # The keyword passed is the first one that identified this media in this run
                 created_new_suggestion = await self.create_match_suggestions(media_id_map_key, campaign_uuid, originating_keyword)
                 
                 if created_new_suggestion:
@@ -660,6 +654,8 @@ class MediaFetcher:
 
         logger.info(f"Discovery and Match Suggestion process COMPLETED for campaign {campaign_uuid}. "
                     f"Total new match suggestions created in this run: {new_matches_created_this_run}")
+        
+        return newly_created_media_ids
 
     async def admin_discover_and_process_podcasts(
         self,

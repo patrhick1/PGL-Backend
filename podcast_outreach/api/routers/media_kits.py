@@ -10,6 +10,7 @@ from podcast_outreach.api.dependencies import get_current_user, get_admin_user, 
 from podcast_outreach.database.queries import campaigns as campaign_queries # For auth check
 from podcast_outreach.database.queries import media_kits as media_kit_queries # ADDED THIS IMPORT
 from podcast_outreach.logging_config import get_logger
+from podcast_outreach.api.schemas.media_kit_schemas import MediaKitImageAddRequest
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -119,3 +120,52 @@ async def get_public_media_kit_by_slug(slug: str):
     if not media_kit or not media_kit.get("is_public"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media kit not found or is not public.")
     return mk_schemas.MediaKitInDB(**media_kit) 
+
+@router.post("/campaigns/{campaign_id}/media-kit/images", response_model=mk_schemas.MediaKitInDB, tags=["Media Kits - Campaign Specific"])
+async def add_media_kit_image(
+    campaign_id: uuid.UUID,
+    request_data: MediaKitImageAddRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Adds a new image URL (headshot or logo) to a campaign's media kit.
+    This is called *after* the image has been uploaded to S3.
+    """
+    # Authorization check
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found.")
+    if user.get("role") == "client" and campaign.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=403, detail="Access denied to this media kit.")
+
+    # Get existing media kit
+    kit = await media_kit_queries.get_media_kit_by_campaign_id_from_db(campaign_id)
+    if not kit:
+        raise HTTPException(status_code=404, detail="Media kit not found for this campaign.")
+
+    update_payload = {}
+    image_url_str = str(request_data.image_url)
+
+    if request_data.image_type == 'headshot':
+        # Safely handle the headshots array
+        current_headshots = kit.get("headshot_image_urls") or []
+        if not isinstance(current_headshots, list):
+            current_headshots = []
+        
+        if image_url_str not in current_headshots:
+            current_headshots.append(image_url_str)
+        
+        update_payload["headshot_image_urls"] = current_headshots
+
+    elif request_data.image_type == 'logo':
+        update_payload["logo_image_url"] = image_url_str
+    
+    else:
+        raise HTTPException(status_code=400, detail="Invalid image_type. Must be 'headshot' or 'logo'.")
+
+    # Update the database
+    updated_kit = await media_kit_queries.update_media_kit_in_db(kit['media_kit_id'], update_payload)
+    if not updated_kit:
+        raise HTTPException(status_code=500, detail="Failed to add image to media kit.")
+
+    return updated_kit

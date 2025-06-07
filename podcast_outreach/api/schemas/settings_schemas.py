@@ -1,5 +1,5 @@
 # podcast_outreach/api/schemas/settings_schemas.py
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, HttpUrl
 from typing import Optional
 
 class NotificationSettingsUpdate(BaseModel):
@@ -27,3 +27,6 @@ class AccountDeletionResponse(BaseModel):
 
 class AccountDeletionConfirm(BaseModel):
     token: str = Field(..., description="Deletion confirmation token received via email")
+
+class ProfileImageUpdateRequest(BaseModel):
+    profile_image_url: HttpUrl

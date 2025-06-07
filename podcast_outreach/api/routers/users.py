@@ -34,6 +34,8 @@ from podcast_outreach.config import ( # For default allowances
     FREE_PLAN_DAILY_DISCOVERY_LIMIT, FREE_PLAN_WEEKLY_DISCOVERY_LIMIT
 )
 from podcast_outreach.services.tasks.manager import task_manager
+from ..schemas.settings_schemas import ProfileImageUpdateRequest # Import the new schema
+from ..schemas.person_schemas import PersonInDB # Ensure this is imported
 
 logger = get_logger(__name__)
 
@@ -503,3 +505,26 @@ async def admin_get_client_profile(person_id: int, admin_user: dict = Depends(ge
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client profile not found for this person.")
     return client_profile_schemas.ClientProfileInDB(**profile)
+
+@router.patch("/me/profile-image", response_model=PersonInDB, summary="Update My Profile Image")
+async def update_my_profile_image(
+    update_data: ProfileImageUpdateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Updates the profile_image_url for the currently authenticated user.
+    This endpoint is called *after* the image has been uploaded to S3.
+    """
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=401, detail="User not authenticated.")
+
+    updated_person = await people_queries.update_person_in_db(
+        person_id,
+        {"profile_image_url": str(update_data.profile_image_url)}
+    )
+
+    if not updated_person:
+        raise HTTPException(status_code=500, detail="Failed to update profile image URL.")
+
+    return PersonInDB(**updated_person)

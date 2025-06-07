@@ -16,7 +16,7 @@ click==8.2.1
 colorama==0.4.6
 dateutils==0.6.12
 distro==1.9.0
-fastapi==0.100.0
+fastapi==0.103.1
 filetype==1.2.0
 frozenlist==1.6.0
 google-ai-generativelanguage==0.6.15
@@ -94,6 +94,7 @@ yarl==1.20.0
 zstandard==0.23.0
 email-validator==2.2.0
 dnspython==2.7.0
+boto3
 
 # Dev dependencies
 pytest==7.0.0

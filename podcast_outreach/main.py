@@ -39,7 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
 from starlette.middleware.sessions import SessionMiddleware # Import SessionMiddleware
 
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates, episodes as episodes_router
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates,storage as storage_router, episodes as episodes_router
 # Add the new public_lead_magnet router import
 from podcast_outreach.api.routers import public_lead_magnet
 
@@ -198,6 +198,7 @@ templates.env.filters["format_datetime"] = format_datetime
 app.mount("/static", StaticFiles(directory="podcast_outreach/static"), name="static") # Explicitly set path
 
 # Include API routers
+app.include_router(storage_router.router)
 app.include_router(campaigns.router)
 app.include_router(matches.router)
 app.include_router(media.router)
@@ -215,8 +216,8 @@ app.include_router(client.router)
 app.include_router(media_kits.router)
 app.include_router(pitch_templates.router)
 app.include_router(episodes_router.router)
-# Include the new public_lead_magnet router
 app.include_router(public_lead_magnet.router)
+
 
 @app.get("/login")
 def login_page(request: Request):
