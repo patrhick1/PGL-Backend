@@ -27,18 +27,9 @@ from .quality_score import QualityService
 
 # Import modular DB connection for main execution block
 from podcast_outreach.database.connection import init_db_pool, close_db_pool 
+from podcast_outreach.config import ORCHESTRATOR_CONFIG
 
 logger = logging.getLogger(__name__)
-
-# Configuration for the orchestrator
-ORCHESTRATOR_CONFIG = {
-    "media_enrichment_batch_size": 10,
-    "media_enrichment_interval_hours": 24 * 7,  # Re-enrich media older than 1 week
-    "quality_score_min_transcribed_episodes": 3,
-    "quality_score_update_interval_days": 7, # Re-calculate quality scores for media if last score is older than this
-    "max_transcription_flags_per_media": 4, # Max episodes to flag for transcription per media item
-    "main_loop_sleep_seconds": 300 # Sleep duration for the main orchestrator loop if run continuously
-}
 
 class EnrichmentOrchestrator:
     """Orchestrates the end-to-end podcast data enrichment and quality scoring pipeline."""

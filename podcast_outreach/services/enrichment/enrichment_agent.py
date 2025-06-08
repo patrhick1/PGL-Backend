@@ -293,8 +293,32 @@ class EnrichmentAgent:
         if not self.social_discovery_service:
             logger.warning("SocialDiscoveryService not available. Skipping social media scraping.")
         else:
-            # ... (the social scraping logic remains the same) ...
-            pass
+            # --- NEW FIX: Add the actual scraping logic here ---
+            logger.info(f"Scraping social media URLs for media_id: {media_id}")
+            
+            # Create tasks for each platform that has URLs to scrape
+            scraping_tasks = []
+            if urls_to_scrape['twitter']:
+                scraping_tasks.append(self.social_discovery_service.get_twitter_data_for_urls(list(urls_to_scrape['twitter'])))
+            if urls_to_scrape['instagram']:
+                scraping_tasks.append(self.social_discovery_service.get_instagram_data_for_urls(list(urls_to_scrape['instagram'])))
+            if urls_to_scrape['tiktok']:
+                scraping_tasks.append(self.social_discovery_service.get_tiktok_data_for_urls(list(urls_to_scrape['tiktok'])))
+            # Add other platforms like linkedin_company if implemented
+
+            # Run all scraping tasks concurrently
+            if scraping_tasks:
+                results_list = await asyncio.gather(*scraping_tasks, return_exceptions=True)
+                
+                # Process results and merge them into social_scraping_results
+                for result in results_list:
+                    if isinstance(result, dict):
+                        social_scraping_results.update(result)
+                    elif isinstance(result, Exception):
+                        logger.error(f"A social scraping task failed: {result}")
+            
+            logger.info(f"Social scraping finished. Found data for {len(social_scraping_results)} profiles.")
+            # --- END OF NEW FIX ---
         
         if not self.data_merger_service:
             logger.error("DataMergerService not available. Cannot produce final EnrichedPodcastProfile.")

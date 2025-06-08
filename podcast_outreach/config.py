@@ -47,8 +47,8 @@ PORT = int(os.getenv("PORT"))
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")
 
-FREE_PLAN_DAILY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_DAILY_DISCOVERY_LIMIT", "10"))
-FREE_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_WEEKLY_DISCOVERY_LIMIT", "50"))
+FREE_PLAN_DAILY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_DAILY_DISCOVERY_LIMIT", 20))
+FREE_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_WEEKLY_DISCOVERY_LIMIT", 50))
 
 PAID_PLAN_DAILY_DISCOVERY_LIMIT = int(os.getenv("PAID_PLAN_DAILY_DISCOVERY_LIMIT", "100")) # Example
 PAID_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("PAID_PLAN_WEEKLY_DISCOVERY_LIMIT", "500")) # Example
@@ -57,3 +57,13 @@ PAID_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("PAID_PLAN_WEEKLY_DISCOVERY_LIM
 LISTENNOTES_PAGE_SIZE = int(os.getenv("LISTENNOTES_PAGE_SIZE", "10"))
 PODSCAN_PAGE_SIZE = int(os.getenv("PODSCAN_PAGE_SIZE", "10"))
 API_CALL_DELAY = float(os.getenv("API_CALL_DELAY", "1.0")) # Delay in seconds between API calls for rate limiting
+
+# Configuration for the enrichment orchestrator
+ORCHESTRATOR_CONFIG = {
+    "media_enrichment_batch_size": 10,
+    "media_enrichment_interval_hours": 24 * 7,  # Re-enrich media older than 1 week
+    "quality_score_min_transcribed_episodes": 3,
+    "quality_score_update_interval_days": 7, # Re-calculate quality scores for media if last score is older than this
+    "max_transcription_flags_per_media": 4, # Max episodes to flag for transcription per media item
+    "main_loop_sleep_seconds": 300 # Sleep duration for the main orchestrator loop if run continuously
+}

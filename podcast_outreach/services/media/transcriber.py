@@ -17,11 +17,14 @@ import time
 from functools import partial
  
 # Import modular queries
-from podcast_outreach.database.queries import episodes as episode_queries
+from podcast_outreach.database.queries import episodes as episode_queries, media as media_queries
 from podcast_outreach.database.connection import get_db_pool, close_db_pool # For main function
 from podcast_outreach.services.ai.openai_client import OpenAIService # Added for embeddings
 from podcast_outreach.services.matches.match_creation import MatchCreationService # Added for triggering matching
 from podcast_outreach.database.queries import campaigns as campaign_queries # Added for fetching campaigns
+from podcast_outreach.services.enrichment.quality_score import QualityService
+from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
+from podcast_outreach.config import ORCHESTRATOR_CONFIG
 
 # Configure logging for the MediaTranscriber class
 logger = logging.getLogger(__name__)
@@ -501,6 +504,40 @@ async def process_single_episode_for_transcription(
                     logger.warning(f"MediaAnalyzerService returned no result for episode {episode['episode_id']}")
             except Exception as e_analyze:
                 logger.error(f"Error during MediaAnalyzerService processing for episode {episode['episode_id']}: {e_analyze}", exc_info=True)
+
+        # --- NEW LOGIC: Trigger quality score update ---
+        if updated_episode: # Check if the DB update was successful
+            media_id_for_quality_check = updated_episode.get('media_id')
+            if media_id_for_quality_check:
+                try:
+                    # Check if the podcast now meets the criteria for scoring
+                    transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id_for_quality_check)
+                    
+                    # Use the threshold from your config
+                    min_episodes_needed = ORCHESTRATOR_CONFIG.get("quality_score_min_transcribed_episodes", 3)
+
+                    if transcribed_count >= min_episodes_needed:
+                        logger.info(f"Media {media_id_for_quality_check} now has {transcribed_count} transcribed episodes. Triggering quality score update.")
+                        
+                        # Fetch the full, updated media record for scoring
+                        media_data_for_scoring = await media_queries.get_media_by_id_from_db(media_id_for_quality_check)
+                        
+                        if media_data_for_scoring:
+                            quality_service = QualityService()
+                            profile = EnrichedPodcastProfile(**media_data_for_scoring)
+                            score, _ = quality_service.calculate_podcast_quality_score(profile)
+                            
+                            if score is not None:
+                                await media_queries.update_media_quality_score(media_id_for_quality_check, score)
+                                logger.info(f"Automatically updated quality score for media {media_id_for_quality_check} to {score}.")
+                        else:
+                            logger.warning(f"Could not fetch media data for {media_id_for_quality_check} to update quality score.")
+                    else:
+                        logger.info(f"Media {media_id_for_quality_check} has {transcribed_count}/{min_episodes_needed} transcribed episodes. Deferring quality score update.")
+
+                except Exception as e_quality:
+                    logger.error(f"Error during automatic quality score update for media {media_id_for_quality_check}: {e_quality}", exc_info=True)
+        # --- END OF NEW LOGIC ---
 
     except FileNotFoundError:
         logger.error(f"File not found for episode_id {episode['episode_id']}: {episode['episode_url']}")
