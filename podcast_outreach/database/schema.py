@@ -168,6 +168,7 @@ def create_media_table(conn):
  
         -- existing core fields
         name                      TEXT,
+        title                     TEXT,
         rss_url                   TEXT,
         category                  TEXT,
         language                  VARCHAR(50),
@@ -186,13 +187,11 @@ def create_media_table(conn):
         -- new profile_data fields from EnrichedPodcastProfile
         source_api                TEXT,
         api_id                    TEXT UNIQUE, -- NEW: Make api_id unique for easier lookup
-        title                     TEXT,
         website                   TEXT,
         podcast_spotify_id        TEXT,
         itunes_id                 TEXT,
         total_episodes            INTEGER,
         last_posted_at            TIMESTAMPTZ, -- This is likely redundant with latest_episode_date, consider removing one
-        rss_feed_url              TEXT, -- Redundant with rss_url, but keeping for now
         listen_score              REAL,
         listen_score_global_rank  INTEGER,
         audience_size             INTEGER,
@@ -224,17 +223,42 @@ def create_media_table(conn):
         youtube_subscribers       INTEGER,
         publishing_frequency_days REAL,
         last_enriched_timestamp   TIMESTAMPTZ, -- When was this record last enriched
+        -- NEW: Data Provenance & Confidence Fields
+        website_source            TEXT, -- e.g., 'api_listennotes', 'llm_discovery', 'manual'
+        website_confidence        NUMERIC(3, 2), -- e.g., 1.00 for manual, 0.90 for API, 0.60 for LLM
+        contact_email_source      TEXT,
+        contact_email_confidence  NUMERIC(3, 2),
+        host_names_source         TEXT,
+        host_names_confidence     NUMERIC(3, 2),
+        -- (Add more source/confidence pairs for other volatile fields like social URLs if needed)
+
+        -- NEW: Manual Override Tracking
+        last_manual_update_ts     TIMESTAMPTZ,
+
+        -- NEW: Selective Enrichment Tracking
+        social_stats_last_fetched_at TIMESTAMPTZ,
+
+        -- NEW: Granular Quality Score Metrics
+        quality_score             NUMERIC,     -- The final, weighted score
+        quality_score_recency     NUMERIC,     -- Component score for recency
+        quality_score_frequency   NUMERIC,     -- Component score for frequency
+        quality_score_audience    NUMERIC,     -- Component score for audience metrics
+        quality_score_social      NUMERIC,     -- Component score for social presence
+        quality_score_last_calculated TIMESTAMPTZ, -- When the score was last calculated
+        
         -- NEW FIELDS FOR ENRICHMENT SUPPORT
-        quality_score             NUMERIC,     -- Calculated quality score
         first_episode_date        DATE         -- When the podcast first published an episode
     );
  
     CREATE INDEX IF NOT EXISTS idx_media_company_id           ON media (company_id);
     CREATE INDEX IF NOT EXISTS idx_media_embedding_hnsw       ON media USING hnsw (embedding vector_cosine_ops);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_media_api_id        ON media (api_id);
+    -- NEW INDEXES
+    CREATE INDEX IF NOT EXISTS idx_media_last_enriched_ts     ON media (last_enriched_timestamp);
+    CREATE INDEX IF NOT EXISTS idx_media_social_stats_fetched ON media (social_stats_last_fetched_at);
     """
     execute_sql(conn, sql_statement)
-    print("Table MEDIA created/ensured with extended profile_data columns.")
+    print("Table MEDIA created/ensured with extended provenance and quality score columns.")
     apply_timestamp_update_trigger(conn, "media") # NEW: Apply trigger to media table
  
  

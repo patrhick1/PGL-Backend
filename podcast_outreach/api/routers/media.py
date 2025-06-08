@@ -1,9 +1,9 @@
 # podcast_outreach/api/routers/media.py
 
 import uuid
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Import schemas
 from ..schemas.media_schemas import MediaCreate, MediaUpdate, MediaInDB, AdminDiscoveryRequestSchema
@@ -74,13 +74,28 @@ async def get_media_api(media_id: int, user: dict = Depends(get_current_user)):
 @router.put("/{media_id}", response_model=MediaInDB, summary="Update Media (Podcast)")
 async def update_media_api(media_id: int, media_update_data: MediaUpdate, user: dict = Depends(get_admin_user)):
     """
-    Updates an existing media (podcast) record. Admin access required.
+    Manually updates an existing media record. This action flags the updated fields
+    as 'manual' with the highest confidence, protecting them from being overwritten by automation.
     """
     update_data = media_update_data.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update data provided.")
+
+    # --- NEW LOGIC for Manual Updates ---
+    update_data_with_provenance = {}
+    for key, value in update_data.items():
+        update_data_with_provenance[key] = value
+        # Set source and confidence for the field being updated
+        update_data_with_provenance[f"{key}_source"] = "manual"
+        update_data_with_provenance[f"{key}_confidence"] = 1.0
+    
+    # Flag that a manual update occurred
+    update_data_with_provenance["last_manual_update_ts"] = datetime.now(timezone.utc)
+    # --- END NEW LOGIC ---
+
     try:
-        updated_db_media = await media_queries.update_media_in_db(media_id, update_data)
+        # Use the modified payload with provenance data
+        updated_db_media = await media_queries.update_media_in_db(media_id, update_data_with_provenance)
         if not updated_db_media:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Media with ID {media_id} not found or update failed.")
         return MediaInDB(**updated_db_media)
@@ -101,6 +116,25 @@ async def delete_media_api(media_id: int, user: dict = Depends(get_admin_user)):
     except Exception as e:
         logger.exception(f"Error in delete_media_api for ID {media_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+# NEW endpoint to trigger enrichment for a single podcast
+@router.post("/{media_id}/enrich", status_code=status.HTTP_202_ACCEPTED, summary="Trigger Full Enrichment for a Single Podcast")
+async def trigger_single_enrichment(media_id: int, background_tasks: BackgroundTasks, user: dict = Depends(get_admin_user)):
+    """
+    Triggers a full, non-blocking background task to re-enrich a single media record.
+    This is useful for manually refreshing a specific podcast's data.
+    """
+    media_record = await media_queries.get_media_by_id_from_db(media_id)
+    if not media_record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found.")
+
+    # This re-uses the standalone enrichment task function from discovery.py
+    from podcast_outreach.services.enrichment.discovery import _run_full_enrichment_task
+
+    logger.info(f"Admin user {user['username']} triggered manual enrichment for media_id: {media_id}")
+    background_tasks.add_task(_run_full_enrichment_task, media_id)
+    
+    return {"message": "Enrichment task started in the background.", "media_id": media_id}
 
 @router.post("/discover-admin", response_model=List[MediaInDB], summary="Admin Discover Podcasts")
 async def admin_discover_podcasts_api(

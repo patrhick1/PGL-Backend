@@ -226,23 +226,20 @@ class QualityService:
             social_score * weights["social_score"]
         )
         
-        # Final score scaled to 0-100
-        final_quality_score = round(max(0.0, min(overall_score_0_to_1 * 100, 100))) 
+        # Final score scaled to 0-100, kept as float
+        final_quality_score = max(0.0, min(overall_score_0_to_1 * 100, 100))
 
         detailed_metrics = {
-            "podcast_id": profile.api_id or profile.unified_profile_id,
-            "title": profile.title,
-            "final_quality_score": final_quality_score,
-            "recency_score_component": recency_score,
-            "days_since_last_episode": days_since_last,
-            "frequency_score_component": frequency_score,
-            "average_frequency_days": avg_freq_days,
-            "audience_score_component": audience_score,
-            "social_score_component": social_score,
-            "calculation_timestamp": datetime.utcnow().isoformat()
+            "quality_score": final_quality_score,
+            "quality_score_recency": recency_score,
+            "quality_score_frequency": frequency_score,
+            "quality_score_audience": audience_score,
+            "quality_score_social": social_score,
+            "quality_score_last_calculated": datetime.utcnow()
         }
         
         logger.info(f"Quality score for '{profile.title}': {final_quality_score}. Details: {detailed_metrics}")
+        # The first element of the tuple is still the final score for convenience
         return final_quality_score, detailed_metrics
 
 # Example Usage (for direct testing of this service module)
