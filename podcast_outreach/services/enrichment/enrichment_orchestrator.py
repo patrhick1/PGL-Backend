@@ -7,26 +7,18 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 # Import specific query functions from the modular queries packages
 from podcast_outreach.database.queries import media as media_queries
-from podcast_outreach.database.queries.media import (
-    get_media_for_enrichment,
-    update_media_enrichment_data,
-    update_media_quality_score,
-    count_transcribed_episodes_for_media,
-    get_media_for_social_refresh,
-    get_media_for_quality_score_update,
-)
-from podcast_outreach.database.queries.episodes import (
-    flag_specific_episodes_for_transcription,
-)
+from podcast_outreach.database.queries.episodes import flag_specific_episodes_for_transcription
+from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
 
 # Import services
 from .enrichment_agent import EnrichmentAgent
 from .quality_score import QualityService
+from .social_scraper import SocialDiscoveryService
 
 # Import modular DB connection for main execution block
 from podcast_outreach.database.connection import init_db_pool, close_db_pool 
@@ -39,10 +31,12 @@ class EnrichmentOrchestrator:
 
     def __init__(self,
                  enrichment_agent: EnrichmentAgent,
-                 quality_service: QualityService):
+                 quality_service: QualityService,
+                 social_discovery_service: SocialDiscoveryService):
         self.enrichment_agent = enrichment_agent
         self.quality_service = quality_service
-        logger.info("EnrichmentOrchestrator initialized with EnrichmentAgent and QualityService.")
+        self.social_discovery_service = social_discovery_service
+        logger.info("EnrichmentOrchestrator initialized with EnrichmentAgent, QualityService, and SocialDiscoveryService.")
 
     async def run_social_stats_refresh(self, batch_size: int = 20):
         """Refreshes only social media follower counts for stale records."""
@@ -57,30 +51,49 @@ class EnrichmentOrchestrator:
             media_id = media_data['media_id']
             logger.info(f"Refreshing social stats for media_id: {media_id}")
             
-            if not self.enrichment_agent.social_discovery_service:
-                logger.warning(f"SocialDiscoveryService not available, skipping social refresh for media_id: {media_id}")
-                continue
-
-            # This part is simplified. A dedicated agent method would be cleaner.
-            # It re-uses logic from the EnrichmentAgent's main method.
             try:
-                enriched_profile = await self.enrichment_agent.enrich_podcast_profile(media_data)
-                if enriched_profile:
-                    update_data = enriched_profile.model_dump(exclude_none=True)
-                    
-                    social_fields = [
-                        'twitter_followers', 'twitter_following', 'is_twitter_verified',
-                        'instagram_followers', 'tiktok_followers', 'youtube_subscribers',
-                        'facebook_likes'
-                    ]
-                    final_update = {k: v for k, v in update_data.items() if k in social_fields}
-                    final_update["social_stats_last_fetched_at"] = datetime.now(timezone.utc)
-                    
-                    await update_media_enrichment_data(media_id, final_update)
-                    logger.info(f"Successfully updated social stats for media_id: {media_id}")
-                else:
-                    # Still update timestamp to avoid immediate re-checking
-                    await update_media_enrichment_data(media_id, {"social_stats_last_fetched_at": datetime.now(timezone.utc)})
+                social_urls_to_scrape = {
+                    "twitter": media_data.get("podcast_twitter_url"),
+                    "instagram": media_data.get("podcast_instagram_url"),
+                    "tiktok": media_data.get("podcast_tiktok_url"),
+                    "linkedin": media_data.get("podcast_linkedin_url"),
+                }
+                
+                update_payload = {}
+                
+                # Twitter
+                if url := social_urls_to_scrape.get("twitter"):
+                    twitter_data_map = await self.social_discovery_service.get_twitter_data_for_urls([url])
+                    if twitter_data_map and (twitter_data := twitter_data_map.get(url)):
+                        update_payload["twitter_followers"] = twitter_data.get('followers_count')
+
+                # Instagram
+                if url := social_urls_to_scrape.get("instagram"):
+                    insta_data_map = await self.social_discovery_service.get_instagram_data_for_urls([url])
+                    if insta_data_map and (insta_data := insta_data_map.get(url)):
+                        update_payload["instagram_followers"] = insta_data.get('followers_count')
+                
+                # TikTok
+                if url := social_urls_to_scrape.get("tiktok"):
+                    tiktok_data_map = await self.social_discovery_service.get_tiktok_data_for_urls([url])
+                    if tiktok_data_map and (tiktok_data := tiktok_data_map.get(url)):
+                        update_payload["tiktok_followers"] = tiktok_data.get('followers_count')
+
+                # LinkedIn
+                if url := social_urls_to_scrape.get("linkedin"):
+                    linkedin_data_map = await self.social_discovery_service.get_linkedin_data_for_urls([url])
+                    if linkedin_data_map and (linkedin_data := linkedin_data_map.get(url)):
+                        update_payload["linkedin_connections"] = linkedin_data.get('followers_count') or linkedin_data.get('connections_count')
+
+                # Always update the timestamp to prevent immediate re-checking
+                update_payload["social_stats_last_fetched_at"] = datetime.now(timezone.utc)
+                
+                if len(update_payload) > 1: # Only update if new data was actually fetched
+                    await media_queries.update_media_in_db(media_id, update_payload)
+                    logger.info(f"Successfully updated social stats for media_id: {media_id}. Payload: {update_payload}")
+                else: # Otherwise, just update the timestamp
+                    await media_queries.update_media_in_db(media_id, {"social_stats_last_fetched_at": datetime.now(timezone.utc)})
+
             except Exception as e:
                 logger.error(f"Error refreshing social stats for media_id {media_id}: {e}", exc_info=True)
             await asyncio.sleep(0.5)
@@ -95,7 +108,6 @@ class EnrichmentOrchestrator:
             logger.info("No new media items found needing core details enrichment.")
             return
         
-        # This logic is copied from the old _enrich_media_batch
         for media_data_dict in media_to_enrich:
             media_id = media_data_dict.get('media_id')
             try:
@@ -110,7 +122,7 @@ class EnrichmentOrchestrator:
                     if 'primary_email' in update_data: update_data['contact_email'] = update_data.pop('primary_email')
                     if 'rss_feed_url' in update_data: update_data['rss_url'] = update_data.pop('rss_feed_url')
 
-                    await update_media_enrichment_data(media_id, update_data)
+                    await media_queries.update_media_in_db(media_id, update_data)
                     logger.info(f"Successfully ran core enrichment for new media_id: {media_id}")
                 else:
                     logger.warning(f"Core enrichment returned no profile for media_id: {media_id}.")
@@ -131,14 +143,12 @@ class EnrichmentOrchestrator:
         for media_data in media_to_score:
             media_id = media_data['media_id']
             try:
-                from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
                 profile = EnrichedPodcastProfile(**media_data)
                 
                 _, score_components = self.quality_service.calculate_podcast_quality_score(profile)
                 
                 if score_components:
-                    # The dictionary of scores is passed directly to the update function
-                    await update_media_enrichment_data(media_id, score_components)
+                    await media_queries.update_media_in_db(media_id, score_components)
                     logger.info(f"Updated quality score components for media_id: {media_id}")
                 else:
                     logger.warning(f"Quality score calculation returned no components for media_id: {media_id}")
@@ -152,8 +162,7 @@ class EnrichmentOrchestrator:
         """Identifies media that might need new episodes flagged for transcription."""
         logger.info("Checking for media items to flag new episodes for transcription...")
         
-        # This logic can be refined to only check media that had recent episode syncs
-        media_to_check = await get_media_for_enrichment(
+        media_to_check = await media_queries.get_media_for_enrichment(
             batch_size=100,
             enriched_before_hours=24 * 30 # Check even if not recently enriched
         )
@@ -189,10 +198,9 @@ class EnrichmentOrchestrator:
 
         logger.info(f"Starting quality score update for single media_id: {media_id}")
         try:
-            transcribed_count = await count_transcribed_episodes_for_media(media_id)
+            transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id)
             
             if transcribed_count >= ORCHESTRATOR_CONFIG["quality_score_min_transcribed_episodes"]:
-                from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
                 try:
                     profile_for_scoring = EnrichedPodcastProfile(**media_data_dict)
                 except Exception as val_err:
@@ -202,7 +210,7 @@ class EnrichmentOrchestrator:
                 quality_score_val, score_components = self.quality_service.calculate_podcast_quality_score(profile_for_scoring)
                 
                 if score_components:
-                    success = await update_media_enrichment_data(media_id, score_components)
+                    success = await media_queries.update_media_in_db(media_id, score_components)
                     if success:
                         logger.info(f"Successfully updated quality score for media_id: {media_id} to {quality_score_val}")
                     else:
@@ -255,10 +263,7 @@ if __name__ == '__main__':
 
         try:
             from podcast_outreach.services.ai.gemini_client import GeminiService
-            from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
             from podcast_outreach.services.enrichment.data_merger import DataMergerService
-            from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
-            from podcast_outreach.services.enrichment.quality_score import QualityService
 
             gemini_service = GeminiService()
             social_discovery_service = SocialDiscoveryService()
@@ -267,7 +272,7 @@ if __name__ == '__main__':
             enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
             quality_service = QualityService()
             
-            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service)
+            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
             
             await orchestrator.run_pipeline_once()
             
