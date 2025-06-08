@@ -24,13 +24,7 @@ class EmailService:
         self.frontend_url = os.getenv('FRONTEND_ORIGIN', 'http://localhost:5173')
         
         # Debug logging
-        logger.info(f"Email service initialized:")
-        logger.info(f"  SMTP Server: {self.smtp_server}")
-        logger.info(f"  SMTP Port: {self.smtp_port}")
-        logger.info(f"  SMTP Username: {self.smtp_username}")
-        logger.info(f"  From Email: {self.from_email}")
-        logger.info(f"  Frontend URL: {self.frontend_url}")
-        logger.info(f"  Has Password: {bool(self.smtp_password)}")
+        logger.info(f"Email service initialized for from_email: {self.from_email}")
     
     async def send_password_reset_email(self, to_email: str, reset_token: str) -> bool:
         """Send password reset email with reset link"""

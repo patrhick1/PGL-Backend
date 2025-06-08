@@ -218,7 +218,7 @@ async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, A
     values = []
     idx = 1
     for key, val in update_fields.items():
-        if key in ["media_id", "created_at", "updated_at"]: continue # Don't update these
+        if key in ["media_id", "created_at", "updated_at", "last_enriched_timestamp"]: continue
         set_clauses.append(f"{key} = ${idx}")
         values.append(val)
         idx += 1

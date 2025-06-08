@@ -1,9 +1,13 @@
 import logging
+import os
 import sys
 from logging.config import dictConfig
 
-# Force DEBUG level for this debugging session
-FORCED_LOG_LEVEL = "DEBUG" # Changed from podcast_outreach.config import LOG_LEVEL
+# Change this to "INFO" for less verbose logs, "DEBUG" for detailed development logs
+FORCED_LOG_LEVEL = "INFO"
+
+# Get log level from environment variable, fallback to the forced level
+LOG_LEVEL = os.environ.get("LOG_LEVEL", FORCED_LOG_LEVEL).upper()
 
 LOGGING_CONFIG = {
     "version": 1,

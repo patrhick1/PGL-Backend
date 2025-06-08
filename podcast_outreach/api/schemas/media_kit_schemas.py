@@ -1,9 +1,13 @@
 # podcast_outreach/api/schemas/media_kit_schemas.py
 import uuid
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 from datetime import datetime
 from pydantic import EmailStr
+
+class MediaKitImageAddRequest(BaseModel):
+    image_url: HttpUrl
+    image_type: str # 'headshot' or 'logo'
 
 # --- Define CustomSection before MediaKitBase ---
 class CustomSectionSchema(BaseModel):

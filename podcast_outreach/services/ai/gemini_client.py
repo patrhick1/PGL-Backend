@@ -223,18 +223,23 @@ class GeminiService:
             try:
                 start_time = time.time()
 
+                # Convert the list of safety settings into the dictionary format LangChain expects
+                safety_settings_dict = {
+                    item["category"]: item["threshold"] for item in self.DEFAULT_SAFETY_SETTINGS
+                }
+
                 llm_for_structured_output = ChatGoogleGenerativeAI(
                     model="gemini-2.0-flash",
                     google_api_key=GEMINI_API_KEY,
                     temperature=temperature,
                     max_output_tokens=2048, # Consider if this should be higher
-                    safety_settings=self.DEFAULT_SAFETY_SETTINGS # Apply safety settings
+                    safety_settings=safety_settings_dict # <-- Pass the correctly formatted dictionary
                 )
                 
                 chain = prompt_template | llm_for_structured_output.with_structured_output(output_model)
                 
                 # The input to invoke should match the input_variables of the prompt_template
-                response_obj = await asyncio.to_thread(chain.invoke, {"user_query": user_query})
+                response_obj = await asyncio.to_thread(chain.invoke, {"input_text": user_query})
 
                 execution_time = time.time() - start_time
                 tokens_in = len(approx_input_for_logging) // 4 
@@ -242,7 +247,7 @@ class GeminiService:
 
                 await ai_tracker.log_usage(
                     workflow=workflow,
-                    model=llm_for_structured_output.model_name, # Use the actual model name
+                    model=llm_for_structured_output.model, # Use the correct attribute 'model'
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     execution_time=execution_time,

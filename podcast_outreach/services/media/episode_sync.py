@@ -17,6 +17,7 @@ from podcast_outreach.database.connection import get_db_pool, close_db_pool # Us
 from podcast_outreach.integrations.podscan import PodscanAPIClient # Use new integration path
 from podcast_outreach.utils.exceptions import APIClientError # Use new utils path
 from podcast_outreach.utils.data_processor import parse_date as fallback_parse_date # Use new utils path
+from podcast_outreach.services.media.episode_handler import EpisodeHandlerService
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO,
@@ -276,9 +277,11 @@ class MediaFetcher: # Renamed from original fetch_episodes_to_pg.py's implicit s
             logger.info(f"[{media_name}] Trimming old episodes, keeping up to {EPISODES_TO_KEEP_PER_PODCAST}.")
             await episode_queries.delete_oldest_episodes(media_id, EPISODES_TO_KEEP_PER_PODCAST)
 
-            # 5. Flag EPISODES_TO_FLAG_FOR_TRANSCRIPTION most recent episodes for transcription
-            logger.info(f"[{media_name}] Flagging up to {EPISODES_TO_FLAG_FOR_TRANSCRIPTION} newest episodes for transcription.")
-            await episode_queries.flag_recent_episodes_for_transcription(media_id, EPISODES_TO_FLAG_FOR_TRANSCRIPTION)
+            # 5. Flag episodes to meet transcription goal using the robust handler
+            # This logic correctly re-uses the robust flagging from EpisodeHandlerService
+            handler_for_flagging = EpisodeHandlerService()
+            logger.info(f"[{media_name}] Intelligently flagging episodes to meet transcription goal of {EPISODES_TO_FLAG_FOR_TRANSCRIPTION}.")
+            await handler_for_flagging.flag_episodes_to_meet_transcription_goal(media_id, EPISODES_TO_FLAG_FOR_TRANSCRIPTION)
 
             # 6. Update last_fetched_at for the media item and latest_episode_date
             await media_queries.update_media_after_sync(media_id)

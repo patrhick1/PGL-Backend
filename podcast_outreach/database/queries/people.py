@@ -44,7 +44,7 @@ async def create_person_in_db(person_data: Dict[str, Any]) -> Optional[Dict[str,
     values_placeholders = [f"${i+1}" for i in range(len(columns))]
     
     insert_values = [
-        person_data.get('company_id'), person_data.get('full_name'), person_data['email'],
+        person_data.get('company_id'), person_data.get('full_name'), person_data.get('email'),
         person_data.get('linkedin_profile_url'), person_data.get('twitter_profile_url'),
         person_data.get('instagram_profile_url'), person_data.get('tiktok_profile_url'),
         person_data.get('dashboard_username'), person_data.get('dashboard_password_hash'),
@@ -77,10 +77,10 @@ async def create_person_in_db(person_data: Dict[str, Any]) -> Optional[Dict[str,
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *insert_values)
-            logger.info(f"Person created: {person_data.get('email')}")
+            logger.info(f"Person created: {person_data.get('full_name')} (Email: {person_data.get('email', 'N/A')})")
             return _process_person_row(row) # Use _process_person_row here
         except asyncpg.exceptions.UniqueViolationError:
-            logger.warning(f"Person with email {person_data['email']} already exists.")
+            logger.warning(f"Person with email {person_data.get('email')} already exists.")
             return None
         except Exception as e:
             logger.exception(f"Error creating person {person_data.get('email')} in DB: {e}")

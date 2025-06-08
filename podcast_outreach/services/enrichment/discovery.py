@@ -4,11 +4,87 @@ import logging
 from typing import List, Dict, Any, Optional
 import uuid # For campaign_id type
 import asyncio
+from pydantic import HttpUrl
 
 from podcast_outreach.services.media.podcast_fetcher import MediaFetcher
-from podcast_outreach.services.tasks.manager import task_manager # For triggering background tasks
+# Removed task_manager as we will run the orchestrator directly
+# from podcast_outreach.services.tasks.manager import task_manager
+
+# Imports to run enrichment directly
+from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
+from podcast_outreach.services.ai.gemini_client import GeminiService
+from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
+from podcast_outreach.services.enrichment.data_merger import DataMergerService
+from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
+from podcast_outreach.services.enrichment.quality_score import QualityService
+from podcast_outreach.database.queries import media as media_queries
 
 logger = logging.getLogger(__name__)
+
+async def _run_full_enrichment_task(media_id: int):
+    """
+    A standalone async function to run the full enrichment and scoring pipeline for one media item.
+    This is designed to be called as a non-blocking background task.
+    """
+    logger.info(f"Starting background enrichment task for media_id: {media_id}")
+    try:
+        # Initialize all the necessary services for the orchestrator
+        gemini_service = GeminiService()
+        social_discovery_service = SocialDiscoveryService()
+        data_merger = DataMergerService()
+        enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
+        quality_service = QualityService()
+        orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service)
+
+        # 1. Enrich media profile (social links, emails, etc.)
+        media_data = await media_queries.get_media_by_id_from_db(media_id)
+        if not media_data:
+            logger.error(f"Enrichment task failed: Media with id {media_id} not found.")
+            return
+
+        enriched_profile = await orchestrator.enrichment_agent.enrich_podcast_profile(media_data)
+        if enriched_profile:
+            # Convert the Pydantic model to a dictionary
+            update_data = enriched_profile.model_dump(exclude_none=True)
+            
+            # --- NEW FIX: Convert all HttpUrl objects to strings ---
+            for key, value in update_data.items():
+                if isinstance(value, HttpUrl):
+                    update_data[key] = str(value)
+            # --- END OF NEW FIX ---
+
+            fields_to_remove = ['unified_profile_id', 'recent_episodes', 'quality_score']
+            for field in fields_to_remove:
+                if field in update_data: del update_data[field]
+            if 'primary_email' in update_data:
+                update_data['contact_email'] = update_data.pop('primary_email')
+            if 'rss_feed_url' in update_data:
+                update_data['rss_url'] = update_data.pop('rss_feed_url')
+
+            await media_queries.update_media_enrichment_data(media_id, update_data)
+            logger.info(f"Successfully ran enrichment agent for media_id: {media_id}")
+        else:
+            logger.warning(f"Enrichment agent returned no profile for media_id: {media_id}.")
+
+        # 2. Update quality score
+        # Refetch data after enrichment to get the most current profile for scoring
+        refetched_media_data = await media_queries.get_media_by_id_from_db(media_id)
+        if refetched_media_data:
+            await orchestrator._update_quality_score_for_media(refetched_media_data)
+        
+        logger.info(f"Completed background enrichment task for media_id: {media_id}")
+
+    except Exception as e:
+        logger.error(f"Error in background enrichment task for media_id {media_id}: {e}", exc_info=True)
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Callback to log exceptions from background tasks."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass  # Task cancellation is expected, no need to log as an error.
+    except Exception as e:
+        logger.error(f"Exception in background task {task.get_name()}: {e}", exc_info=True)
 
 class DiscoveryService:
     """High level orchestration for podcast discovery and enrichment."""
@@ -34,20 +110,12 @@ class DiscoveryService:
         if newly_created_media_ids:
             logger.info(f"Triggering background enrichment for {len(newly_created_media_ids)} new media items.")
             for media_id in newly_created_media_ids:
-                # This uses the TaskManager to run the enrichment without blocking the main discovery flow.
-                # The 'full_enrichment_and_scoring' task needs to be defined in your task runner.
-                task_id = str(uuid.uuid4())
-                # We are not using the FastAPI router here, but directly interacting with the task manager logic.
-                # This assumes a function is registered in the task manager to handle this action.
-                task_manager.start_task(task_id, f"full_enrichment_for_media_{media_id}")
-                # In a real scenario, you'd have a worker system that picks up these tasks.
-                # For now, we can simulate this by running it in an asyncio task.
-                # This is a conceptual trigger; the actual implementation is in tasks.py and its runner.
-                logger.info(f"Conceptually triggered background task '{task_id}' for 'full_enrichment_and_scoring' on media_id: {media_id}")
-                # To actually run it now (for non-production testing):
-                # from podcast_outreach.services.tasks.manager import _run_full_enrichment_task # Example
-                # asyncio.create_task(_run_full_enrichment_task(media_id))
-
+                task_name = f"enrichment_media_{media_id}"
+                logger.info(f"Creating non-blocking asyncio task '{task_name}'...")
+                # This now creates a fire-and-forget asyncio task that runs the enrichment
+                # in the background without blocking the main discovery API response.
+                task = asyncio.create_task(_run_full_enrichment_task(media_id), name=task_name)
+                task.add_done_callback(_log_task_exception) # Add the callback here
 
         # Phase 3: Retrieve all pending match suggestions for this campaign to refresh their episodes.
         from podcast_outreach.database.queries import match_suggestions as match_queries

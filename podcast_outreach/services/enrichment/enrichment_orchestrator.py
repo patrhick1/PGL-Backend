@@ -18,12 +18,12 @@ from podcast_outreach.database.queries.media import (
     count_transcribed_episodes_for_media,
 )
 from podcast_outreach.database.queries.episodes import (
-    flag_recent_episodes_for_transcription,
+    flag_specific_episodes_for_transcription,
 )
 
 # Import services
 from .enrichment_agent import EnrichmentAgent
-from .quality_score import QualityService # Corrected import path and filename
+from .quality_score import QualityService
 
 # Import modular DB connection for main execution block
 from podcast_outreach.database.connection import init_db_pool, close_db_pool 
@@ -103,29 +103,30 @@ class EnrichmentOrchestrator:
         """Identifies media that might need new episodes flagged for transcription."""
         logger.info("Checking for media items to flag new episodes for transcription...")
         
+        # This logic can be refined to only check media that had recent episode syncs
         media_to_check = await get_media_for_enrichment(
             batch_size=100,
-            enriched_before_hours=24 * 30
+            enriched_before_hours=24 * 30 # Check even if not recently enriched
         )
         if not media_to_check:
             logger.info("No media items found for transcription flagging check.")
             return
 
         logger.info(f"Found {len(media_to_check)} media items to check for transcription flagging.")
-        flagged_episode_counts = 0
         for media_item in media_to_check:
             media_id = media_item['media_id']
             try:
-                newly_flagged_count = await flag_recent_episodes_for_transcription(
+                # This logic is now in EpisodeHandlerService, called after episode sync.
+                # This becomes a fallback/periodic check.
+                from podcast_outreach.services.media.episode_handler import EpisodeHandlerService
+                handler = EpisodeHandlerService()
+                await handler.flag_episodes_to_meet_transcription_goal(
                     media_id, ORCHESTRATOR_CONFIG["max_transcription_flags_per_media"]
                 )
-                if newly_flagged_count > 0:
-                    logger.info(f"Newly flagged {newly_flagged_count} episodes for media_id: {media_id}")
-                    flagged_episode_counts += newly_flagged_count
             except Exception as e:
                 logger.error(f"Error flagging episodes for media_id {media_id}: {e}", exc_info=True)
             await asyncio.sleep(0.1)
-        logger.info(f"Transcription flagging check finished. Total new episodes flagged: {flagged_episode_counts}")
+        logger.info("Transcription flagging check finished.")
 
     async def _update_quality_scores_batch(self):
         """Fetches media, checks transcribed episode counts, and updates quality scores."""
@@ -176,6 +177,43 @@ class EnrichmentOrchestrator:
                 logger.error(f"Error during quality score update for media_id {media_id}: {e}", exc_info=True)
             await asyncio.sleep(0.2)
         logger.info(f"Quality score update batch finished. Scores updated: {updated_scores_count}, Skipped: {skipped_count}")
+
+    async def _update_quality_score_for_media(self, media_data_dict: Dict[str, Any]):
+        """
+        Calculates and updates the quality score for a single media item.
+        Designed to be called from a direct, non-blocking process like the discovery service.
+        """
+        media_id = media_data_dict.get('media_id')
+        if not media_id:
+            logger.error("Cannot update quality score: media_id missing from provided data.")
+            return
+
+        logger.info(f"Starting quality score update for single media_id: {media_id}")
+        try:
+            transcribed_count = await count_transcribed_episodes_for_media(media_id)
+            
+            if transcribed_count >= ORCHESTRATOR_CONFIG["quality_score_min_transcribed_episodes"]:
+                from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
+                try:
+                    profile_for_scoring = EnrichedPodcastProfile(**media_data_dict)
+                except Exception as val_err:
+                    logger.error(f"Could not construct EnrichedPodcastProfile for media_id {media_id} from DB data for quality scoring: {val_err}")
+                    return
+
+                quality_score_val, _ = self.quality_service.calculate_podcast_quality_score(profile_for_scoring)
+                
+                if quality_score_val is not None:
+                    success = await update_media_quality_score(media_id, quality_score_val)
+                    if success:
+                        logger.info(f"Successfully updated quality score for media_id: {media_id} to {quality_score_val}")
+                    else:
+                        logger.error(f"Failed to update quality score in DB for media_id: {media_id}")
+                else:
+                    logger.warning(f"Quality score calculation returned None for media_id: {media_id}")
+            else:
+                logger.info(f"Skipping quality score for media_id: {media_id}, transcribed episodes: {transcribed_count} (need {ORCHESTRATOR_CONFIG['quality_score_min_transcribed_episodes']}).")
+        except Exception as e:
+            logger.error(f"Error during quality score update for single media_id {media_id}: {e}", exc_info=True)
 
     async def run_pipeline_once(self):
         """Runs one full cycle of the enrichment pipeline."""

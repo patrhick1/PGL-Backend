@@ -249,8 +249,8 @@ class DataMergerService:
         if not profile.primary_email and profile.rss_owner_email:
             profile.primary_email = profile.rss_owner_email
         
-        # Update the timestamp to reflect the completion time of this enrichment run
-        profile.last_enriched_timestamp = datetime.utcnow()
+        # The timestamp is now set in the DB query function to ensure it's always updated on write.
+        # profile.last_enriched_timestamp = datetime.utcnow()
 
         logger.info(f"Successfully merged data for podcast: {profile.api_id} - {profile.title}")
         return profile

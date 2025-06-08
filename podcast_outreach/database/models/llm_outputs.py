@@ -7,17 +7,17 @@ class GeminiPodcastEnrichment(BaseModel):
     Pydantic model for structured output from Gemini during the initial podcast/host
     information discovery phase (e.g., finding social URLs, host names).
     """
-    podcast_twitter_url: Optional[HttpUrl] = Field(None, description="Official Twitter/X URL for the podcast found by Gemini.")
-    podcast_linkedin_url: Optional[HttpUrl] = Field(None, description="Official LinkedIn URL for the podcast (e.g., company page) found by Gemini.")
-    podcast_instagram_url: Optional[HttpUrl] = Field(None, description="Official Instagram URL for the podcast found by Gemini.")
-    podcast_facebook_url: Optional[HttpUrl] = Field(None, description="Official Facebook URL for the podcast found by Gemini.")
-    podcast_youtube_url: Optional[HttpUrl] = Field(None, description="Official YouTube channel URL for the podcast found by Gemini.")
-    podcast_tiktok_url: Optional[HttpUrl] = Field(None, description="Official TikTok profile URL for the podcast found by Gemini.")
+    podcast_twitter_url: Optional[str] = Field(None, description="Official Twitter/X URL for the podcast found by Gemini.")
+    podcast_linkedin_url: Optional[str] = Field(None, description="Official LinkedIn URL for the podcast (e.g., company page) found by Gemini.")
+    podcast_instagram_url: Optional[str] = Field(None, description="Official Instagram URL for the podcast found by Gemini.")
+    podcast_facebook_url: Optional[str] = Field(None, description="Official Facebook URL for the podcast found by Gemini.")
+    podcast_youtube_url: Optional[str] = Field(None, description="Official YouTube channel URL for the podcast found by Gemini.")
+    podcast_tiktok_url: Optional[str] = Field(None, description="Official TikTok profile URL for the podcast found by Gemini.")
     host_names: Optional[List[str]] = Field(None, description="Names of the podcast hosts found by Gemini.")
     # Host-specific social URLs found by Gemini will be handled by trying to create/update people records
     # and linking them. These fields are for direct discovery if needed.
-    host_linkedin_url: Optional[HttpUrl] = Field(None, description="LinkedIn profile URL of a primary host found by Gemini.")
-    host_twitter_url: Optional[HttpUrl] = Field(None, description="Twitter/X profile URL of a primary host found by Gemini.")
+    host_linkedin_url: Optional[str] = Field(None, description="LinkedIn profile URL of a primary host found by Gemini.")
+    host_twitter_url: Optional[str] = Field(None, description="Twitter/X profile URL of a primary host found by Gemini.")
 
 class LLMQualityVettingOutput(BaseModel):
     """

@@ -152,12 +152,20 @@ class EnrichmentAgent:
                 parsed_hosts_from_search = self._extract_host_names(text_to_parse_hosts)
                 if parsed_hosts_from_search:
                     current_host_names_str = ", ".join(parsed_hosts_from_search)
-                    logger.info(f"Tentatively identified hosts for {podcast_name} via Tavily: {current_host_names_str}")
+                    logger.info(f"Tentatively identified hosts for '{podcast_name}' via Tavily: {current_host_names_str}")
 
         combined_text_for_parsing = "\n\n---\n\n".join(found_info_texts)
         logger.debug(f"Combined text for Gemini structured parsing for {podcast_api_id} (length {len(combined_text_for_parsing)}):\n{combined_text_for_parsing[:1000]}...")
 
         if not self.gemini_service: return None
+
+        # Get the schema dictionary from Pydantic V2
+        schema_dict = GeminiPodcastEnrichment.model_json_schema()
+        # Convert the dictionary to a pretty-printed JSON string
+        schema_json_string = json.dumps(schema_dict, indent=2)
+
+        # Escape the curly braces within the JSON schema string itself for LangChain's f-string-like prompt formatter
+        escaped_schema_json_string = schema_json_string.replace("{", "{{").replace("}", "}}")
 
         final_parser_prompt = f"""You are an expert data extraction assistant.
     Based *only* on the information within the 'Provided Text' section below, extract the required information and structure it according to the 'JSON Schema'.
@@ -176,18 +184,39 @@ class EnrichmentAgent:
 
     JSON Schema:
     ```json
-    {GeminiPodcastEnrichment.model_json_schema(indent=2)}
+    {escaped_schema_json_string}
     ```
     """
         structured_output = await self.gemini_service.get_structured_data(
-            prompt=final_parser_prompt,
+            prompt_template_str=final_parser_prompt,
+            user_query=combined_text_for_parsing,
             output_model=GeminiPodcastEnrichment,
-            temperature=0.1 
+            temperature=0.1,
+            workflow="podcast_info_discovery",
+            related_media_id=initial_data.get('media_id')
         )
+
+        # --- NEW FIX: Clean and normalize the structured output ---
         if structured_output:
-            logger.info(f"Gemini structured parsing for '{podcast_name}' successful.")
+            logger.info(f"Gemini structured parsing for '{podcast_name}' successful. Cleaning data...")
+            
+            # Helper function to convert handle to full URL
+            def handle_to_url(handle: Optional[str], platform_base_url: str) -> Optional[str]:
+                if not handle or not isinstance(handle, str) or 'http' in handle:
+                    return handle # Return if it's already a URL or None
+                handle = handle.lstrip('@')
+                return f"{platform_base_url}{handle}"
+
+            # Clean the specific fields by re-assigning them
+            if structured_output.host_twitter_url:
+                structured_output.host_twitter_url = handle_to_url(str(structured_output.host_twitter_url), "https://twitter.com/")
+            
+            if structured_output.podcast_twitter_url:
+                structured_output.podcast_twitter_url = handle_to_url(str(structured_output.podcast_twitter_url), "https://twitter.com/")
+
         else:
             logger.warning(f"Gemini structured parsing did not return data for '{podcast_name}'.")
+        
         return structured_output
 
     async def _create_or_link_hosts(self, media_id: int, host_names: List[str]):
@@ -208,9 +237,11 @@ class EnrichmentAgent:
                 logger.info(f"Found existing person record for host '{host_name}' (ID: {person_id}).")
             else:
                 # Create a new person record for the host
+                logger.info(f"Host '{host_name}' not found. Creating a new person record without an email.")
                 new_person_data = {
                     "full_name": host_name,
-                    "role": "host"
+                    "role": "host",
+                    "email": None # Explicitly set to None
                 }
                 created_person = await people_queries.create_person_in_db(new_person_data)
                 if created_person:
