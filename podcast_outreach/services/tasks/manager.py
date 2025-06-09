@@ -11,7 +11,8 @@ import asyncio
 from podcast_outreach.database.connection import init_db_pool, close_db_pool
 from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG
 from podcast_outreach.services.media.episode_sync import main_episode_sync_orchestrator
-from podcast_outreach.scripts.transcribe_episodes import main as transcribe_main_script
+# CORRECTED IMPORT: Import the new logic function, not the main script entry point
+from podcast_outreach.scripts.transcribe_episodes import run_transcription_logic
 from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
 from podcast_outreach.services.pitches.generator import PitchGeneratorService
 from podcast_outreach.services.pitches.sender import PitchSenderService
@@ -38,6 +39,8 @@ def _run_async_task_in_new_loop(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+# ... (other task wrappers remain the same, with the init/close pattern) ...
 
 def _run_angles_bio_generation_task(campaign_id_str: str, stop_flag: threading.Event):
     async def _task():
@@ -72,13 +75,16 @@ def _run_transcription_task(stop_flag: threading.Event):
         await init_db_pool()
         try:
             logger.info("Background task: Running episode transcription.")
-            await transcribe_main_script() 
+            # CORRECTED CALL: Call the core logic function directly
+            await run_transcription_logic() 
             logger.info("Background task: Episode transcription completed.")
         except Exception as e:
             logger.error(f"Background task: Error during episode transcription: {e}", exc_info=True)
         finally:
             await close_db_pool()
     _run_async_task_in_new_loop(_task())
+
+# ... (the rest of the file remains the same) ...
 
 def _run_enrichment_orchestrator_task(stop_flag: threading.Event):
     async def _task():
@@ -92,7 +98,7 @@ def _run_enrichment_orchestrator_task(stop_flag: threading.Event):
             data_merger = DataMergerService()
             enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
             quality_service = QualityService()
-            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service)
+            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
             logger.info("Background task: Running full enrichment pipeline.")
             await orchestrator.run_pipeline_once()
             logger.info("Background task: Full enrichment pipeline completed.")
@@ -154,83 +160,81 @@ def _run_process_campaign_content_task(campaign_id_str: str, stop_flag: threadin
         retry_count = 0
         last_error = None
         
-        while retry_count <= max_retries:
-            if stop_flag.is_set():
-                logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped by signal.")
-                break
-                
-            try:
-                logger.info(f"Background task: Processing content for campaign {campaign_id_str} (attempt {retry_count + 1}/{max_retries + 1})")
-                
-                if retry_count == 0:
-                    try:
-                        await campaign_queries.update_campaign_status(
-                            campaign_id, 
-                            "processing_content", 
-                            f"Content processing started at attempt {retry_count + 1}"
-                        )
-                    except Exception as status_error:
-                        logger.warning(f"Could not update campaign status for {campaign_id_str}: {status_error}")
-                
-                success = await processor.process_and_embed_campaign_data(campaign_id)
-                
-                if success:
-                    logger.info(f"Background task: Content processing for {campaign_id_str} completed successfully on attempt {retry_count + 1}.")
-                    try:
-                        await campaign_queries.update_campaign_status(
-                            campaign_id, 
-                            "content_processed", 
-                            f"Content processing completed successfully with media kit generation on attempt {retry_count + 1}"
-                        )
-                    except Exception as status_error:
-                        logger.warning(f"Could not update final campaign status for {campaign_id_str}: {status_error}")
-                    return
-                else:
-                    error_msg = f"Content processing for {campaign_id_str} did not complete successfully or found no data on attempt {retry_count + 1}"
-                    logger.warning(f"Background task: {error_msg}")
-                    last_error = Exception(error_msg)
+        try:
+            while retry_count <= max_retries:
+                if stop_flag.is_set():
+                    logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped by signal.")
+                    break
                     
-            except Exception as e:
-                last_error = e
-                logger.error(f"Background task: Error processing content for {campaign_id_str} on attempt {retry_count + 1}: {e}", exc_info=True)
+                try:
+                    logger.info(f"Background task: Processing content for campaign {campaign_id_str} (attempt {retry_count + 1}/{max_retries + 1})")
+                    
+                    if retry_count == 0:
+                        try:
+                            await campaign_queries.update_campaign_status(
+                                campaign_id, 
+                                "processing_content", 
+                                f"Content processing started at attempt {retry_count + 1}"
+                            )
+                        except Exception as status_error:
+                            logger.warning(f"Could not update campaign status for {campaign_id_str}: {status_error}")
+                    
+                    success = await processor.process_and_embed_campaign_data(campaign_id)
+                    
+                    if success:
+                        logger.info(f"Background task: Content processing for {campaign_id_str} completed successfully on attempt {retry_count + 1}.")
+                        try:
+                            await campaign_queries.update_campaign_status(
+                                campaign_id, 
+                                "content_processed", 
+                                f"Content processing completed successfully with media kit generation on attempt {retry_count + 1}"
+                            )
+                        except Exception as status_error:
+                            logger.warning(f"Could not update final campaign status for {campaign_id_str}: {status_error}")
+                        return
+                    else:
+                        error_msg = f"Content processing for {campaign_id_str} did not complete successfully or found no data on attempt {retry_count + 1}"
+                        logger.warning(f"Background task: {error_msg}")
+                        last_error = Exception(error_msg)
+                        
+                except Exception as e:
+                    last_error = e
+                    logger.error(f"Background task: Error processing content for {campaign_id_str} on attempt {retry_count + 1}: {e}", exc_info=True)
+                    try:
+                        await campaign_queries.update_campaign_status(
+                            campaign_id, 
+                            "processing_error", 
+                            f"Error on attempt {retry_count + 1}: {str(e)[:200]}..."
+                        )
+                    except Exception as status_error:
+                        logger.warning(f"Could not update error campaign status for {campaign_id_str}: {status_error}")
+                
+                retry_count += 1
+                
+                if retry_count <= max_retries and not stop_flag.is_set():
+                    logger.info(f"Background task: Retrying campaign content processing for {campaign_id_str} in {retry_delay} seconds...")
+                    wait_time = 0
+                    while wait_time < retry_delay and not stop_flag.is_set():
+                        await asyncio.sleep(min(5.0, retry_delay - wait_time))
+                        wait_time += 5.0
+                    if stop_flag.is_set():
+                        logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped during retry wait.")
+                        break
+            
+            if retry_count > max_retries:
+                final_error_msg = f"Campaign content processing for {campaign_id_str} failed after {max_retries + 1} attempts. Last error: {str(last_error)}"
+                logger.error(f"Background task: {final_error_msg}")
                 try:
                     await campaign_queries.update_campaign_status(
                         campaign_id, 
-                        "processing_error", 
-                        f"Error on attempt {retry_count + 1}: {str(e)[:200]}..."
+                        "processing_failed", 
+                        f"Processing failed after {max_retries + 1} attempts. Last error: {str(last_error)[:150]}..."
                     )
+                    logger.info(f"Campaign {campaign_id_str} marked as 'processing_failed' and may need manual intervention.")
                 except Exception as status_error:
-                    logger.warning(f"Could not update error campaign status for {campaign_id_str}: {status_error}")
-            
-            retry_count += 1
-            
-            if retry_count <= max_retries and not stop_flag.is_set():
-                logger.info(f"Background task: Retrying campaign content processing for {campaign_id_str} in {retry_delay} seconds...")
-                wait_time = 0
-                while wait_time < retry_delay and not stop_flag.is_set():
-                    await asyncio.sleep(min(5.0, retry_delay - wait_time))
-                    wait_time += 5.0
-                if stop_flag.is_set():
-                    logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped during retry wait.")
-                    break
-        
-        if retry_count > max_retries:
-            final_error_msg = f"Campaign content processing for {campaign_id_str} failed after {max_retries + 1} attempts. Last error: {str(last_error)}"
-            logger.error(f"Background task: {final_error_msg}")
-            try:
-                await campaign_queries.update_campaign_status(
-                    campaign_id, 
-                    "processing_failed", 
-                    f"Processing failed after {max_retries + 1} attempts. Last error: {str(last_error)[:150]}..."
-                )
-                logger.info(f"Campaign {campaign_id_str} marked as 'processing_failed' and may need manual intervention.")
-            except Exception as status_error:
-                logger.warning(f"Could not update final failure status for campaign {campaign_id_str}: {status_error}")
-        
-        try:
+                    logger.warning(f"Could not update final failure status for campaign {campaign_id_str}: {status_error}")
+        finally:
             await close_db_pool()
-        except Exception as pool_error:
-            logger.warning(f"Error closing database pool for campaign processing task {campaign_id_str}: {pool_error}")
     
     _run_async_task_in_new_loop(_task())
 
@@ -279,7 +283,7 @@ def _run_score_potential_matches_task(
             if campaign_id_str:
                 campaign_uuid = uuid.UUID(campaign_id_str)
                 logger.info(f"Background task: Scoring potential matches for campaign {campaign_uuid}")
-                all_media, total_media = await media_queries.get_all_media_from_db(limit=10000)
+                all_media = await media_queries.get_all_media_from_db(limit=10000)
                 if all_media:
                     await match_creator.create_and_score_match_suggestions_for_campaign(campaign_uuid, all_media)
                     logger.info(f"Completed scoring for campaign {campaign_uuid}.")
@@ -307,8 +311,6 @@ class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Dict] = {}
         self._lock = threading.Lock()
-        # The TaskManager itself doesn't need to instantiate services if the wrappers do it.
-        # This keeps the manager lightweight.
         logger.info("TaskManager initialized.")
     
     def start_task(self, task_id: str, action: str) -> None:

@@ -1,7 +1,7 @@
 import os
 import uuid
 import logging
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 from fastapi import APIRouter, Depends, HTTPException
 
 from podcast_outreach.api.dependencies import get_current_user
@@ -14,14 +14,18 @@ router = APIRouter(prefix="/storage", tags=["File Storage"])
 # --- Pydantic Schemas for this Router ---
 
 class PresignedUrlRequest(BaseModel):
-    file_name: str
-    # file_type: str # Optional: You might use this for validation if needed
-    upload_context: str # e.g., 'profile_picture', 'media_kit_headshot', 'media_kit_logo'
+    file_name: str = Field(..., alias='fileName')
+    upload_context: str = Field(..., alias='uploadContext')
 
 class PresignedUrlResponse(BaseModel):
-    upload_url: str
-    object_key: str # The final path in S3
-    final_url: str  # The public URL to access the file after upload
+    upload_url: str = Field(..., alias='uploadUrl')
+    object_key: str = Field(..., alias='objectKey')
+    final_url: str = Field(..., alias='finalUrl')
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        by_alias=True,
+    )
 
 # --- API Endpoint ---
 
@@ -45,10 +49,19 @@ async def generate_upload_url(
     # Create a structured path in S3 for better organization
     object_key = f"uploads/{request_data.upload_context}/user_{person_id}/{unique_id}{file_extension}"
 
+    # --- MODIFIED SECTION ---
+    # The generate_presigned_upload_url can return None on failure. We must handle this.
     upload_url = storage_service.generate_presigned_upload_url(object_key)
 
     if not upload_url:
-        raise HTTPException(status_code=500, detail="Could not generate upload URL.")
+        # This is the critical change. Instead of returning a 200 OK with null data,
+        # we now raise a 500 Internal Server Error.
+        logger.error(f"Failed to generate presigned URL for user {person_id} and object {object_key}. Check S3 configuration and permissions.")
+        raise HTTPException(
+            status_code=500, 
+            detail="Could not generate upload URL. Check server logs for specific AWS S3 errors."
+        )
+    # --- END OF MODIFIED SECTION ---
 
     return PresignedUrlResponse(
         upload_url=upload_url,

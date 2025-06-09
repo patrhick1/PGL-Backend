@@ -18,8 +18,9 @@ class StorageService:
         self.region_name = os.getenv("AWS_REGION")
         self.bucket_name = os.getenv("AWS_S3_BUCKET_NAME")
 
+        # More robust check for missing or empty environment variables
         if not all([self.aws_access_key_id, self.aws_secret_access_key, self.region_name, self.bucket_name]):
-            logger.error("S3 storage service is not configured. Missing AWS credentials, region, or bucket name.")
+            logger.error("S3 storage service is not configured. One or more required AWS environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET_NAME) are missing or empty.")
             raise ValueError("S3 configuration is incomplete.")
 
         # Recommended to specify signature version v4 for presigned URLs
@@ -53,7 +54,11 @@ class StorageService:
             )
             return response
         except ClientError as e:
-            logger.error(f"Failed to generate presigned URL for {object_key}: {e}")
+            # Log the specific boto3 client error for easier debugging
+            logger.error(f"Boto3 ClientError generating presigned URL for {object_key}: {e.response['Error']['Code']} - {e.response['Error']['Message']}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error generating presigned URL for {object_key}: {e}", exc_info=True)
             return None
 
     def get_object_url(self, object_key: str) -> str:

@@ -8,7 +8,7 @@ from datetime import datetime
 class PersonBase(BaseModel):
     company_id: Optional[int] = None # Foreign key to COMPANIES table
     full_name: Optional[str] = None
-    email: str # Email is required and should be unique
+    email: Optional[str] = None # Email is not always required (e.g., for hosts)
     linkedin_profile_url: Optional[str] = None
     twitter_profile_url: Optional[str] = None
     instagram_profile_url: Optional[str] = None
