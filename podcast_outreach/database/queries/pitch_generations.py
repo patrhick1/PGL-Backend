@@ -18,10 +18,10 @@ async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optio
     query = """
     INSERT INTO pitch_generations (
         campaign_id, media_id, template_id, draft_text, ai_model_used,
-        pitch_topic, temperature, generated_at, reviewer_id, reviewed_at,
+        pitch_topic, temperature, reviewer_id, reviewed_at,
         final_text, send_ready_bool, generation_status
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -36,7 +36,6 @@ async def create_pitch_generation_in_db(pitch_gen_data: Dict[str, Any]) -> Optio
                 pitch_gen_data.get('ai_model_used'),
                 pitch_gen_data.get('pitch_topic'),
                 pitch_gen_data.get('temperature'),
-                pitch_gen_data.get('generated_at', datetime.utcnow()),
                 pitch_gen_data.get('reviewer_id'),
                 pitch_gen_data.get('reviewed_at'),
                 pitch_gen_data.get('final_text'),

@@ -2,24 +2,11 @@
 
 import uuid
 import logging
-import threading
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 
-# Import the task manager and all the task wrapper functions from the manager module
-from podcast_outreach.services.tasks.manager import (
-    task_manager,
-    _run_angles_bio_generation_task,
-    _run_episode_sync_task,
-    _run_transcription_task,
-    _run_enrichment_orchestrator_task,
-    _run_pitch_writer_task,
-    _run_send_pitch_task,
-    _run_process_campaign_content_task,
-    _run_qualitative_match_assessment_task,
-    _run_score_potential_matches_task,
-    _run_vetting_orchestrator_task
-)
+# Import the task manager
+from podcast_outreach.services.tasks.manager import task_manager
 
 # Import dependencies for authentication
 from ..dependencies import get_current_user
@@ -42,41 +29,78 @@ async def trigger_automation_api(
     """
     task_id = str(uuid.uuid4())
     
-    # Map action strings to their corresponding wrapper functions
-    task_map = {
-        "generate_bio_angles": _run_angles_bio_generation_task,
-        "fetch_podcast_episodes": _run_episode_sync_task,
-        "transcribe_podcast": _run_transcription_task,
-        "enrichment_pipeline": _run_enrichment_orchestrator_task,
-        "pitch_writer": _run_pitch_writer_task,
-        "send_pitch": _run_send_pitch_task,
-        "process_campaign_content": _run_process_campaign_content_task,
-        "qualitative_match_assessment": _run_qualitative_match_assessment_task,
-        "score_potential_matches": _run_score_potential_matches_task,
-        "run_vetting_pipeline": _run_vetting_orchestrator_task,
+    # Map action strings to their corresponding task manager methods
+    valid_actions = {
+        "generate_bio_angles",
+        "fetch_podcast_episodes", 
+        "transcribe_podcast",
+        "enrichment_pipeline",
+        "pitch_writer",
+        "send_pitch",
+        "process_campaign_content",
+        "qualitative_match_assessment",
+        "score_potential_matches",
+        "run_vetting_pipeline",
+        "create_matches_for_enriched_media",
+        "workflow_health_check",
     }
 
-    if action not in task_map:
+    if action not in valid_actions:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid automation action: {action}")
 
     task_manager.start_task(task_id, action)
     
-    # Prepare arguments for the task thread
-    args = (task_manager.get_stop_flag(task_id),)
-    if action in ["generate_bio_angles", "process_campaign_content"]:
-        if not campaign_id:
-            task_manager.cleanup_task(task_id)
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"'campaign_id' is required for '{action}' action.")
-        args = (str(campaign_id), task_manager.get_stop_flag(task_id))
-    elif action == "score_potential_matches":
-        if not campaign_id and media_id is None:
-            task_manager.cleanup_task(task_id)
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either 'campaign_id' or 'media_id' is required for 'score_potential_matches' action.")
-        args = (task_manager.get_stop_flag(task_id), str(campaign_id) if campaign_id else None, media_id)
+    # Route to appropriate task manager method
+    try:
+        if action == "generate_bio_angles":
+            if not campaign_id:
+                task_manager.cleanup_task(task_id)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'campaign_id' is required for 'generate_bio_angles' action.")
+            task_manager.run_angles_bio_generation(task_id, str(campaign_id))
+        
+        elif action == "fetch_podcast_episodes":
+            task_manager.run_episode_sync(task_id)
+        
+        elif action == "transcribe_podcast":
+            task_manager.run_transcription(task_id)
+        
+        elif action == "enrichment_pipeline":
+            task_manager.run_enrichment_pipeline(task_id)
+        
+        elif action == "pitch_writer":
+            task_manager.run_pitch_generation(task_id)
+        
+        elif action == "send_pitch":
+            task_manager.run_pitch_sending(task_id)
+        
+        elif action == "process_campaign_content":
+            if not campaign_id:
+                task_manager.cleanup_task(task_id)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'campaign_id' is required for 'process_campaign_content' action.")
+            task_manager.run_campaign_content_processing(task_id, str(campaign_id))
+        
+        elif action == "qualitative_match_assessment":
+            task_manager.run_qualitative_match_assessment(task_id)
+        
+        elif action == "score_potential_matches":
+            if not campaign_id and media_id is None:
+                task_manager.cleanup_task(task_id)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either 'campaign_id' or 'media_id' is required for 'score_potential_matches' action.")
+            task_manager.run_score_potential_matches(task_id, str(campaign_id) if campaign_id else None, media_id)
+        
+        elif action == "run_vetting_pipeline":
+            task_manager.run_vetting_pipeline(task_id)
+        
+        elif action == "create_matches_for_enriched_media":
+            task_manager.run_create_matches_for_enriched_media(task_id)
+        
+        elif action == "workflow_health_check":
+            task_manager.run_workflow_health_check(task_id)
     
-    # Start the task in a separate thread
-    thread = threading.Thread(target=task_map[action], args=args)
-    thread.start()
+    except Exception as e:
+        task_manager.cleanup_task(task_id)
+        logger.error(f"Error starting task {task_id} for action '{action}': {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to start task: {str(e)}")
     logger.info(f"Started task {task_id} for action '{action}'")
     
     return {

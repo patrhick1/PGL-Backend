@@ -1,9 +1,12 @@
 # podcast_outreach/database/queries/episodes.py
 import logging
+import re
+import json
+import numpy as np
 from typing import Any, Dict, Optional, List, Set, Tuple
 from datetime import datetime, date
  
-from podcast_outreach.database.connection import get_db_pool
+from podcast_outreach.database.connection import get_db_pool, get_background_task_pool
  
 logger = logging.getLogger(__name__)
  
@@ -12,10 +15,10 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
     query = """
     INSERT INTO episodes (
         media_id, title, publish_date, duration_sec, episode_summary,
-        episode_url, transcript, transcribe, downloaded, guest_names,
+        episode_url, direct_audio_url, transcript, transcribe, downloaded, guest_names,
         host_names, source_api, api_episode_id, ai_episode_summary, embedding,
         episode_themes, episode_keywords, ai_analysis_done
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
     RETURNING *;
     """
     pool = await get_db_pool()
@@ -29,6 +32,7 @@ async def insert_episode(episode_data: Dict[str, Any]) -> Optional[Dict[str, Any
                 episode_data.get("duration_sec"),
                 episode_data.get("episode_summary"),
                 episode_data.get("episode_url"),
+                episode_data.get("direct_audio_url"),
                 episode_data.get("transcript"),
                 episode_data.get("transcribe", False), # Default to False
                 episode_data.get("downloaded", False),
@@ -150,22 +154,57 @@ async def flag_specific_episodes_for_transcription(media_id: int, episode_ids_to
                 logger.exception(f"Error in flag_specific_episodes_for_transcription for media_id {media_id}: {e}")
                 raise
 
-async def fetch_episodes_for_transcription(limit: int = 20) -> list[Dict[str, Any]]:
-    """Return episodes that need transcription."""
+async def fetch_episodes_for_transcription(limit: int = 20, pool: Optional[Any] = None) -> list[Dict[str, Any]]:
+    """
+    Return episodes that need transcription.
+    
+    IMPORTANT: When no pool is provided, this function uses get_background_task_pool()
+    instead of get_db_pool() because it's primarily called from background transcription
+    tasks. Using the frontend pool can cause timeout errors during long-running operations.
+    
+    See: Database connection issues fix - 2025-06-20
+    """
     query = """
-    SELECT episode_id, media_id, episode_url, title
+    SELECT episode_id, media_id, episode_url, title, direct_audio_url
     FROM episodes
     WHERE transcribe = TRUE AND (transcript IS NULL OR transcript = '')
     ORDER BY created_at ASC
     LIMIT $1;
     """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    # Use background task pool when no specific pool provided (transcription is a background task)
+    if pool is None:
+        pool_to_use = await get_background_task_pool()
+    else:
+        pool_to_use = pool
+    async with pool_to_use.acquire() as conn:
         try:
             rows = await conn.fetch(query, limit)
             return [dict(row) for row in rows]
         except Exception as e:
             logger.exception("Error fetching episodes for transcription: %s", e)
+            return []
+
+async def fetch_episodes_for_analysis(limit: int = 20, pool: Optional[Any] = None) -> list[Dict[str, Any]]:
+    """Return episodes that need AI analysis (have transcript/summary but no analysis done)."""
+    query = """
+    SELECT episode_id, media_id, title, transcript, ai_episode_summary, episode_summary
+    FROM episodes
+    WHERE ai_analysis_done = FALSE 
+    AND (transcript IS NOT NULL OR ai_episode_summary IS NOT NULL OR episode_summary IS NOT NULL)
+    AND (transcript != '' OR ai_episode_summary != '' OR episode_summary != '')
+    ORDER BY created_at ASC
+    LIMIT $1;
+    """
+    if pool is None:
+        pool_to_use = await get_db_pool()
+    else:
+        pool_to_use = pool
+    async with pool_to_use.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception("Error fetching episodes for analysis: %s", e)
             return []
  
 async def update_episode_transcription(
@@ -173,8 +212,19 @@ async def update_episode_transcription(
     transcript: str,
     summary: str | None = None,
     embedding: list[float] | None = None,
+    max_retries: int = 3,
+    pool: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Update an episode with its transcript and optional summary/embedding."""
+    """
+    Update an episode with its transcript and optional summary/embedding.
+    
+    IMPORTANT: When no pool is provided, this function uses get_background_task_pool()
+    instead of get_db_pool() because it's called from background transcription tasks.
+    This prevents "TimeoutError" and "Control plane request failed" errors that occur
+    when using the frontend pool for long-running operations.
+    
+    See: Database connection issues fix - 2025-06-20
+    """
     set_clauses = ["transcript = $1", "downloaded = TRUE", "updated_at = NOW()"]
     values = [transcript]
     idx = 2
@@ -184,7 +234,52 @@ async def update_episode_transcription(
         idx += 1
     if embedding is not None:
         set_clauses.append(f"embedding = ${idx}")
-        values.append(embedding)
+        # Convert to proper pgvector format
+        import numpy as np
+        
+        # Debug logging to see what type of embedding we're getting
+        logger.debug(f"Embedding type: {type(embedding)}, first 100 chars: {str(embedding)[:100]}")
+        
+        # Handle different input types
+        if isinstance(embedding, (list, tuple)):
+            # Convert list/tuple to vector string
+            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+            values.append(embedding_str)
+        elif isinstance(embedding, np.ndarray):
+            # Convert numpy array to vector string
+            embedding_str = '[' + ','.join(map(str, embedding.tolist())) + ']'
+            values.append(embedding_str)
+        elif isinstance(embedding, str):
+            # If it's already a string, check if it's a numpy string representation
+            if embedding.startswith("np.str_('") and embedding.endswith("')"):
+                # Extract the actual vector string from numpy representation
+                clean_embedding = embedding[9:-2]  # Remove np.str_(' and ')
+                values.append(clean_embedding)
+            elif embedding.startswith("np.float") or embedding.startswith("array("):
+                # Handle other numpy string representations
+                import re
+                # Extract numbers from numpy string using regex
+                numbers = re.findall(r'-?\d+\.?\d*(?:[eE][+-]?\d+)?', embedding)
+                if numbers:
+                    embedding_str = '[' + ','.join(numbers) + ']'
+                    values.append(embedding_str)
+                else:
+                    values.append(embedding)
+            elif embedding.startswith('[') and embedding.endswith(']'):
+                # Already in correct format
+                values.append(embedding)
+            else:
+                # Try to parse as comma-separated values
+                try:
+                    # Convert to list and back to proper format
+                    nums = [float(x.strip()) for x in embedding.split(',')]
+                    embedding_str = '[' + ','.join(map(str, nums)) + ']'
+                    values.append(embedding_str)
+                except:
+                    # If all else fails, pass as is
+                    values.append(embedding)
+        else:
+            values.append(str(embedding))
         idx += 1
     query = f"""
     UPDATE episodes
@@ -193,34 +288,117 @@ async def update_episode_transcription(
     RETURNING *;
     """
     values.append(episode_id)
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    
+    for attempt in range(max_retries + 1):
         try:
-            row = await conn.fetchrow(query, *values)
-            return dict(row) if row else None
+            # Use background task pool when no specific pool provided (this is called from background tasks)
+            if pool is None:
+                pool_to_use = await get_background_task_pool()
+            else:
+                pool_to_use = pool
+            async with pool_to_use.acquire() as conn:
+                row = await conn.fetchrow(query, *values)
+                return dict(row) if row else None
         except Exception as e:
-            logger.exception("Error updating transcription for episode %s: %s", episode_id, e)
-            return None
+            if attempt < max_retries and "connection is closed" in str(e).lower():
+                logger.warning(f"Connection closed during episode update (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                # Force background task pool reset and retry (not frontend pool)
+                from podcast_outreach.database.connection import reset_background_task_pool
+                try:
+                    await reset_background_task_pool()
+                except:
+                    pass  # If reset fails, continue with retry anyway
+                import asyncio
+                await asyncio.sleep(0.5)  # Brief delay before retry
+                continue
+            else:
+                logger.exception("Error updating transcription for episode %s: %s", episode_id, e)
+                return None
+    
+    return None
+
+async def update_episode_audio_url(episode_id: int, audio_url: str, pool: Optional[Any] = None) -> bool:
+    """Update an episode's audio URL."""
+    query = """
+    UPDATE episodes 
+    SET direct_audio_url = $1, updated_at = NOW()
+    WHERE episode_id = $2
+    """
+    try:
+        if pool is None:
+            pool_to_use = await get_db_pool()
+        else:
+            pool_to_use = pool
+        async with pool_to_use.acquire() as conn:
+            await conn.execute(query, audio_url, episode_id)
+            return True
+    except Exception as e:
+        logger.error(f"Error updating audio URL for episode {episode_id}: {e}")
+        return False
+
+async def get_episode_by_id(episode_id: int, pool: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """Get episode by ID."""
+    query = "SELECT * FROM episodes WHERE episode_id = $1"
+    try:
+        if pool is None:
+            pool_to_use = await get_db_pool()
+        else:
+            pool_to_use = pool
+        async with pool_to_use.acquire() as conn:
+            row = await conn.fetchrow(query, episode_id)
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Error fetching episode {episode_id}: {e}")
+        return None
  
-async def get_episodes_for_media_with_content(media_id: int) -> List[Dict[str, Any]]:
+async def get_episodes_for_media_with_content(media_id: int, limit: int = None) -> List[Dict[str, Any]]:
     """
     Fetches episodes for a given media_id that have either an AI summary or a transcript,
     and their embeddings if available.
     """
-    query = """
-    SELECT episode_id, title, publish_date, episode_summary, ai_episode_summary, transcript, embedding
-    FROM episodes
-    WHERE media_id = $1 AND (ai_episode_summary IS NOT NULL OR transcript IS NOT NULL)
-    ORDER BY publish_date DESC;
-    """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        try:
-            rows = await conn.fetch(query, media_id)
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.exception(f"Error fetching episodes with content for media_id {media_id}: {e}")
-            return []
+    if limit is not None:
+        query = """
+        SELECT episode_id, title, publish_date, episode_summary, ai_episode_summary, transcript, embedding
+        FROM episodes
+        WHERE media_id = $1 AND (ai_episode_summary IS NOT NULL OR transcript IS NOT NULL)
+        ORDER BY publish_date DESC
+        LIMIT $2;
+        """
+    else:
+        query = """
+        SELECT episode_id, title, publish_date, episode_summary, ai_episode_summary, transcript, embedding
+        FROM episodes
+        WHERE media_id = $1 AND (ai_episode_summary IS NOT NULL OR transcript IS NOT NULL)
+        ORDER BY publish_date DESC;
+        """
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            if limit is not None:
+                rows = await conn.fetch(query, media_id, limit)
+            else:
+                rows = await conn.fetch(query, media_id)
+            
+            results = []
+            for row in rows:
+                episode = dict(row)
+                # Convert vector string to numpy array if needed
+                if episode.get('embedding') and isinstance(episode['embedding'], str):
+                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
+                    try:
+                        episode['embedding'] = np.array(eval(episode['embedding']))
+                    except:
+                        # If eval fails, try parsing as JSON
+                        try:
+                            episode['embedding'] = np.array(json.loads(episode['embedding']))
+                        except:
+                            logger.warning(f"Could not parse embedding for episode {episode['episode_id']}")
+                            episode['embedding'] = None
+                results.append(episode)
+            return results
+    except Exception as e:
+        logger.exception(f"Error fetching episodes with content for media_id {media_id}: {e}")
+        return []
 
 async def get_existing_episode_identifiers(media_id: int) -> Set[Tuple[str, datetime.date]]:
     """
@@ -269,20 +447,15 @@ async def update_episode_analysis_data(
     idx = 2
 
     if host_names is not None:
-        set_clauses.append(f"guest_names = $2") # Reusing guest_names for host/guest list
+        set_clauses.append(f"host_names = ${idx}")
         values.append(host_names)
         idx += 1
     if guest_names is not None:
-        # If you want separate host_names and guest_names columns, you'd need to add them to schema
-        # For now, I'll combine them into 'guest_names' or pick one.
-        # Let's update the existing 'guest_names' column with a combined list of identified people.
-        # Or, if 'guest_names' is specifically for guests, we need a new 'host_names' column.
-        # Given the schema, 'guest_names' is TEXT, not TEXT[]. Let's update it to TEXT[] in schema.
-        # For now, I'll use it as a combined list of identified people.
-        if guest_names is not None:
-            set_clauses.append(f"guest_names = ${idx}")
-            values.append(guest_names)
-            idx += 1
+        # Converting guest_names list to a comma-separated string since guest_names is TEXT, not TEXT[]
+        guest_names_str = ', '.join(guest_names) if isinstance(guest_names, list) else guest_names
+        set_clauses.append(f"guest_names = ${idx}")
+        values.append(guest_names_str)
+        idx += 1
 
     if episode_themes is not None:
         set_clauses.append(f"episode_themes = ${idx}")
@@ -310,25 +483,36 @@ async def update_episode_analysis_data(
             logger.exception(f"Error updating episode analysis data for episode {episode_id}: {e}")
             return None
 
-# NEW: Function to fetch episodes needing AI analysis
-async def fetch_episodes_for_analysis(limit: int = 20) -> List[Dict[str, Any]]:
+async def fetch_episodes_for_embedding_generation(limit: int = 20, pool: Optional[Any] = None) -> List[Dict[str, Any]]:
     """
-    Fetches episodes that have a transcript/summary but haven't been analyzed by AI yet.
+    Return episodes that have content but are missing embeddings.
+    
+    IMPORTANT: When no pool is provided, this function uses get_background_task_pool()
+    instead of get_db_pool() because it's called from background embedding generation
+    tasks. Using the frontend pool can cause timeout errors during AI operations.
+    
+    See: Database connection issues fix - 2025-06-20
     """
     query = """
-    SELECT episode_id, media_id, title, episode_summary, ai_episode_summary, transcript
+    SELECT episode_id, media_id, title, transcript, ai_episode_summary, episode_summary
     FROM episodes
-    WHERE (transcript IS NOT NULL OR ai_episode_summary IS NOT NULL) AND ai_analysis_done = FALSE
+    WHERE embedding IS NULL 
+    AND (transcript IS NOT NULL OR ai_episode_summary IS NOT NULL OR episode_summary IS NOT NULL)
+    AND (transcript != '' OR ai_episode_summary != '' OR episode_summary != '')
     ORDER BY created_at ASC
     LIMIT $1;
     """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    # Use background task pool when no specific pool provided (embedding generation is a background task)
+    if pool is None:
+        pool_to_use = await get_background_task_pool()
+    else:
+        pool_to_use = pool
+    async with pool_to_use.acquire() as conn:
         try:
             rows = await conn.fetch(query, limit)
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.exception(f"Error fetching episodes for AI analysis: {e}")
+            logger.exception("Error fetching episodes for embedding generation: %s", e)
             return []
 
 async def get_episodes_for_media_with_embeddings(media_id: int, limit: int = 5) -> List[Dict[str, Any]]:
@@ -347,7 +531,23 @@ async def get_episodes_for_media_with_embeddings(media_id: int, limit: int = 5) 
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(query, media_id, limit)
-            return [dict(row) for row in rows]
+            results = []
+            for row in rows:
+                episode = dict(row)
+                
+                if episode.get('embedding') and isinstance(episode['embedding'], str):
+                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
+                    try:
+                        episode['embedding'] = np.array(eval(episode['embedding']))
+                    except:
+                        # If eval fails, try parsing as JSON
+                        try:
+                            episode['embedding'] = np.array(json.loads(episode['embedding']))
+                        except:
+                            logger.warning(f"Could not parse embedding for episode {episode['episode_id']}")
+                            episode['embedding'] = None
+                results.append(episode)
+            return results
         except Exception as e:
             logger.error(f"Error fetching episodes with embeddings for media_id {media_id}: {e}", exc_info=True)
             return []
@@ -439,3 +639,38 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
             except Exception as e:
                 logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
                 raise
+
+async def get_episodes_with_embeddings_for_media(media_id: int) -> List[Dict[str, Any]]:
+    """Get all episodes with embeddings for a specific media."""
+    query = """
+    SELECT episode_id, title, publish_date, embedding
+    FROM episodes
+    WHERE media_id = $1 
+    AND embedding IS NOT NULL
+    ORDER BY publish_date DESC;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_id)
+            results = []
+            for row in rows:
+                episode = dict(row)
+                # Convert vector string to numpy array if needed
+                if episode.get('embedding') and isinstance(episode['embedding'], str):
+                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
+                    try:
+                        episode['embedding'] = np.array(eval(episode['embedding']))
+                    except:
+                        # If eval fails, try parsing as JSON
+                        try:
+                            episode['embedding'] = np.array(json.loads(episode['embedding']))
+                        except:
+                            logger.warning(f"Could not parse embedding for episode {episode['episode_id']}")
+                            episode['embedding'] = None
+                results.append(episode)
+            return results
+        except Exception as e:
+            logger.error(f"Error fetching episodes with embeddings for media {media_id}: {e}")
+            return []
+

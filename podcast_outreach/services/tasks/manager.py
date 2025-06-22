@@ -2,316 +2,422 @@
 
 import threading
 import uuid
+import asyncpg
 from typing import Dict, Optional, Any, List
 import logging
 import time
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-# --- ADD ALL NECESSARY IMPORTS HERE ---
-from podcast_outreach.database.connection import init_db_pool, close_db_pool
-from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG
-from podcast_outreach.services.media.episode_sync import main_episode_sync_orchestrator
-# CORRECTED IMPORT: Import the new logic function, not the main script entry point
-from podcast_outreach.scripts.transcribe_episodes import run_transcription_logic
-from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
-from podcast_outreach.services.pitches.generator import PitchGeneratorService
-from podcast_outreach.services.pitches.sender import PitchSenderService
-from podcast_outreach.services.campaigns.content_processor import ClientContentProcessor
-from podcast_outreach.services.matches.scorer import DetermineFitProcessor
-from podcast_outreach.services.matches.match_creation import MatchCreationService
-from podcast_outreach.services.matches.vetting_orchestrator import VettingOrchestrator
-from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
-from podcast_outreach.services.media.podcast_fetcher import MediaFetcher
-from podcast_outreach.services.media.transcriber import MediaTranscriber
-from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
-from podcast_outreach.database.queries import people as people_queries, media as media_queries, campaigns as campaign_queries
-# --- END OF ADDED IMPORTS ---
+# Database and service imports
+from podcast_outreach.database.connection import get_background_task_pool, close_background_task_pool
+from podcast_outreach.services.database_service import DatabaseService
+
+# Business logic imports
+from podcast_outreach.services.business_logic.campaign_processing import (
+    process_campaign_content,
+    generate_angles_and_bio
+)
+from podcast_outreach.services.business_logic.media_processing import (
+    sync_episodes as sync_episodes_logic,
+    transcribe_episodes as transcribe_episodes_logic
+)
+from podcast_outreach.services.business_logic.enrichment_processing import (
+    run_enrichment_pipeline as run_enrichment_pipeline_logic,
+    run_vetting_pipeline as run_vetting_pipeline_logic
+)
+from podcast_outreach.services.business_logic.match_processing import (
+    run_qualitative_match_assessment as run_qualitative_match_assessment_logic,
+    score_potential_matches as score_potential_matches_logic,
+    create_matches_for_enriched_media as create_matches_for_enriched_media_logic
+)
+from podcast_outreach.services.business_logic.pitch_processing import (
+    generate_pitches as generate_pitches_logic,
+    send_pitches as send_pitches_logic
+)
 
 logger = logging.getLogger(__name__)
 
 # --- Task Wrapper Functions ---
 
-def _run_async_task_in_new_loop(coro):
-    """Runs an async coroutine in a new asyncio event loop."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def _run_async_background_task(coro):
+    """Runs an async coroutine using the background task connection pool."""
     try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+        return await coro
+    except Exception as e:
+        logger.error(f"Error in background task: {e}", exc_info=True)
+        return False
 
-# ... (other task wrappers remain the same, with the init/close pattern) ...
 
-def _run_angles_bio_generation_task(campaign_id_str: str, stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        processor = AnglesProcessorPG()
-        try:
-            logger.info(f"Background task: Generating angles/bio for campaign {campaign_id_str}")
-            await processor.process_campaign(campaign_id_str)
-            logger.info(f"Background task: Angles/bio generation for {campaign_id_str} completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error generating angles/bio for {campaign_id_str}: {e}", exc_info=True)
-        finally:
-            processor.cleanup()
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-def _run_episode_sync_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        try:
-            logger.info("Background task: Running episode sync.")
-            await main_episode_sync_orchestrator() 
-            logger.info("Background task: Episode sync completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during episode sync: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-def _run_transcription_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        try:
-            logger.info("Background task: Running episode transcription.")
-            # CORRECTED CALL: Call the core logic function directly
-            await run_transcription_logic() 
-            logger.info("Background task: Episode transcription completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during episode transcription: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-# ... (the rest of the file remains the same) ...
 
-def _run_enrichment_orchestrator_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        from podcast_outreach.services.ai.gemini_client import GeminiService
-        from podcast_outreach.services.enrichment.data_merger import DataMergerService
-        from podcast_outreach.services.enrichment.quality_score import QualityService
-        try:
-            gemini_service = GeminiService()
-            social_discovery_service = SocialDiscoveryService()
-            data_merger = DataMergerService()
-            enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
-            quality_service = QualityService()
-            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
-            logger.info("Background task: Running full enrichment pipeline.")
-            await orchestrator.run_pipeline_once()
-            logger.info("Background task: Full enrichment pipeline completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during full enrichment pipeline: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-def _run_vetting_orchestrator_task(stop_flag: threading.Event):
-    """Wrapper function to run the VettingOrchestrator pipeline."""
-    async def _task():
-        await init_db_pool()
-        orchestrator = VettingOrchestrator()
-        try:
-            logger.info("Background task: Running Vetting Orchestrator pipeline.")
-            await orchestrator.run_vetting_pipeline()
-            logger.info("Background task: Vetting Orchestrator pipeline run completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during vetting pipeline: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-def _run_pitch_writer_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        generator = PitchGeneratorService()
-        try:
-            logger.info("Background task: Running pitch writer (generating pitches for pending matches).")
-            logger.warning("Pitch writer background task is a placeholder. Needs a method to find and process pending pitches.")
-            logger.info("Background task: Pitch writer completed (placeholder).")
-        except Exception as e:
-            logger.error(f"Background task: Error during pitch writer: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
-def _run_send_pitch_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        sender = PitchSenderService()
-        try:
-            logger.info("Background task: Running send pitch (sending all ready pitches).")
-            logger.warning("Send pitch background task is a placeholder. Needs a method to find and send ready pitches.")
-            logger.info("Background task: Send pitch completed (placeholder).")
-        except Exception as e:
-            logger.error(f"Background task: Error during send pitch: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
-
-def _run_process_campaign_content_task(campaign_id_str: str, stop_flag: threading.Event, max_retries: int = 3, retry_delay: float = 60.0):
-    async def _task():
-        await init_db_pool()
-        processor = ClientContentProcessor()
-        campaign_id = uuid.UUID(campaign_id_str)
-        
-        retry_count = 0
-        last_error = None
-        
-        try:
-            while retry_count <= max_retries:
-                if stop_flag.is_set():
-                    logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped by signal.")
-                    break
-                    
-                try:
-                    logger.info(f"Background task: Processing content for campaign {campaign_id_str} (attempt {retry_count + 1}/{max_retries + 1})")
-                    
-                    if retry_count == 0:
-                        try:
-                            await campaign_queries.update_campaign_status(
-                                campaign_id, 
-                                "processing_content", 
-                                f"Content processing started at attempt {retry_count + 1}"
-                            )
-                        except Exception as status_error:
-                            logger.warning(f"Could not update campaign status for {campaign_id_str}: {status_error}")
-                    
-                    success = await processor.process_and_embed_campaign_data(campaign_id)
-                    
-                    if success:
-                        logger.info(f"Background task: Content processing for {campaign_id_str} completed successfully on attempt {retry_count + 1}.")
-                        try:
-                            await campaign_queries.update_campaign_status(
-                                campaign_id, 
-                                "content_processed", 
-                                f"Content processing completed successfully with media kit generation on attempt {retry_count + 1}"
-                            )
-                        except Exception as status_error:
-                            logger.warning(f"Could not update final campaign status for {campaign_id_str}: {status_error}")
-                        return
-                    else:
-                        error_msg = f"Content processing for {campaign_id_str} did not complete successfully or found no data on attempt {retry_count + 1}"
-                        logger.warning(f"Background task: {error_msg}")
-                        last_error = Exception(error_msg)
-                        
-                except Exception as e:
-                    last_error = e
-                    logger.error(f"Background task: Error processing content for {campaign_id_str} on attempt {retry_count + 1}: {e}", exc_info=True)
-                    try:
-                        await campaign_queries.update_campaign_status(
-                            campaign_id, 
-                            "processing_error", 
-                            f"Error on attempt {retry_count + 1}: {str(e)[:200]}..."
-                        )
-                    except Exception as status_error:
-                        logger.warning(f"Could not update error campaign status for {campaign_id_str}: {status_error}")
-                
-                retry_count += 1
-                
-                if retry_count <= max_retries and not stop_flag.is_set():
-                    logger.info(f"Background task: Retrying campaign content processing for {campaign_id_str} in {retry_delay} seconds...")
-                    wait_time = 0
-                    while wait_time < retry_delay and not stop_flag.is_set():
-                        await asyncio.sleep(min(5.0, retry_delay - wait_time))
-                        wait_time += 5.0
-                    if stop_flag.is_set():
-                        logger.info(f"Background task: Campaign content processing for {campaign_id_str} stopped during retry wait.")
-                        break
-            
-            if retry_count > max_retries:
-                final_error_msg = f"Campaign content processing for {campaign_id_str} failed after {max_retries + 1} attempts. Last error: {str(last_error)}"
-                logger.error(f"Background task: {final_error_msg}")
-                try:
-                    await campaign_queries.update_campaign_status(
-                        campaign_id, 
-                        "processing_failed", 
-                        f"Processing failed after {max_retries + 1} attempts. Last error: {str(last_error)[:150]}..."
-                    )
-                    logger.info(f"Campaign {campaign_id_str} marked as 'processing_failed' and may need manual intervention.")
-                except Exception as status_error:
-                    logger.warning(f"Could not update final failure status for campaign {campaign_id_str}: {status_error}")
-        finally:
-            await close_db_pool()
-    
-    _run_async_task_in_new_loop(_task())
-
-def _run_qualitative_match_assessment_task(stop_flag: threading.Event):
-    async def _task():
-        await init_db_pool()
-        processor = DetermineFitProcessor()
-        from podcast_outreach.database.queries import review_tasks as rt_queries
-        try:
-            logger.info("Background task: Running Qualitative Match Assessment for pending review tasks.")
-            pending_qual_reviews, total_pending = await rt_queries.get_all_review_tasks_paginated(
-                task_type='match_suggestion_qualitative_review',
-                status='pending',
-                size=50
-            )
-            
-            if not pending_qual_reviews:
-                logger.info("Background task: No pending qualitative review tasks found.")
-                return
-
-            logger.info(f"Background task: Found {len(pending_qual_reviews)} tasks for qualitative assessment.")
-            
-            for review_task_record in pending_qual_reviews:
-                if stop_flag.is_set():
-                    logger.info("Background task: Qualitative assessment task signaled to stop.")
-                    break
-                logger.info(f"Processing qualitative review for task_id: {review_task_record.get('review_task_id')}, match_suggestion_id: {review_task_record.get('related_id')}")
-                await processor.process_single_record(review_task_record)
-            
-            logger.info("Background task: Qualitative Match Assessment cycle completed.")
-        except Exception as e:
-            logger.error(f"Background task: Error during qualitative match assessment: {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
-
-def _run_score_potential_matches_task(
-    stop_flag: threading.Event,
-    campaign_id_str: Optional[str] = None, 
-    media_id_int: Optional[int] = None
-):
-    async def _task():
-        await init_db_pool()
-        match_creator = MatchCreationService()
-        try:
-            if campaign_id_str:
-                campaign_uuid = uuid.UUID(campaign_id_str)
-                logger.info(f"Background task: Scoring potential matches for campaign {campaign_uuid}")
-                all_media = await media_queries.get_all_media_from_db(limit=10000)
-                if all_media:
-                    await match_creator.create_and_score_match_suggestions_for_campaign(campaign_uuid, all_media)
-                    logger.info(f"Completed scoring for campaign {campaign_uuid}.")
-                else:
-                    logger.info(f"No media found to score against campaign {campaign_uuid}.")
-            
-            elif media_id_int is not None:
-                logger.info(f"Background task: Scoring potential matches for media {media_id_int}")
-                all_campaigns, total_campaigns = await campaign_queries.get_campaigns_with_embeddings(limit=10000)
-                if all_campaigns:
-                    await match_creator.create_and_score_match_suggestions_for_media(media_id_int, all_campaigns)
-                    logger.info(f"Completed scoring for media {media_id_int}.")
-                else:
-                    logger.info(f"No campaigns with embeddings found to score against media {media_id_int}.")
-            else:
-                logger.warning("Background task: score_potential_matches called without campaign_id or media_id.")
-
-        except Exception as e:
-            logger.error(f"Background task: Error scoring potential matches (campaign: {campaign_id_str}, media: {media_id_int}): {e}", exc_info=True)
-        finally:
-            await close_db_pool()
-    _run_async_task_in_new_loop(_task())
 
 class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Dict] = {}
         self._lock = threading.Lock()
+        self.db_pool: Optional[asyncpg.Pool] = None
+        self.db_service: Optional[DatabaseService] = None
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="TaskManager")
         logger.info("TaskManager initialized.")
+    
+    async def initialize(self):
+        """Initialize the background task database pool and services"""
+        if self.db_pool is None or self.db_pool._closed:
+            self.db_pool = await get_background_task_pool()
+            self.db_service = DatabaseService(self.db_pool)
+            logger.info("TaskManager background task database resources initialized.")
+    
+    async def cleanup_resources(self):
+        """Cleanup database resources"""
+        if self.db_pool and not self.db_pool._closed:
+            await close_background_task_pool()
+            self.db_pool = None
+            self.db_service = None
+            logger.info("TaskManager background task database resources cleaned up.")
+    
+    async def _run_business_logic_task(self, task_func, *args, **kwargs):
+        """Run a business logic function using the background task connection pool"""
+        try:
+            # Ensure the background task pool is initialized
+            if self.db_pool is None or self.db_pool._closed:
+                await self.initialize()
+            
+            logger.info(f"Starting background task: {task_func.__name__}")
+            result = await task_func(self.db_service, *args, **kwargs)
+            logger.info(f"Background task completed: {task_func.__name__}")
+            return result
+                
+        except Exception as e:
+            logger.error(f"Error in business logic task {task_func.__name__}: {e}", exc_info=True)
+            return False
+    
+    
+    def run_angles_bio_generation(self, task_id: str, campaign_id_str: str):
+        """Run angles and bio generation task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(generate_angles_and_bio, campaign_id_str)
+            finally:
+                self.cleanup_task(task_id)
+        
+        # Create asyncio task
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for angles_bio_generation")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_episode_sync(self, task_id: str):
+        """Run episode sync task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(sync_episodes_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for episode_sync")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_transcription(self, task_id: str):
+        """Run transcription task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(transcribe_episodes_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for transcription")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_enrichment_pipeline(self, task_id: str, media_id: int = None):
+        """Run enrichment pipeline task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(run_enrichment_pipeline_logic, media_id=media_id)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for enrichment_pipeline")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_vetting_pipeline(self, task_id: str):
+        """Run vetting pipeline task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(run_vetting_pipeline_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for vetting_pipeline")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_pitch_generation(self, task_id: str):
+        """Run pitch generation task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(generate_pitches_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for pitch_generation")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_pitch_sending(self, task_id: str):
+        """Run pitch sending task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(send_pitches_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for pitch_sending")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_campaign_content_processing(self, task_id: str, campaign_id_str: str):
+        """Run campaign content processing task"""
+        async def _cleanup_wrapper():
+            try:
+                campaign_id = uuid.UUID(campaign_id_str)
+                await self._run_business_logic_task(process_campaign_content, campaign_id)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for campaign_content_processing")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_qualitative_match_assessment(self, task_id: str):
+        """Run qualitative match assessment task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(run_qualitative_match_assessment_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for qualitative_match_assessment")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_score_potential_matches(self, task_id: str, campaign_id_str: Optional[str] = None, media_id_int: Optional[int] = None):
+        """Run score potential matches task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(score_potential_matches_logic, campaign_id_str, media_id_int)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for score_potential_matches")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_create_matches_for_enriched_media(self, task_id: str):
+        """Run create matches for enriched media task"""
+        async def _cleanup_wrapper():
+            try:
+                await self._run_business_logic_task(create_matches_for_enriched_media_logic)
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for create_matches_for_enriched_media")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_workflow_health_check(self, task_id: str):
+        """Run workflow health check to detect and fix common issues"""
+        self.start_task(task_id, "workflow_health_check")
+        
+        async def health_check_logic():
+            from podcast_outreach.services.tasks.health_checker import run_workflow_health_check
+            try:
+                results = await run_workflow_health_check()
+                
+                # Log results
+                logger.info(f"Health check completed: {results['issues_found']} issues found, {results['issues_fixed']} fixed")
+                for detail in results['details']:
+                    if detail.get('found', 0) > 0:
+                        logger.info(f"  - {detail['check']}: {detail['found']} found, {detail['fixed']} fixed")
+                
+                return results
+                
+            except Exception as e:
+                logger.error(f"Error in workflow health check: {e}", exc_info=True)
+                return None
+        
+        async def _cleanup_wrapper():
+            try:
+                await health_check_logic()
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for workflow_health_check")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_ai_description_completion(self, task_id: str):
+        """Run AI description completion for discoveries missing AI descriptions"""
+        async def ai_description_completion_logic():
+            """Complete AI descriptions for enriched media with race condition protection."""
+            from podcast_outreach.database.queries import campaign_media_discoveries as cmd_queries
+            from podcast_outreach.database.queries import media as media_queries
+            from podcast_outreach.services.business_logic.enhanced_discovery_workflow import EnhancedDiscoveryWorkflow
+            import asyncio
+            
+            try:
+                # First, clean up any stale locks from previous runs
+                cleaned = await cmd_queries.cleanup_stale_ai_description_locks(stale_minutes=60)
+                if cleaned > 0:
+                    logger.info(f"Cleaned up {cleaned} stale AI description locks")
+                
+                # Atomically acquire a batch of work
+                discoveries = await cmd_queries.acquire_ai_description_work_batch(limit=20)
+                if not discoveries:
+                    logger.info("No discoveries available for AI description completion")
+                    return
+                
+                logger.info(f"Acquired {len(discoveries)} discoveries for AI description generation")
+                
+                # Initialize workflow
+                workflow = EnhancedDiscoveryWorkflow()
+                
+                # Process with controlled concurrency (max 3 concurrent AI calls)
+                semaphore = asyncio.Semaphore(3)
+                
+                async def process_discovery(discovery):
+                    async with semaphore:
+                        discovery_id = discovery['id']
+                        media_id = discovery['media_id']
+                        media_name = discovery.get('media_name', 'Unknown')
+                        
+                        try:
+                            logger.info(f"Generating AI description for media {media_id} ({media_name})")
+                            
+                            # Generate AI description
+                            ai_desc = await workflow._generate_podcast_ai_description(media_id)
+                            
+                            if ai_desc:
+                                # Update media with AI description
+                                await media_queries.update_media_ai_description(media_id, ai_desc)
+                                logger.info(f"Generated AI description for media {media_id}")
+                                
+                                # Release lock with success
+                                await cmd_queries.release_ai_description_lock(discovery_id, success=True)
+                            else:
+                                logger.warning(f"Failed to generate AI description for media {media_id}")
+                                # Release lock with failure
+                                await cmd_queries.release_ai_description_lock(discovery_id, success=False)
+                                
+                        except Exception as e:
+                            logger.error(f"Error generating AI description for discovery {discovery_id}: {e}")
+                            # Always release lock on error
+                            await cmd_queries.release_ai_description_lock(discovery_id, success=False)
+                
+                # Process all discoveries with timeout
+                tasks = [process_discovery(discovery) for discovery in discoveries]
+                
+                # Wait for all with timeout (45 minutes max)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=45 * 60  # 45 minutes
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("AI description completion timed out after 45 minutes")
+                    # Locks will be cleaned up in next run
+                        
+            except Exception as e:
+                logger.error(f"Error in AI description completion task: {e}", exc_info=True)
+        
+        async def _cleanup_wrapper():
+            try:
+                await ai_description_completion_logic()
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for ai_description_completion")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_workflow_health_check(self, task_id: str):
+        """Run workflow health check to detect and fix common issues"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.tasks.health_checker import WorkflowHealthChecker
+                health_checker = WorkflowHealthChecker()
+                result = await health_checker.run_health_check()
+                logger.info(f"Health check completed: {result['issues_found']} issues found, {result['issues_fixed']} fixed")
+                return result
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for workflow_health_check")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
     
     def start_task(self, task_id: str, action: str) -> None:
         with self._lock:
@@ -369,7 +475,7 @@ class TaskManager:
                 for task_id, info in self.tasks.items()
             }
     
-    def cleanup(self) -> None:
+    async def cleanup(self) -> None:
         logger.info("Cleaning up all tasks during application shutdown.")
         with self._lock:
             task_ids = list(self.tasks.keys())
@@ -382,6 +488,12 @@ class TaskManager:
                     logger.error(f"Error signaling task {task_id} to stop during shutdown: {e}")
             self.tasks.clear()
             logger.info(f"All {len(task_ids)} tasks cleared from manager.")
+        
+        # Shutdown executor
+        self._executor.shutdown(wait=True)
+        
+        # Cleanup database resources
+        await self.cleanup_resources()
 
 # Global task manager instance
 task_manager = TaskManager()

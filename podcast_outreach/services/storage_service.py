@@ -20,8 +20,9 @@ class StorageService:
 
         # More robust check for missing or empty environment variables
         if not all([self.aws_access_key_id, self.aws_secret_access_key, self.region_name, self.bucket_name]):
-            logger.error("S3 storage service is not configured. One or more required AWS environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET_NAME) are missing or empty.")
-            raise ValueError("S3 configuration is incomplete.")
+            logger.warning("S3 storage service is not configured. One or more required AWS environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_S3_BUCKET_NAME) are missing or empty. Upload functionality will be disabled.")
+            self.s3_client = None
+            return
 
         # Recommended to specify signature version v4 for presigned URLs
         s3_config = Config(signature_version='s3v4')
@@ -46,6 +47,10 @@ class StorageService:
         Returns:
             The presigned URL as a string, or None if an error occurred.
         """
+        if not self.s3_client:
+            logger.error("S3 client not configured. Cannot generate presigned URL.")
+            return None
+            
         try:
             response = self.s3_client.generate_presigned_url(
                 'put_object',

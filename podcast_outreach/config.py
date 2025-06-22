@@ -30,6 +30,7 @@ PGL_AI_DRIVE_FOLDER_ID = os.getenv("PGL_AI_DRIVE_FOLDER_ID")
 
 # Feature flags
 ENABLE_LLM_TEST_DASHBOARD = os.getenv("ENABLE_LLM_TEST_DASHBOARD", "false").lower() == "true"
+IS_PRODUCTION = os.getenv("IS_PRODUCTION", "false").lower() == "true"
 
 # Worker/concurrency settings
 EPISODE_SYNC_MAX_CONCURRENT_TASKS = int(os.getenv("EPISODE_SYNC_MAX_CONCURRENT_TASKS", "10"))
@@ -61,9 +62,17 @@ API_CALL_DELAY = float(os.getenv("API_CALL_DELAY", "1.0")) # Delay in seconds be
 # Configuration for the enrichment orchestrator
 ORCHESTRATOR_CONFIG = {
     "media_enrichment_batch_size": 10,
-    "media_enrichment_interval_hours": 24 * 7,  # Re-enrich media older than 1 week
+    
+    # MULTI-LEVEL ENRICHMENT CONFIGURATION
+    "core_enrichment_interval_hours": 24 * 365,  # Core enrichment: rarely re-run (yearly)
+    "social_stats_refresh_interval_hours": 24 * 7,  # Social stats: weekly refresh
+    "quality_score_update_interval_hours": 24 * 7,  # Quality scores: weekly recalculation
+    
+    # LEGACY (keeping for backward compatibility)
+    "media_enrichment_interval_hours": 24 * 7,  # General enrichment fallback
+    "quality_score_update_interval_days": 7, # Legacy field
+    
     "quality_score_min_transcribed_episodes": 3,
-    "quality_score_update_interval_days": 7, # Re-calculate quality scores for media if last score is older than this
     "max_transcription_flags_per_media": 4, # Max episodes to flag for transcription per media item
     "main_loop_sleep_seconds": 300 # Sleep duration for the main orchestrator loop if run continuously
 }

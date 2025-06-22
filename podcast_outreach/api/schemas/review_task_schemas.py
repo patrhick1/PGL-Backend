@@ -1,6 +1,6 @@
 import uuid
-from typing import Optional, List
-from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 class ReviewTaskBase(BaseModel):
@@ -32,10 +32,18 @@ class ReviewTaskResponse(ReviewTaskBase):
     # Fields from pitch_generations itself if useful
     pitch_gen_id: Optional[int] = None # This is same as related_id for pitch_review
     media_id: Optional[int] = None
+    
+    # AI Context Fields (for match_suggestion tasks)
+    ai_reasoning: Optional[str] = Field(None, description="AI reasoning for the match")
+    vetting_score: Optional[float] = Field(None, description="AI vetting score (0-10)")
+    vetting_reasoning: Optional[str] = Field(None, description="AI detailed vetting analysis")
+    vetting_checklist: Optional[Dict[str, Any]] = Field(None, description="Dynamic vetting criteria with weights")
+    match_score: Optional[float] = Field(None, description="Basic similarity match score")
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    model_config = ConfigDict(
+        from_attributes=True,  # Replaces orm_mode = True
+        populate_by_name=True  # Replaces allow_population_by_field_name = True
+    )
 
 class PaginatedReviewTaskList(BaseModel):
     items: List[ReviewTaskResponse]

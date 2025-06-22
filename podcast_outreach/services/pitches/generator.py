@@ -32,7 +32,7 @@ from podcast_outreach.database.queries import pitches as pitch_queries
 from podcast_outreach.database.queries import review_tasks as review_task_queries
 from podcast_outreach.database.queries import pitch_templates as pitch_template_queries
 from podcast_outreach.integrations import google_docs as google_docs_integration
-from podcast_outreach.services.ai import tracker as ai_tracker
+from podcast_outreach.services.ai.tracker import tracker as ai_tracker
 from podcast_outreach.api.schemas.pitch_schemas import PitchEmail, SubjectLine
  
 logger = get_logger(__name__)
@@ -199,16 +199,36 @@ class PitchGeneratorService:
         # Potentially use other fields from db_template like 'tone' or 'language_code' to adjust LLM call if needed
 
         inputs = {
+            # Podcast Information
             "podcast_name": media_data.get('name', 'the podcast'),
             "host_name": media_data.get('host_names', [''])[0] if media_data.get('host_names') else 'the host',
             "episode_title": episode_data.get('title', 'a recent episode'),
             "episode_summary": episode_data.get('episode_summary', ''),
-            "ai_summary": episode_data.get('ai_episode_summary', ''),
+            "ai_summary_of_best_episode": episode_data.get('ai_episode_summary', ''),
+            "latest_news_from_podcast": '',  # TODO: Could be populated from recent episodes or social media
+            
+            # Client Information
             "client_name": campaign_data.get('campaign_name', 'our client'),
-            "client_bio": campaign_data.get('campaign_bio', ''), # Full bio from campaign
-            "client_bio_summary": campaign_data.get('campaign_bio', '')[:500], # Summary from campaign bio
-            "pitch_topics": campaign_data.get('campaign_angles', ''), # Angles from campaign
-            "media_kit_content": media_kit_content if media_kit_content else "No content available"
+            "client_bio_summary": campaign_data.get('campaign_bio', '')[:500],
+            "campaign_goal": campaign_data.get('goal_note', ''),
+            "client_key_talking_point_1": '',  # TODO: Extract from campaign angles
+            "client_key_talking_point_2": '',
+            "client_key_talking_point_3": '',
+            
+            # Pitch Details
+            "specific_pitch_angle": campaign_data.get('campaign_angles', ''),
+            "link_to_client_media_kit": campaign_data.get('media_kit_url', ''),
+            "media_kit_highlights": media_kit_content if media_kit_content else "No content available",
+            
+            # Context Awareness
+            "previous_context": "No previous contact with this podcast host.",
+            "context_guidelines": "This is the first contact with this podcast host. Use a standard introduction approach.",
+            
+            # Legacy compatibility
+            "pitch_topics": campaign_data.get('campaign_angles', ''),
+            "media_kit_content": media_kit_content if media_kit_content else "No content available",
+            "client_bio": campaign_data.get('campaign_bio', ''),
+            "ai_summary": episode_data.get('ai_episode_summary', '')
         }
  
         pitch_prompt_template = PromptTemplate(
@@ -234,7 +254,7 @@ class PitchGeneratorService:
             total_token_usage["input_tokens"] += prompt_tokens
             total_token_usage["output_tokens"] += completion_tokens
  
-            ai_tracker.log_usage(
+            await ai_tracker.log_usage(
                 workflow="pitch_generation_body",
                 model=self.model_name,
                 tokens_in=prompt_tokens,
@@ -253,19 +273,22 @@ class PitchGeneratorService:
             logger.error(f"Error generating pitch email for {media_data.get('name')}: {e}", exc_info=True)
             generated_email_body = f"ERROR: Failed to generate pitch email. {str(e)}"
  
-        # Subject line generation can also be made template-driven from DB if desired
-        # For now, keeping existing logic or assuming a fixed DB template for subject lines e.g. 'default_subject_template'
-        subject_template_id_for_db = "default_subject_template" # Example ID for a subject template
+        # Subject line generation - use our subject_line_v1 template
+        subject_template_id_for_db = "subject_line_v1"
         db_subject_template = await pitch_template_queries.get_template_by_id(subject_template_id_for_db)
 
         if db_subject_template and db_subject_template.get('prompt_body'):
             subject_line_template_content = db_subject_template['prompt_body']
             subject_inputs = {
-                "episode_summary": episode_data.get('episode_summary', '')[:500], # Keep summaries concise for subject
-                "ai_summary": episode_data.get('ai_episode_summary', '')[:500],
                 "podcast_name": media_data.get('name', 'your podcast'),
+                "host_name": media_data.get('host_names', [''])[0] if media_data.get('host_names') else 'the host',
+                "episode_title": episode_data.get('title', ''),
+                "episode_summary": (episode_data.get('episode_summary') or '')[:500],
+                "ai_summary_of_best_episode": (episode_data.get('ai_episode_summary') or '')[:500],
+                "guest_name": episode_data.get('guest_names', ''),  # If episode had a guest
                 "client_name": campaign_data.get('campaign_name', 'a relevant guest'),
-                # Add any other placeholders your subject template might use
+                # Legacy compatibility
+                "ai_summary": (episode_data.get('ai_episode_summary') or '')[:500]
             }
             subject_prompt_template = PromptTemplate(
                 template=subject_line_template_content,
@@ -285,7 +308,7 @@ class PitchGeneratorService:
                 total_token_usage["input_tokens"] += prompt_tokens
                 total_token_usage["output_tokens"] += completion_tokens
  
-                ai_tracker.log_usage(
+                await ai_tracker.log_usage(
                     workflow="pitch_generation_subject",
                     model=self.model_name,
                     tokens_in=prompt_tokens,
@@ -310,7 +333,7 @@ class PitchGeneratorService:
         execution_time = time.time() - start_time
         return generated_email_body, generated_subject_line, total_token_usage, execution_time
  
-    async def generate_pitch_for_match(self, match_id: int, pitch_template_id: str = "default_pitch_template") -> Dict[str, Any]:
+    async def generate_pitch_for_match(self, match_id: int, pitch_template_id: str = "generic_pitch_v1") -> Dict[str, Any]:
         """
         Orchestrates the pitch generation process for an approved match suggestion.
         Uses the specified pitch_template_id from the database.

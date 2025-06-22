@@ -137,10 +137,19 @@ async def get_all_review_tasks_paginated(
         "rt.*",
         "c.campaign_name",
         "p.full_name AS client_name",
-        "m.name AS media_name",
+        # Media name - from either pitch or match suggestion
+        "COALESCE(m_pitch.name, m_match.name) AS media_name",
+        # Pitch review fields
         "pg.draft_text",
         "pch.subject_line", 
-        "pg.media_id AS pitch_media_id" # To distinguish from a general media_id if joined differently
+        "pg.media_id AS pitch_media_id",
+        # Match suggestion AI fields
+        "ms.ai_reasoning",
+        "ms.vetting_score",
+        "ms.vetting_reasoning",
+        "ms.vetting_checklist",
+        "ms.match_score",
+        "ms.media_id AS match_media_id"
     ]
     
     joins = [
@@ -148,8 +157,11 @@ async def get_all_review_tasks_paginated(
         "LEFT JOIN people p ON c.person_id = p.person_id",
         # Conditional joins for pitch_review related data
         "LEFT JOIN pitch_generations pg ON rt.task_type = 'pitch_review' AND rt.related_id = pg.pitch_gen_id",
-        "LEFT JOIN pitches pch ON pg.pitch_gen_id = pch.pitch_gen_id", # Assuming one pitch per pitch_gen for subject
-        "LEFT JOIN media m ON pg.media_id = m.media_id" # Media for the pitch
+        "LEFT JOIN pitches pch ON pg.pitch_gen_id = pch.pitch_gen_id",
+        "LEFT JOIN media m_pitch ON pg.media_id = m_pitch.media_id",
+        # Conditional joins for match_suggestion related data
+        "LEFT JOIN match_suggestions ms ON rt.task_type = 'match_suggestion' AND rt.related_id = ms.match_id",
+        "LEFT JOIN media m_match ON ms.media_id = m_match.media_id"
     ]
     
     # Note: If task_type is 'match_suggestion', media_name would come from a different join:
@@ -206,13 +218,16 @@ async def get_all_review_tasks_paginated(
             total_record = await conn.fetchrow(count_query_string, *params_for_count)
             total = total_record['total'] if total_record else 0
             
-            # Adapt the returned dictionary to include pitch_gen_id and media_id for the schema
+            # Adapt the returned dictionary to include appropriate IDs and media_id for different task types
             results = []
             for row in rows:
                 r = dict(row)
                 if r.get('task_type') == 'pitch_review':
                     r['pitch_gen_id'] = r.get('related_id')
                     r['media_id'] = r.get('pitch_media_id')
+                elif r.get('task_type') == 'match_suggestion':
+                    r['media_id'] = r.get('match_media_id')
+                    # The AI fields are already included from the SELECT clause
                 results.append(r)
             return results, total
         except Exception as e:
@@ -261,3 +276,32 @@ async def get_pending_review_task_by_related_id_and_type(
         except Exception as e:
             logger.exception(f"Error fetching pending review task by related_id {related_id} and type {task_type}: {e}")
             return None
+
+async def complete_review_tasks_for_match(match_id: int, completion_notes: str = None) -> bool:
+    """Complete all pending review tasks for a specific match."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            query_string = """
+            UPDATE review_tasks 
+            SET status = 'completed', 
+                notes = COALESCE($2, notes),
+                completed_at = NOW()
+            WHERE related_id = $1 
+            AND task_type IN ('match_suggestion', 'match_suggestion_vetting')
+            AND status = 'pending'
+            RETURNING review_task_id;
+            """
+            results = await conn.fetch(query_string, match_id, completion_notes)
+            completed_count = len(results)
+            
+            if completed_count > 0:
+                logger.info(f"Completed {completed_count} review tasks for match {match_id}")
+                return True
+            else:
+                logger.debug(f"No pending review tasks found for match {match_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error completing review tasks for match {match_id}: {e}")
+            return False

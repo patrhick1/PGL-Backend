@@ -128,11 +128,14 @@ async def trigger_single_enrichment(media_id: int, background_tasks: BackgroundT
     if not media_record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found.")
 
-    # This re-uses the standalone enrichment task function from discovery.py
-    from podcast_outreach.services.enrichment.discovery import _run_full_enrichment_task
+    # Use the new TaskManager for enrichment
+    from podcast_outreach.services.tasks.manager import task_manager
+    import time
 
     logger.info(f"Admin user {user['username']} triggered manual enrichment for media_id: {media_id}")
-    background_tasks.add_task(_run_full_enrichment_task, media_id)
+    task_id = f"enrichment_{media_id}_{int(time.time())}"
+    task_manager.start_task(task_id, f"enrichment_media_{media_id}")
+    task_manager.run_enrichment_pipeline(task_id, media_id=media_id)
     
     return {"message": "Enrichment task started in the background.", "media_id": media_id}
 

@@ -80,6 +80,7 @@ class EpisodeHandlerService:
             standardized["duration_sec"] = raw_episode.get('audio_length_sec')
             standardized["episode_summary"] = raw_episode.get('description')
             standardized["episode_url"] = raw_episode.get('link') 
+            standardized["direct_audio_url"] = raw_episode.get('audio') or raw_episode.get('enclosure_url')
             standardized["api_episode_id"] = raw_episode.get('id') 
         elif source_api == "PodscanFM":
             standardized["title"] = raw_episode.get('episode_title')
@@ -87,6 +88,7 @@ class EpisodeHandlerService:
             standardized["duration_sec"] = None 
             standardized["episode_summary"] = raw_episode.get('episode_description')
             standardized["episode_url"] = raw_episode.get('episode_url') 
+            standardized["direct_audio_url"] = raw_episode.get('episode_audio_url')
             standardized["api_episode_id"] = raw_episode.get('episode_id') 
         else:
             logger.warning(f"Unknown source_api '{source_api}' for episode standardization.")
@@ -172,6 +174,28 @@ class EpisodeHandlerService:
         await media_queries.update_media_after_sync(media_id)
         
         logger.info(f"Episode fetch & store for media_id {media_id} summary: Processed API results: {processed_count}, New episodes stored: {upserted_count}, Failed: {failed_count}.")
+        
+        # Publish episodes fetched event if we stored new episodes
+        if upserted_count > 0:
+            try:
+                from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
+                event_bus = get_event_bus()
+                event = Event(
+                    event_type=EventType.EPISODES_FETCHED,
+                    entity_id=str(media_id),
+                    entity_type="media",
+                    data={
+                        "episode_count": upserted_count,
+                        "processed_count": processed_count,
+                        "failed_count": failed_count
+                    },
+                    source="episode_handler"
+                )
+                await event_bus.publish(event)
+                logger.info(f"Published EPISODES_FETCHED event for media {media_id} with {upserted_count} new episodes")
+            except Exception as e:
+                logger.error(f"Error publishing episodes fetched event: {e}")
+        
         return failed_count == 0
 
     async def flag_episodes_to_meet_transcription_goal(self, media_id: int, goal_count: int = 4):

@@ -212,8 +212,10 @@ class AIUsageTracker:
         }
         
         try:
-            # Log to PostgreSQL
-            await ai_usage_queries.log_ai_usage_in_db(log_data)
+            # Log to PostgreSQL (with retry mechanism)
+            db_result = await ai_usage_queries.log_ai_usage_in_db(log_data)
+            if db_result is None:
+                logger.warning(f"Failed to log AI usage to database for workflow {workflow}, but continuing...")
             
             # Log to local CSV (for immediate local debugging/backup)
             with open(self.log_file, 'a', newline='') as f:
@@ -261,8 +263,8 @@ class AIUsageTracker:
                 'related_media_id': related_media_id
             }
         except Exception as e:
-            logger.error(f"Error logging AI usage to DB or local CSV: {e}", exc_info=True)
-            raise
+            logger.error(f"Error logging AI usage to CSV: {e}", exc_info=True)
+            # Don't raise - allow the calling process to continue even if logging fails
     
     async def generate_report(self, 
                               start_date: Optional[str] = None, 

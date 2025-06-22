@@ -39,7 +39,7 @@ class MediaKitBase(BaseModel):
     previous_appearances: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     social_media_stats: Optional[Dict[str, Any]] = Field(default_factory=dict) # Can be user-provided or service-fetched
     testimonials_section: Optional[str] = None # <<< ADDED
-    headshot_image_urls: Optional[List[str]] = Field(default_factory=list)
+    headshot_image_url: Optional[str] = None
     logo_image_url: Optional[str] = None
     call_to_action_text: Optional[str] = None
     contact_information_for_booking: Optional[str] = None
@@ -55,7 +55,7 @@ class MediaKitEditableContentSchema(BaseModel):
     key_achievements: Optional[List[str]] = Field(None, description="List of key achievements.")
     previous_appearances: Optional[List[Dict[str, str]]] = Field(None, description="List of previous appearances (podcast_name, episode_title, link).")
     # social_media_stats: Optional[Dict[str, Any]] = Field(None, description="User-provided social media links/stats. Service might also fetch/update these.")
-    headshot_image_urls: Optional[List[str]] = Field(None, description="List of URLs for client headshots.")
+    headshot_image_url: Optional[str] = Field(None, description="URL for client headshot.")
     logo_image_url: Optional[str] = Field(None, description="URL for the client/company logo.")
     call_to_action_text: Optional[str] = Field(None, description="Custom call to action text.")
     contact_information_for_booking: Optional[str] = Field(None, description="Contact info for bookings.")

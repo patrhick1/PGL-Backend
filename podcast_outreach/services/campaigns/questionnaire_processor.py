@@ -4,6 +4,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.services.ai.gemini_client import GeminiService
+from podcast_outreach.services.campaigns.questionnaire_social_processor import QuestionnaireSocialProcessor
 import json # For storing as JSONB
 import re
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ class QuestionnaireProcessor:
     
     def __init__(self):
         self.gemini_service = GeminiService()  # Using enhanced Gemini 2.0-flash
+        self.social_processor = QuestionnaireSocialProcessor()  # For social media processing
 
     async def _generate_keywords_from_questionnaire_llm(self, questionnaire_data: Dict[str, Any]) -> List[str]:
         """Generate keywords from questionnaire data using LLM instead of hardcoded topics."""
@@ -281,6 +283,125 @@ Host: Where can our listeners learn more about you and your work?
                 "success": False,
                 "error": f"Error processing questionnaire: {str(e)}"
             }
+
+    async def process_questionnaire_with_social_enrichment(
+        self, 
+        campaign_id: str, 
+        questionnaire_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Enhanced questionnaire processing that includes social media enrichment
+        
+        Args:
+            campaign_id: Campaign ID
+            questionnaire_data: Complete questionnaire response
+            
+        Returns:
+            Dict with processing results including social media insights
+        """
+        try:
+            logger.info(f"Processing questionnaire with social enrichment for campaign {campaign_id}")
+            
+            # 1. Process the basic questionnaire (existing functionality)
+            basic_result = await self.process_campaign_questionnaire_submission(campaign_id, questionnaire_data)
+            
+            # 2. Process social media data
+            client_social_profile = await self.social_processor.process_questionnaire_social_data(
+                questionnaire_data, campaign_id
+            )
+            
+            # 3. Extract ideal podcast description for vetting
+            ideal_podcast_description = self.social_processor.extract_ideal_podcast_description(questionnaire_data)
+            
+            # 4. Update campaign with social data and ideal podcast description
+            await self._update_campaign_with_enriched_data(
+                campaign_id, 
+                client_social_profile, 
+                ideal_podcast_description
+            )
+            
+            # 5. Return comprehensive results
+            return {
+                "success": True,
+                "basic_processing": basic_result,
+                "social_profile": {
+                    "handles": [
+                        {
+                            "platform": handle.platform,
+                            "handle": handle.handle,
+                            "url": handle.url
+                        } for handle in client_social_profile.handles
+                    ],
+                    "bio_summary": client_social_profile.bio_summary,
+                    "expertise_topics": client_social_profile.expertise_topics,
+                    "key_messages": client_social_profile.key_messages,
+                    "content_themes": client_social_profile.content_themes,
+                    "engagement_style": client_social_profile.engagement_style
+                },
+                "ideal_podcast_description": ideal_podcast_description,
+                "campaign_id": campaign_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in enhanced questionnaire processing for campaign {campaign_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "campaign_id": campaign_id
+            }
+
+    async def _update_campaign_with_enriched_data(
+        self, 
+        campaign_id: str, 
+        social_profile, 
+        ideal_podcast_description: str
+    ) -> bool:
+        """Update campaign with enriched social media data and ideal podcast description"""
+        try:
+            # Prepare update data
+            update_data = {
+                "ideal_podcast_description": ideal_podcast_description
+            }
+            
+            # Add social media data to questionnaire_responses
+            # This preserves the original questionnaire data while adding enrichment
+            existing_campaign = await campaign_queries.get_campaign_by_id(uuid.UUID(campaign_id))
+            if existing_campaign:
+                existing_responses = existing_campaign.get('questionnaire_responses', {})
+                
+                # Add social enrichment data
+                existing_responses['social_enrichment'] = {
+                    'bio_summary': social_profile.bio_summary,
+                    'expertise_topics': social_profile.expertise_topics,
+                    'key_messages': social_profile.key_messages,
+                    'content_themes': social_profile.content_themes,
+                    'engagement_style': social_profile.engagement_style,
+                    'social_handles': [
+                        {
+                            'platform': handle.platform,
+                            'handle': handle.handle,
+                            'url': handle.url
+                        } for handle in social_profile.handles
+                    ],
+                    'processed_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+                update_data['questionnaire_responses'] = existing_responses
+            
+            # Update the campaign
+            updated_campaign = await campaign_queries.update_campaign(uuid.UUID(campaign_id), update_data)
+            success = updated_campaign is not None
+            
+            if success:
+                logger.info(f"Successfully updated campaign {campaign_id} with enriched data")
+            else:
+                logger.error(f"Failed to update campaign {campaign_id} with enriched data")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error updating campaign {campaign_id} with enriched data: {e}")
+            return False
 
 
 # Create singleton instance for backwards compatibility

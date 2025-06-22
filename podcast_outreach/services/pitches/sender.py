@@ -30,6 +30,7 @@ class PitchSenderService:
         campaign_data: Dict[str, Any],
         media_data: Dict[str, Any],
         pitch_gen_data: Dict[str, Any],
+        pitch_data: Dict[str, Any],
         recipient_email: str
     ) -> Dict[str, Any]:
         """
@@ -43,7 +44,7 @@ class PitchSenderService:
         client_name = campaign_data.get('campaign_name')
         podcast_name = media_data.get('name')
         host_name = media_data.get('host_names', [''])[0] if media_data.get('host_names') else ''
-        subject_line = pitch_gen_data.get('subject_line') or "No Subject"
+        subject_line = pitch_data.get('subject_line') or "No Subject"
         pitch_body = pitch_gen_data.get('final_text') or pitch_gen_data.get('draft_text')
  
         custom_variables = {
@@ -62,6 +63,8 @@ class PitchSenderService:
             "first_name": host_name,
             "company_name": podcast_name,
             "personalization": pitch_body,
+            "verify_leads_for_lead_finder": True,
+            "verify_leads_on_import": True,
             "custom_variables": custom_variables
         }
         return data
@@ -104,9 +107,15 @@ class PitchSenderService:
                 return result
             
             primary_recipient_email = email_list[0]
+            
+            # Get the pitch record to get subject_line
+            pitch_record = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
+            if not pitch_record:
+                result["message"] = f"No pitch record found for pitch_gen_id {pitch_gen_id}."
+                return result
  
             api_data = await self._prepare_instantly_api_data(
-                campaign_data, media_data, pitch_gen, primary_recipient_email
+                campaign_data, media_data, pitch_gen, pitch_record, primary_recipient_email
             )
  
             logger.info(f"Sending pitch {pitch_gen_id} to Instantly for {primary_recipient_email}...")
@@ -116,21 +125,16 @@ class PitchSenderService:
                 lead_id = response_data['id']
                 logger.info(f"Pitch {pitch_gen_id} successfully sent to Instantly. Lead ID: {lead_id}")
                 
-                pitch_record_for_update = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
-                if pitch_record_for_update:
-                    await pitch_queries.update_pitch_in_db(
-                        pitch_record_for_update['pitch_id'],
-                        {
-                            "send_ts": datetime.utcnow(),
-                            "pitch_state": "sent",
-                            "instantly_lead_id": lead_id
-                        }
-                    )
-                    result["success"] = True
-                    result["message"] = f"Pitch {pitch_record_for_update['pitch_id']} sent successfully to Instantly. Lead ID: {lead_id}"
-                else:
-                    logger.error(f"Could not find associated pitch record for pitch_gen_id {pitch_gen_id} to update send status.")
-                    result["message"] = f"Pitch sent to Instantly, but failed to update DB record for pitch_gen_id {pitch_gen_id}."
+                await pitch_queries.update_pitch_in_db(
+                    pitch_record['pitch_id'],
+                    {
+                        "send_ts": datetime.utcnow(),
+                        "pitch_state": "sent",
+                        "instantly_lead_id": lead_id
+                    }
+                )
+                result["success"] = True
+                result["message"] = f"Pitch {pitch_record['pitch_id']} sent successfully to Instantly. Lead ID: {lead_id}"
  
             else:
                 result["message"] = f"Instantly API did not return a lead ID or response was unexpected for pitch {pitch_gen_id}."

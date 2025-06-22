@@ -337,8 +337,7 @@ class OpenAIService: # Keeping original class name for compatibility
                 tokens_in=tokens_in, 
                 tokens_out=0, # Embeddings don't have "output tokens" in the same way
                 execution_time=(time.time() - start_time),
-                endpoint="openai.embeddings.create",
-                **kwargs # Pass related_ids
+                endpoint="openai.embeddings.create"
             )
             return embedding
         except Exception as e:

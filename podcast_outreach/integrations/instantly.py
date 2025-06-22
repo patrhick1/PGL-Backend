@@ -63,7 +63,7 @@ class InstantlyAPIClient: # Renamed from InstantlyAPI to InstantlyAPIClient for 
             logger.error(f"InstantlyAPIClient list_emails failed: {e}")
             return None
 
-    def list_leads_from_campaign(self, campaign_id: str, search: Optional[str] = None, limit_per_page: int = 100) -> List[Dict[str, Any]]:
+    def list_leads_from_campaign(self, campaign_id: str, search: Optional[str] = None, filter_str: Optional[str] = None, limit_per_page: int = 100) -> List[Dict[str, Any]]:
         if not campaign_id: return []
         all_leads = []
         starting_after = None
@@ -71,6 +71,7 @@ class InstantlyAPIClient: # Renamed from InstantlyAPI to InstantlyAPIClient for 
             payload = {"campaign": campaign_id, "limit": limit_per_page}
             if starting_after: payload["starting_after"] = starting_after
             if search: payload["search"] = search
+            if filter_str: payload["filter"] = filter_str
             try:
                 response = self._request_instantly("POST", "leads/list", json=payload)
                 data = response.json()
@@ -88,3 +89,32 @@ class InstantlyAPIClient: # Renamed from InstantlyAPI to InstantlyAPIClient for 
                 break
             starting_after = next_starting_after
         return all_leads
+    
+    def delete_lead(self, lead_id: str) -> requests.Response:
+        """Delete a lead from Instantly by its ID."""
+        if not lead_id:
+            logger.error("lead_id must be provided to delete_lead")
+            mock_response = requests.Response()
+            mock_response.status_code = 400
+            mock_response.reason = "Lead ID Missing"
+            mock_response._content = b'{"error": "Lead ID Missing"}'
+            return mock_response
+        
+        try:
+            response = self._request_instantly("DELETE", f"leads/{lead_id}")
+            return response
+        except APIClientError as e:
+            logger.error(f"Failed to delete lead {lead_id}: {e}")
+            mock_response = requests.Response()
+            mock_response.status_code = e.status_code if hasattr(e, 'status_code') else 500
+            mock_response.reason = str(e)
+            mock_response._content = f'{{"error": "{str(e)}"}}'.encode()
+            return mock_response
+    
+    def test_connection(self) -> bool:
+        """Test if the Instantly API key is valid."""
+        result = self.list_campaigns()
+        if result is not None:
+            logger.info("Instantly API connection successful")
+            return True
+        return False

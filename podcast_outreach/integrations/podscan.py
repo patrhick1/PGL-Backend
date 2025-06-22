@@ -37,6 +37,8 @@ class PodscanAPIClient(PodcastAPIClient):
             'query': query,
             'per_page': kwargs.get('per_page', 20),
             'language': kwargs.get('language', 'en'),
+            'min_episode_count': kwargs.get('min_episode_count', 10), # Minimum episodes for quality podcasts
+            'has_guests': kwargs.get('has_guests', True), # Only podcasts with guest interviews
             **{k: v for k, v in kwargs.items() if k in ['page', 'category_ids']}
         }
         if 'category_id' in params: # Legacy mapping from single id

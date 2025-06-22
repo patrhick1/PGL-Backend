@@ -44,9 +44,26 @@ async def async_tavily_search(
         "include_raw_content": include_raw_content,
         "include_images": include_images,
     }
-    try:
-        response = await asyncio.to_thread(_client.search, **kwargs)
-        return response
-    except Exception as e:  # pragma: no cover - runtime errors
-        logger.error("Tavily search failed: %s", e)
-        return None
+    max_retries = 3
+    base_delay = 2  # Start with 2 seconds
+    
+    for attempt in range(max_retries + 1):
+        try:
+            response = await asyncio.to_thread(_client.search, **kwargs)
+            return response
+        except Exception as e:  # pragma: no cover - runtime errors
+            error_str = str(e).lower()
+            
+            # Check if it's a rate limiting error
+            if "rate" in error_str or "blocked" in error_str or "excessive" in error_str:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Tavily rate limited. Waiting {delay}s before retry {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Tavily search failed after {max_retries} retries due to rate limiting: {e}")
+            else:
+                logger.error(f"Tavily search failed: {e}")
+            
+            return None

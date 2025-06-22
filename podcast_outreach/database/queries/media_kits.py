@@ -21,7 +21,7 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
         campaign_id, person_id, title, slug, is_public, theme_preference,
         headline, introduction, full_bio_content, summary_bio_content, short_bio_content,
         talking_points, key_achievements, previous_appearances, social_media_stats,
-        headshot_image_urls, logo_image_url, call_to_action_text, contact_information_for_booking,
+        headshot_image_url, logo_image_url, call_to_action_text, contact_information_for_booking,
         custom_sections,
         tagline, bio_source, keywords,
         angles_source, sample_questions, testimonials_section,
@@ -43,8 +43,8 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
             sample_questions_json = json.dumps(kit_data.get('sample_questions', []))
             person_social_links_json = json.dumps(kit_data.get('person_social_links', {}))
             
-            # TEXT[] field: pass as Python list
-            headshot_image_urls_list = kit_data.get('headshot_image_urls', [])
+            # TEXT field: pass as string
+            headshot_image_url = kit_data.get('headshot_image_url')
 
             row = await conn.fetchrow(
                 query,
@@ -53,7 +53,7 @@ async def create_media_kit_in_db(kit_data: Dict[str, Any]) -> Optional[Dict[str,
                 kit_data.get('headline'), kit_data.get('introduction'),
                 kit_data.get('full_bio_content'), kit_data.get('summary_bio_content'), kit_data.get('short_bio_content'),
                 talking_points_json, key_achievements_json, previous_appearances_json, social_media_stats_json,
-                headshot_image_urls_list, kit_data.get('logo_image_url'), 
+                headshot_image_url, kit_data.get('logo_image_url'), 
                 kit_data.get('call_to_action_text'), kit_data.get('contact_information_for_booking'), 
                 custom_sections_json,
                 kit_data.get('tagline'), kit_data.get('bio_source'), kit_data.get('keywords', []),
@@ -83,7 +83,7 @@ def _process_media_kit_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
                 processed_row[field] = json.loads(processed_row[field])
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON field '{field}' for media kit {processed_row.get('media_kit_id')}: {e}. Leaving as string.")
-    # headshot_image_urls is TEXT[] and should already be a list from asyncpg
+    # headshot_image_url is TEXT and should be a string from asyncpg
     return processed_row
 
 async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -106,8 +106,8 @@ async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str,
         
         if key in jsonb_fields_to_serialize and isinstance(value, (dict, list)):
             values.append(json.dumps(value))
-        elif key == 'headshot_image_urls' and isinstance(value, list):
-            # TEXT[] field: pass as list directly
+        elif key == 'headshot_image_url' and isinstance(value, str):
+            # TEXT field: pass as string directly
             values.append(value)
         else:
             values.append(value)

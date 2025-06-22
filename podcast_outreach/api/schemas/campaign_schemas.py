@@ -14,6 +14,7 @@ class CampaignBase(BaseModel):
     campaign_angles: Optional[str] = None # Link to GDoc or text
     campaign_keywords: Optional[List[str]] = None # Stored as TEXT[] in DB
     questionnaire_keywords: Optional[List[str]] = None # LLM generated keywords from questionnaire
+    gdoc_keywords: Optional[List[str]] = None # Keywords from Google Docs analysis
     compiled_social_posts: Optional[str] = None # Link to GDoc or text
     podcast_transcript_link: Optional[str] = None # Link to GDoc
     compiled_articles_link: Optional[str] = None # Link to GDoc
@@ -23,6 +24,8 @@ class CampaignBase(BaseModel):
     end_date: Optional[date] = None
     goal_note: Optional[str] = None
     media_kit_url: Optional[str] = None
+    instantly_campaign_id: Optional[str] = None # Instantly.ai campaign ID for integration
+    ideal_podcast_description: Optional[str] = None  # Description of ideal podcast for vetting
     questionnaire_responses: Optional[Dict[str, Any]] = None
 
 class CampaignCreate(CampaignBase):
@@ -37,6 +40,7 @@ class CampaignUpdate(BaseModel):
     campaign_angles: Optional[str] = None
     campaign_keywords: Optional[List[str]] = None
     questionnaire_keywords: Optional[List[str]] = None # Allow updating this field too
+    gdoc_keywords: Optional[List[str]] = None # Keywords from Google Docs analysis
     compiled_social_posts: Optional[str] = None
     podcast_transcript_link: Optional[str] = None
     compiled_articles_link: Optional[str] = None
@@ -45,6 +49,8 @@ class CampaignUpdate(BaseModel):
     end_date: Optional[date] = None
     goal_note: Optional[str] = None
     media_kit_url: Optional[str] = None
+    instantly_campaign_id: Optional[str] = None # Instantly.ai campaign ID for integration
+    ideal_podcast_description: Optional[str] = None  # Description of ideal podcast for vetting
     questionnaire_responses: Optional[Dict[str, Any]] = None
 
 class CampaignInDB(CampaignBase):

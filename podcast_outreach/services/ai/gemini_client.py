@@ -239,7 +239,7 @@ class GeminiService:
                 chain = prompt_template | llm_for_structured_output.with_structured_output(output_model)
                 
                 # The input to invoke should match the input_variables of the prompt_template
-                response_obj = await asyncio.to_thread(chain.invoke, {"input_text": user_query})
+                response_obj = await asyncio.to_thread(chain.invoke, {"user_query": user_query})
 
                 execution_time = time.time() - start_time
                 tokens_in = len(approx_input_for_logging) // 4 

@@ -13,7 +13,7 @@ class GeminiPodcastEnrichment(BaseModel):
     podcast_facebook_url: Optional[str] = Field(None, description="Official Facebook URL for the podcast found by Gemini.")
     podcast_youtube_url: Optional[str] = Field(None, description="Official YouTube channel URL for the podcast found by Gemini.")
     podcast_tiktok_url: Optional[str] = Field(None, description="Official TikTok profile URL for the podcast found by Gemini.")
-    host_names: Optional[List[str]] = Field(None, description="Names of the podcast hosts found by Gemini.")
+    host_names: Optional[List[str]] = Field(None, description="Actual human names of podcast hosts (e.g., 'John Smith', 'Sarah Johnson'). Only include specific person names, never descriptions or instructions.")
     # Host-specific social URLs found by Gemini will be handled by trying to create/update people records
     # and linking them. These fields are for direct discovery if needed.
     host_linkedin_url: Optional[str] = Field(None, description="LinkedIn profile URL of a primary host found by Gemini.")

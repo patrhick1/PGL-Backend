@@ -13,13 +13,14 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
     query = """
     INSERT INTO campaigns (
         campaign_id, person_id, attio_client_id, campaign_name, campaign_type,
-        campaign_bio, campaign_angles, campaign_keywords, compiled_social_posts,
-        podcast_transcript_link, compiled_articles_link, mock_interview_trancript,
-        start_date, end_date, goal_note, media_kit_url, instantly_campaign_id,
-        questionnaire_responses -- <<< NEW FIELD
+        campaign_bio, campaign_angles, campaign_keywords, questionnaire_keywords,
+        gdoc_keywords, compiled_social_posts, podcast_transcript_link, 
+        compiled_articles_link, mock_interview_trancript, start_date, end_date, 
+        goal_note, media_kit_url, instantly_campaign_id, ideal_podcast_description,
+        questionnaire_responses
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-        $18 -- <<< NEW PARAMETER
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 
+        $17, $18, $19, $20, $21
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -43,15 +44,27 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
 
             row = await conn.fetchrow(
                 query,
-                campaign_data['campaign_id'], campaign_data['person_id'], campaign_data.get('attio_client_id'),
-                campaign_data['campaign_name'], campaign_data.get('campaign_type'),
-                campaign_data.get('campaign_bio'), campaign_data.get('campaign_angles'), keywords,
-                campaign_data.get('compiled_social_posts'), campaign_data.get('podcast_transcript_link'),
-                campaign_data.get('compiled_articles_link'), campaign_data.get('mock_interview_trancript'),
-                campaign_data.get('start_date'), campaign_data.get('end_date'),
-                campaign_data.get('goal_note'), campaign_data.get('media_kit_url'),
+                campaign_data['campaign_id'], 
+                campaign_data['person_id'], 
+                campaign_data.get('attio_client_id'),
+                campaign_data['campaign_name'], 
+                campaign_data.get('campaign_type'),
+                campaign_data.get('campaign_bio'), 
+                campaign_data.get('campaign_angles'), 
+                keywords,
+                campaign_data.get('questionnaire_keywords', []) or [],
+                campaign_data.get('gdoc_keywords', []) or [],
+                campaign_data.get('compiled_social_posts'), 
+                campaign_data.get('podcast_transcript_link'),
+                campaign_data.get('compiled_articles_link'), 
+                campaign_data.get('mock_interview_trancript'),
+                campaign_data.get('start_date'), 
+                campaign_data.get('end_date'),
+                campaign_data.get('goal_note'), 
+                campaign_data.get('media_kit_url'),
                 campaign_data.get('instantly_campaign_id'),
-                q_responses_json_str # <<< PASS THE JSON STRING
+                campaign_data.get('ideal_podcast_description'),
+                q_responses_json_str
             )
             logger.info(f"Campaign created: {campaign_data.get('campaign_id')}")
             return dict(row) if row else None
@@ -77,6 +90,20 @@ async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse questionnaire_responses for campaign {campaign_id}: {e}. Leaving as string or None.")
                     # Depending on strictness, you might set it to None or leave as is, or re-raise
+            
+            # Handle embedding conversion
+            if processed_row.get('embedding') and isinstance(processed_row['embedding'], str):
+                try:
+                    import numpy as np
+                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
+                    processed_row['embedding'] = np.array(eval(processed_row['embedding']))
+                except:
+                    try:
+                        processed_row['embedding'] = np.array(json.loads(processed_row['embedding']))
+                    except:
+                        logger.warning(f"Could not parse embedding for campaign {campaign_id}")
+                        processed_row['embedding'] = None
+            
             return processed_row
         except Exception as e:
             logger.exception(f"Error fetching campaign {campaign_id}: {e}")
@@ -168,6 +195,13 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
             if not q_keywords_list and str(val).strip():
                 q_keywords_list = [kw.strip() for kw in str(val).split() if kw.strip()]
             val = q_keywords_list
+        
+        if key == "gdoc_keywords" and val is not None and not isinstance(val, list):
+            # Similar handling for gdoc_keywords if it can come as a string
+            gdoc_keywords_list = [kw.strip() for kw in str(val).split(',') if kw.strip()]
+            if not gdoc_keywords_list and str(val).strip():
+                gdoc_keywords_list = [kw.strip() for kw in str(val).split() if kw.strip()]
+            val = gdoc_keywords_list
 
         if key == "embedding" and isinstance(val, list):
             # Convert list of floats to pgvector-compatible string format '[f1,f2,...]'

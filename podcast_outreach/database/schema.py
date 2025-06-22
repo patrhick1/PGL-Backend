@@ -178,6 +178,7 @@ def create_media_table(conn):
         fetched_episodes          BOOLEAN,
         description               TEXT,
         ai_description            TEXT,
+        episode_summaries_compiled TEXT,
         embedding                 VECTOR(1536),
         created_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- NEW: Add updated_at
@@ -320,6 +321,7 @@ def create_episodes_table(conn):
         episode_summary TEXT,
         ai_episode_summary TEXT,
         episode_url TEXT,
+        direct_audio_url TEXT,
         transcript TEXT,
         embedding VECTOR(1536),
         transcribe BOOLEAN,
@@ -555,7 +557,7 @@ def create_media_kits_table(conn): # NEW FUNCTION
         person_social_links JSONB DEFAULT '{}'::jsonb, -- NEW: For client's own social media links
         social_media_stats JSONB DEFAULT '{}'::jsonb, -- Default to empty JSON object (for follower counts etc)
         testimonials_section TEXT,
-        headshot_image_urls TEXT[],
+        headshot_image_url TEXT,
         logo_image_url TEXT,
         call_to_action_text TEXT,
         contact_information_for_booking TEXT, -- General contact, email, phone, website from contactInfo
@@ -571,6 +573,80 @@ def create_media_kits_table(conn): # NEW FUNCTION
     execute_sql(conn, sql_statement)
     print("Table MEDIA_KITS created/ensured.")
     apply_timestamp_update_trigger(conn, "media_kits")
+
+def create_campaign_media_discoveries(conn):
+    """Create enhanced campaign_media_discoveries table to track discovery, enrichment, and vetting workflow"""
+    print("Creating campaign_media_discoveries table...")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_media_discoveries (
+            id SERIAL PRIMARY KEY,
+            campaign_id UUID NOT NULL REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+            media_id INTEGER NOT NULL REFERENCES media(media_id) ON DELETE CASCADE,
+            discovery_keyword TEXT NOT NULL,
+            discovered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            
+            -- ENRICHMENT TRACKING
+            enrichment_status TEXT DEFAULT 'pending' CHECK (enrichment_status IN ('pending', 'in_progress', 'completed', 'failed')),
+            enrichment_completed_at TIMESTAMP WITH TIME ZONE,
+            enrichment_error TEXT,
+            
+            -- VETTING TRACKING  
+            vetting_status TEXT DEFAULT 'pending' CHECK (vetting_status IN ('pending', 'in_progress', 'completed', 'failed')),
+            vetting_score NUMERIC(4,2),
+            vetting_reasoning TEXT,
+            vetting_criteria_met JSONB,
+            vetted_at TIMESTAMP WITH TIME ZONE,
+            vetting_error TEXT,
+            
+            -- MATCH CREATION TRACKING
+            match_created BOOLEAN DEFAULT FALSE,
+            match_suggestion_id INTEGER REFERENCES match_suggestions(match_id),
+            match_created_at TIMESTAMP WITH TIME ZONE,
+            
+            -- REVIEW TRACKING
+            review_task_created BOOLEAN DEFAULT FALSE,
+            review_task_id INTEGER,
+            review_status TEXT DEFAULT 'pending' CHECK (review_status IN ('pending', 'approved', 'rejected')),
+            reviewed_at TIMESTAMP WITH TIME ZONE,
+            
+            CONSTRAINT unique_campaign_media UNIQUE(campaign_id, media_id)
+        );
+    """)
+    
+    # Create indexes for better performance
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_campaign_id 
+        ON campaign_media_discoveries(campaign_id);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_media_id 
+        ON campaign_media_discoveries(media_id);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_discovered_at 
+        ON campaign_media_discoveries(discovered_at);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_enrichment_status 
+        ON campaign_media_discoveries(enrichment_status);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_vetting_status 
+        ON campaign_media_discoveries(vetting_status);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_vetting_score 
+        ON campaign_media_discoveries(vetting_score);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_campaign_media_discoveries_review_status 
+        ON campaign_media_discoveries(review_status);
+    """)
+    
+    print("Campaign media discoveries table created successfully.")
 
 def create_password_reset_tokens_table(conn):
     """Create password_reset_tokens table"""
@@ -686,6 +762,7 @@ def create_all_tables():
         create_status_history_table(conn) # Depends on PLACEMENTS
         create_ai_usage_logs_table(conn) # NEW: Depends on PITCH_GENERATIONS, CAMPAIGNS, MEDIA
         create_media_kits_table(conn) # ADDED: Depends on CAMPAIGNS, PEOPLE
+        create_campaign_media_discoveries(conn) # WORKFLOW OPTIMIZATION: Depends on CAMPAIGNS, MEDIA
         create_password_reset_tokens_table(conn)
         
         print("All tables checked/created successfully.")

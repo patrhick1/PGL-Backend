@@ -13,6 +13,7 @@ class PersonBase(BaseModel):
     twitter_profile_url: Optional[str] = None
     instagram_profile_url: Optional[str] = None
     tiktok_profile_url: Optional[str] = None
+    profile_image_url: Optional[str] = None # Profile image URL from S3
     dashboard_username: Optional[str] = None
     # dashboard_password_hash: Optional[str] = None # Typically not exposed or updated directly via general API
     attio_contact_id: Optional[uuid.UUID] = None

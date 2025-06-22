@@ -14,8 +14,10 @@ async def create_match_suggestion_in_db(suggestion: Dict[str, Any]) -> Optional[
     """Insert a match suggestion and return it."""
     query = """
     INSERT INTO match_suggestions (
-        campaign_id, media_id, match_score, matched_keywords, ai_reasoning, status, client_approved, approved_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        campaign_id, media_id, match_score, matched_keywords, ai_reasoning, status, 
+        client_approved, approved_at, vetting_score, vetting_reasoning, 
+        vetting_checklist, last_vetted_at, best_matching_episode_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING *;
     """
     keywords = suggestion.get("matched_keywords") or []
@@ -32,6 +34,11 @@ async def create_match_suggestion_in_db(suggestion: Dict[str, Any]) -> Optional[
                 suggestion.get("status", "pending"),
                 suggestion.get("client_approved", False),
                 suggestion.get("approved_at"),
+                suggestion.get("vetting_score"),
+                suggestion.get("vetting_reasoning"),
+                suggestion.get("vetting_checklist"),
+                suggestion.get("last_vetted_at"),
+                suggestion.get("best_matching_episode_id")
             )
             logger.info(f"Match suggestion created: {row.get('match_id')}")
             return dict(row) if row else None
@@ -147,18 +154,10 @@ async def approve_match_and_create_pitch_task(match_id: int) -> Optional[Dict[st
             logger.exception("Error approving match suggestion: %s", e)
             raise
 
-    # Create a follow-up review task for pitching. Failures shouldn't block approval.
-    try:
-        await review_tasks.create_review_task_in_db(
-            {
-                "task_type": "pitch_review",
-                "related_id": match["match_id"],
-                "campaign_id": match["campaign_id"],
-                "status": "pending",
-            }
-        )
-    except Exception as e:  # pragma: no cover - optional future-proofing
-        logger.exception("Error creating pitch review task for match %s: %s", match_id, e)
+    # We no longer auto-generate pitches on approval
+    # Instead, matches are marked as 'client_approved' and ready for manual pitch generation
+    # This allows users to select templates for each pitch
+    logger.info(f"Match {match_id} approved and ready for pitch generation")
 
     return match
 
@@ -184,6 +183,15 @@ async def get_all_match_suggestions_enriched(
         param_idx += 1
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
+    
+    # Add skip and limit to params and get their positions
+    params.append(skip)
+    skip_param_idx = param_idx
+    param_idx += 1
+    
+    params.append(limit)
+    limit_param_idx = param_idx
+    param_idx += 1
 
     query = f"""
     SELECT 
@@ -198,15 +206,26 @@ async def get_all_match_suggestions_enriched(
     LEFT JOIN people p ON c.person_id = p.person_id -- LEFT JOIN in case person_id is nullable or person is deleted
     WHERE {where_clause}
     ORDER BY ms.created_at DESC
-    OFFSET ${param_idx} LIMIT ${param_idx + 1};
+    OFFSET ${skip_param_idx} LIMIT ${limit_param_idx};
     """
-    params.extend([skip, limit])
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(query, *params)
-            return [dict(row) for row in rows]
+            results = []
+            for row in rows:
+                row_dict = dict(row)
+                # Handle vetting_checklist that might be stored as JSON string
+                if row_dict.get('vetting_checklist') and isinstance(row_dict['vetting_checklist'], str):
+                    try:
+                        import json
+                        row_dict['vetting_checklist'] = json.loads(row_dict['vetting_checklist'])
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse vetting_checklist for match_id: {row_dict.get('match_id')}")
+                        row_dict['vetting_checklist'] = None
+                results.append(row_dict)
+            return results
         except Exception as e:
             logger.exception(f"Error fetching all enriched match_suggestions: {e}")
             return []
@@ -233,7 +252,16 @@ async def get_match_suggestion_by_id_enriched(match_id: int) -> Optional[Dict[st
             if not row:
                 logger.debug(f"Enriched match suggestion not found: {match_id}")
                 return None
-            return dict(row)
+            row_dict = dict(row)
+            # Handle vetting_checklist that might be stored as JSON string
+            if row_dict.get('vetting_checklist') and isinstance(row_dict['vetting_checklist'], str):
+                try:
+                    import json
+                    row_dict['vetting_checklist'] = json.loads(row_dict['vetting_checklist'])
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse vetting_checklist for match_id: {match_id}")
+                    row_dict['vetting_checklist'] = None
+            return row_dict
         except Exception as e:
             logger.exception(f"Error fetching enriched match suggestion {match_id}: {e}")
             return None # Or raise, depending on desired error handling

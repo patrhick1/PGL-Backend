@@ -18,6 +18,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Project-specific services (UPDATED IMPORTS)
 from podcast_outreach.database.queries import campaigns as campaign_queries # Use modular query
+from podcast_outreach.services.campaigns.questionnaire_social_processor import QuestionnaireSocialProcessor
 from podcast_outreach.integrations.google_docs import GoogleDocsService # Use new integration path
 from podcast_outreach.services.ai.openai_client import OpenAIService # Use new AI service path
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker # Use new AI tracker path
@@ -373,13 +374,30 @@ class AnglesProcessorPG:
             if not keywords_list and cleaned_keywords: # Handle case where it might be a single keyword or space-separated
                 keywords_list = [kw.strip() for kw in cleaned_keywords.split() if kw.strip()]
 
+            # 5.5. Generate ideal podcast description if questionnaire data exists
+            ideal_podcast_description = None
+            questionnaire_responses = campaign_pg.get('questionnaire_responses')
+            if questionnaire_responses:
+                try:
+                    social_processor = QuestionnaireSocialProcessor()
+                    ideal_podcast_description = social_processor.extract_ideal_podcast_description(questionnaire_responses)
+                    logger.info(f"Generated ideal podcast description for '{campaign_name}': {ideal_podcast_description[:100]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to generate ideal podcast description for campaign {campaign_id}: {e}")
+
             # 6. Update PostgreSQL
             update_payload = {
                 "campaign_bio": bio_gdoc_link if bio_gdoc_link else "Bio GDoc creation failed",
                 "campaign_angles": angles_gdoc_link if angles_gdoc_link else "Angles GDoc creation failed",
                 "gdoc_keywords": keywords_list # Save to gdoc_keywords
             }
-            logger.info(f"Updating campaign {campaign_id} in PostgreSQL with generated content links and gdoc_keywords list: {keywords_list}")
+            
+            # Add ideal podcast description if generated
+            if ideal_podcast_description:
+                update_payload["ideal_podcast_description"] = ideal_podcast_description
+            
+            fields_being_updated = list(update_payload.keys())
+            logger.info(f"Updating campaign {campaign_id} in PostgreSQL with fields: {fields_being_updated}")
             updated_campaign_record = await campaign_queries.update_campaign(uuid.UUID(campaign_id), update_payload)
 
             if updated_campaign_record:

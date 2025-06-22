@@ -1,5 +1,9 @@
 # podcast_outreach/main.py
 
+# IMPORTANT: Apply Windows optimizations FIRST, before any other imports
+from podcast_outreach.windows_socket_config import apply_windows_optimizations
+apply_windows_optimizations()
+
 import os
 import uuid
 import logging
@@ -10,8 +14,11 @@ import threading
 import asyncio 
 import secrets # For session secret key
 
+# Session configuration
+ONE_HOUR_IN_SECONDS = 3600
+
 # Project-specific imports from the new structure
-from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT, FRONTEND_ORIGIN # Import FRONTEND_ORIGIN
+from podcast_outreach.config import ENABLE_LLM_TEST_DASHBOARD, PORT, FRONTEND_ORIGIN, IS_PRODUCTION # Import FRONTEND_ORIGIN
 from podcast_outreach.logging_config import setup_logging, get_logger
 from podcast_outreach.api.dependencies import (
     authenticate_user_details, 
@@ -22,6 +29,8 @@ from podcast_outreach.api.dependencies import (
 from podcast_outreach.api.middleware import AuthMiddleware 
 from podcast_outreach.database.connection import init_db_pool, close_db_pool  
 from podcast_outreach.services.tasks.manager import task_manager # New path for task_manager
+from podcast_outreach.services.scheduler.task_scheduler import initialize_scheduler
+from podcast_outreach.services.events.event_bus import initialize_event_handlers
 
 # Import the AI usage tracker from its new location
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker
@@ -39,9 +48,11 @@ from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
 from starlette.middleware.sessions import SessionMiddleware # Import SessionMiddleware
 
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates,storage as storage_router, episodes as episodes_router
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates,storage as storage_router, episodes as episodes_router, scheduler as scheduler_router
 # Add the new public_lead_magnet router import
 from podcast_outreach.api.routers import public_lead_magnet
+# Add notifications router for real-time updates
+from podcast_outreach.api.routers import notifications
 
 setup_logging()
 logger = get_logger(__name__)
@@ -58,6 +69,24 @@ async def lifespan(app: FastAPI):
     # Initialize DB pool
     await init_db_pool()
     logger.info("Database connection pool initialized.")
+    
+    # Initialize TaskManager database resources
+    await task_manager.initialize()
+    logger.info("TaskManager initialized.")
+    
+    # Initialize event-driven workflow orchestration
+    initialize_event_handlers()
+    logger.info("Event handlers initialized.")
+    
+    # Initialize notification service for real-time updates
+    from podcast_outreach.services.events.notification_service import get_notification_service
+    notification_service = get_notification_service()
+    logger.info("Notification service initialized.")
+    
+    # Initialize and start task scheduler
+    scheduler = initialize_scheduler(task_manager)
+    await scheduler.start()
+    logger.info("Task scheduler started.")
 
     if ENABLE_LLM_TEST_DASHBOARD:
         logger.info("ENABLE_LLM_TEST_DASHBOARD is true. Attempting to load test runner routes.")
@@ -98,9 +127,16 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Application shutting down, cleaning up resources...")
         
+        # Stop task scheduler
+        from podcast_outreach.services.scheduler.task_scheduler import get_scheduler
+        scheduler = get_scheduler()
+        if scheduler:
+            await scheduler.stop()
+            logger.info("Task scheduler stopped.")
+        
         # Clean up any running tasks or processes
         if hasattr(task_manager, 'cleanup'):
-            task_manager.cleanup()
+            await task_manager.cleanup()
         
         # Close any open database connections or services
         await close_db_pool()  # Close DB pool
@@ -129,13 +165,12 @@ if not SESSION_SECRET_KEY:
 
 app.add_middleware(
     SessionMiddleware,
-    secret_key=SESSION_SECRET_KEY
-    # max_age=ONE_HOUR_IN_SECONDS,  # Temporarily commented out
-    # session_cookie="pgl_session_id", 
-    # path="/",
-    # same_site="lax", 
-    # httponly=True,   
-    # secure=IS_PRODUCTION 
+    secret_key=SESSION_SECRET_KEY,
+    max_age=ONE_HOUR_IN_SECONDS,  # Session expires after 1 hour
+    session_cookie="pgl_session_id",
+    path="/",
+    same_site="lax",
+    https_only=IS_PRODUCTION  # Use https_only instead of secure
 )
 
 # --- Session Middleware Configuration ---
@@ -165,6 +200,11 @@ app.add_middleware(
     allow_methods=["*"],    # Allow all methods
     allow_headers=["*"],    # Allow all headers
 )
+
+# Add resource cleanup middleware (before auth middleware)
+from podcast_outreach.api.middleware_cleanup import ResourceCleanupMiddleware, ConnectionMonitorMiddleware
+app.add_middleware(ResourceCleanupMiddleware, cleanup_frequency=50)
+app.add_middleware(ConnectionMonitorMiddleware)
 
 # Add authentication middleware
 app.add_middleware(AuthMiddleware)
@@ -216,7 +256,9 @@ app.include_router(client.router)
 app.include_router(media_kits.router)
 app.include_router(pitch_templates.router)
 app.include_router(episodes_router.router)
+app.include_router(scheduler_router.router)
 app.include_router(public_lead_magnet.router)
+app.include_router(notifications.router)
 
 
 @app.get("/login")

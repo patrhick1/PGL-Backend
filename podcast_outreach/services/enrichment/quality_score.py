@@ -31,24 +31,20 @@ QUALITY_CONFIG = {
         "itunes_rating_weight": 0.2,     # Combined iTunes rating and count
         "spotify_rating_weight": 0.2,    # Combined Spotify rating and count
         # Normalization thresholds (examples, need tuning based on typical data ranges)
-        "listen_score_norm_max": 90,     # Assume Listen Score rarely exceeds this for normalization
-        "audience_size_norm_high": 10000, # Example: 10k listeners is high
+        "listen_score_norm_max": 60,     # Assume Listen Score rarely exceeds this for normalization
+        "audience_size_norm_high": 5000, # Example: 5k listeners is high
         "rating_count_norm_high": 500    # Example: 500 ratings is high
     },
     "social_metrics": {
-        "twitter_followers_weight": 0.4,
-        "instagram_followers_weight": 0.2,
-        "youtube_subscribers_weight": 0.2,
-        "tiktok_followers_weight": 0.1,
-        "facebook_likes_weight": 0.1,
-        # Normalization thresholds (examples)
-        "followers_norm_high": 50000     # Example: 50k followers is high for any platform
+        # Simplified approach: sum all followers across platforms
+        "total_followers_norm_high": 20000,  # 20k total followers across all platforms is high
+        "min_followers_for_score": 100        # Minimum threshold to get any social score
     },
     "weights": {
         "recency_score": 0.25,
         "frequency_score": 0.25,
-        "audience_score": 0.30,
-        "social_score": 0.20
+        "audience_score": 0.20,
+        "social_score": 0.30
     }
 }
 
@@ -62,6 +58,9 @@ class QualityService:
         """Normalizes a value to a 0-1 scale given a max_value (and optional min_value)."""
         if value is None or max_value == min_value: # Avoid division by zero
             return 0.0 # Default to 0 if value is missing or range is zero
+        
+        # Ensure value is float (might be Decimal from database)
+        value = float(value)
         
         # Clamp value to be within [min_value, max_value]
         clamped_value = max(min_value, min(value, max_value))
@@ -106,7 +105,7 @@ class QualityService:
         avg_freq_days: Optional[float] = None
 
         if profile.publishing_frequency_days is not None:
-            avg_freq_days = profile.publishing_frequency_days
+            avg_freq_days = float(profile.publishing_frequency_days)
         elif profile.total_episodes and profile.first_episode_date and profile.latest_episode_date and \
              profile.total_episodes >= QUALITY_CONFIG["frequency_min_episodes_for_calc"]:
             
@@ -124,6 +123,8 @@ class QualityService:
                     avg_freq_days = duration_days / (profile.total_episodes - 1)
         
         if avg_freq_days is not None:
+            # Ensure avg_freq_days is a float (might be Decimal from database)
+            avg_freq_days = float(avg_freq_days)
             if avg_freq_days <= QUALITY_CONFIG["frequency_ideal_days"]:
                 return 1.0, avg_freq_days
             elif avg_freq_days <= QUALITY_CONFIG["frequency_good_days"]:
@@ -175,23 +176,32 @@ class QualityService:
         return max(0.0, min(total_score, 1.0)) # Clamp to 0-1
 
     def _calculate_social_score(self, profile: EnrichedPodcastProfile) -> float:
-        """Calculates social media presence score (0-1)."""
+        """Calculates social media presence score (0-1) by summing all followers across platforms."""
         cfg = QUALITY_CONFIG["social_metrics"]
         
-        norm_twitter = self._normalize_score(profile.twitter_followers, cfg["followers_norm_high"])
-        norm_instagram = self._normalize_score(profile.instagram_followers, cfg["followers_norm_high"])
-        norm_youtube = self._normalize_score(profile.youtube_subscribers, cfg["followers_norm_high"])
-        norm_tiktok = self._normalize_score(profile.tiktok_followers, cfg["followers_norm_high"])
-        norm_facebook = self._normalize_score(profile.facebook_likes, cfg["followers_norm_high"])
-
-        total_score = (
-            norm_twitter * cfg["twitter_followers_weight"] +
-            norm_instagram * cfg["instagram_followers_weight"] +
-            norm_youtube * cfg["youtube_subscribers_weight"] +
-            norm_tiktok * cfg["tiktok_followers_weight"] +
-            norm_facebook * cfg["facebook_likes_weight"]
-        )
-        return max(0.0, min(total_score, 1.0))
+        # Sum all followers across all available platforms
+        total_followers = 0
+        
+        # Add followers from each platform if available
+        if profile.twitter_followers:
+            total_followers += profile.twitter_followers
+        if profile.instagram_followers:
+            total_followers += profile.instagram_followers
+        if profile.youtube_subscribers:
+            total_followers += profile.youtube_subscribers
+        if profile.tiktok_followers:
+            total_followers += profile.tiktok_followers
+        if profile.facebook_likes:
+            total_followers += profile.facebook_likes
+            
+        # Apply minimum threshold
+        if total_followers < cfg["min_followers_for_score"]:
+            return 0.0
+            
+        # Normalize against the high threshold
+        normalized_score = self._normalize_score(total_followers, cfg["total_followers_norm_high"])
+        
+        return max(0.0, min(normalized_score, 1.0))
 
     def calculate_podcast_quality_score(
         self, 
@@ -210,7 +220,8 @@ class QualityService:
             logger.warning("Cannot calculate quality score: profile is None.")
             return None, {}
 
-        logger.info(f"Calculating quality score for: {profile.api_id or profile.unified_profile_id} - {profile.title}")
+        podcast_name = getattr(profile, 'name', None) or getattr(profile, 'title', None) or 'Unknown'
+        logger.info(f"Calculating quality score for: {profile.api_id or profile.unified_profile_id} - {podcast_name}")
 
         recency_score, days_since_last = self._calculate_recency_score(profile)
         frequency_score, avg_freq_days = self._calculate_frequency_score(profile)
@@ -238,7 +249,8 @@ class QualityService:
             "quality_score_last_calculated": datetime.utcnow()
         }
         
-        logger.info(f"Quality score for '{profile.title}': {final_quality_score}. Details: {detailed_metrics}")
+        podcast_name = getattr(profile, 'name', None) or getattr(profile, 'title', None) or 'Unknown'
+        logger.info(f"Quality score for '{podcast_name}': {final_quality_score}. Details: {detailed_metrics}")
         # The first element of the tuple is still the final score for convenience
         return final_quality_score, detailed_metrics
 

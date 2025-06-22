@@ -332,6 +332,18 @@ class PodcastTranscriberService:
                 }
                 
                 try:
+                    # Skip obviously invalid example URLs
+                    if 'example.com' in url.lower():
+                        logger.warning(f"Skipping example URL: {url}")
+                        result.update({
+                            "status": "skipped",
+                            "error": "Example URL detected",
+                            "transcript": None,
+                            "analysis": None
+                        })
+                        results.append(result)
+                        continue
+                    
                     logger.info(f"Processing podcast URL: {url}")
                     
                     # Download audio

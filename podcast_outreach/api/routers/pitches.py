@@ -27,6 +27,60 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pitches", tags=["Pitches"])
 
+@router.post("/generate-batch", status_code=status.HTTP_202_ACCEPTED, summary="Generate Pitches for Multiple Matches")
+async def generate_pitches_batch_api(
+    requests: List[PitchGenerationRequest],
+    user: dict = Depends(get_current_user)
+):
+    """
+    Generate pitches for multiple approved matches with different templates.
+    Each request can specify a different template for each match.
+    
+    Example request body:
+    [
+        {"match_id": 1, "pitch_template_id": "template_1"},
+        {"match_id": 2, "pitch_template_id": "template_2"},
+        {"match_id": 3, "pitch_template_id": "template_1"}
+    ]
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to generate pitches.")
+    
+    generator_service = PitchGeneratorService()
+    results = {"successful": [], "failed": []}
+    
+    for request in requests:
+        try:
+            result = await generator_service.generate_pitch_for_match(
+                match_id=request.match_id,
+                pitch_template_id=request.pitch_template_id
+            )
+            
+            if result.get("status") == "success":
+                results["successful"].append({
+                    "match_id": request.match_id,
+                    "pitch_gen_id": result.get("pitch_gen_id"),
+                    "message": result.get("message")
+                })
+            else:
+                results["failed"].append({
+                    "match_id": request.match_id,
+                    "error": result.get("message")
+                })
+                
+        except Exception as e:
+            logger.exception(f"Error generating pitch for match {request.match_id}: {e}")
+            results["failed"].append({
+                "match_id": request.match_id,
+                "error": str(e)
+            })
+    
+    return {
+        "status": "completed",
+        "message": f"Batch generation completed. Success: {len(results['successful'])}, Failed: {len(results['failed'])}",
+        "results": results
+    }
+
 @router.post("/generate", response_model=PitchGenerationResponse, status_code=status.HTTP_202_ACCEPTED, summary="Generate Pitch for Approved Match")
 async def generate_pitch_for_match_api(
     request_data: PitchGenerationRequest,
@@ -225,6 +279,55 @@ async def get_pitch_api(pitch_id: int, user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.exception(f"Error in get_pitch_api for ID {pitch_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.post("/bulk-send", status_code=status.HTTP_202_ACCEPTED, summary="Send Multiple Pitches via Instantly.ai")
+async def send_pitches_bulk_api(
+    pitch_ids: List[int],
+    user: dict = Depends(get_current_user)
+):
+    """
+    Sends multiple approved pitches via Instantly.ai.
+    Staff or Admin access required.
+    Returns a summary of successes and failures.
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
+    
+    sender_service = PitchSenderService()
+    results = {"successful": [], "failed": []}
+    
+    for pitch_id in pitch_ids:
+        try:
+            pitch_record = await pitch_queries.get_pitch_by_id(pitch_id)
+            if not pitch_record:
+                results["failed"].append({"pitch_id": pitch_id, "error": "Pitch not found"})
+                continue
+            
+            pitch_gen_id = pitch_record.get('pitch_gen_id')
+            if not pitch_gen_id:
+                results["failed"].append({"pitch_id": pitch_id, "error": "No pitch generation linked"})
+                continue
+            
+            pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            if not pitch_gen_record or not pitch_gen_record.get('send_ready_bool'):
+                results["failed"].append({"pitch_id": pitch_id, "error": "Pitch not ready to send"})
+                continue
+            
+            result = await sender_service.send_pitch_to_instantly(pitch_gen_id=pitch_gen_id)
+            
+            if result.get("success"):
+                results["successful"].append({"pitch_id": pitch_id, "message": result.get("message")})
+            else:
+                results["failed"].append({"pitch_id": pitch_id, "error": result.get("message")})
+                
+        except Exception as e:
+            logger.exception(f"Error sending pitch {pitch_id} in bulk operation: {e}")
+            results["failed"].append({"pitch_id": pitch_id, "error": str(e)})
+    
+    return {
+        "message": f"Bulk send completed. Success: {len(results['successful'])}, Failed: {len(results['failed'])}",
+        "results": results
+    }
 
 @router.patch("/generations/{pitch_gen_id}/content", response_model=PitchGenerationInDB, summary="Update Pitch Draft Content and Subject")
 async def update_pitch_generation_content_api(

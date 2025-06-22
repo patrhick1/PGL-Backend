@@ -19,7 +19,10 @@ from podcast_outreach.database.queries import people as people_queries # Needed 
 # Import AnglesProcessorPG (assuming it's now at services/campaigns/bio_generator.py)
 from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG # Corrected import path
 
-from podcast_outreach.services.campaigns.questionnaire_processor import process_campaign_questionnaire_submission 
+from podcast_outreach.services.campaigns.questionnaire_processor import (
+    process_campaign_questionnaire_submission,
+    QuestionnaireProcessor
+) 
 
 # Import dependencies for authentication
 from ..dependencies import get_current_user, get_admin_user, get_staff_user
@@ -222,36 +225,86 @@ async def delete_campaign_api(campaign_id: uuid.UUID, user: dict = Depends(get_a
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.post("/{campaign_id}/submit-questionnaire", 
-            response_model=CampaignInDB, # Or a more specific response
-            summary="Submit Questionnaire Data for a Campaign")
+            summary="Submit Questionnaire Data with Social Media Enrichment")
 async def submit_campaign_questionnaire_api(
     campaign_id: uuid.UUID, 
-    submission_data: QuestionnaireSubmitData, # Use the new Pydantic model for request body
-    user: dict = Depends(get_current_user) # Client or Staff/Admin can submit
+    submission_data: QuestionnaireSubmitData,
+    user: dict = Depends(get_current_user),
+    enable_social_enrichment: bool = Query(default=True, description="Enable social media enrichment processing")
 ):
     """
-    Submits questionnaire data for a specific campaign.
-    This will update the campaign with the questionnaire responses and a
-    generated mock interview transcript.
-    Accessible by the client who owns the campaign or staff/admin.
-    """
-    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
-
-    # Authorization: Ensure the current user is the owner or an admin/staff
-    if user.get("role") not in ["admin", "staff"] and campaign.get("person_id") != user.get("person_id"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit questionnaire for this campaign")
-
-    success = await process_campaign_questionnaire_submission(campaign_id, submission_data.questionnaire_data)
+    Enhanced questionnaire submission with automatic social media processing.
     
-    if success:
-        updated_campaign = await campaign_queries.get_campaign_by_id(campaign_id)
-        if not updated_campaign: # Should not happen if update was successful
-             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve campaign after update.")
-        return CampaignInDB(**updated_campaign)
-    else:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process questionnaire data.")
+    Features:
+    - Processes questionnaire responses
+    - Extracts and validates social media handles
+    - Generates AI-powered profile insights
+    - Creates ideal podcast description for vetting
+    - Generates mock interview transcript
+    
+    Set enable_social_enrichment=false to use legacy processing only.
+    """
+    try:
+        logger.info(f"Received questionnaire submission for campaign {campaign_id} (social_enrichment={enable_social_enrichment})")
+        
+        campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+        # Authorization: Ensure the current user is the owner or an admin/staff
+        if user.get("role") not in ["admin", "staff"] and campaign.get("person_id") != user.get("person_id"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit questionnaire for this campaign")
+
+        if enable_social_enrichment:
+            # Use enhanced processing with social media enrichment
+            processor = QuestionnaireProcessor()
+            result = await processor.process_questionnaire_with_social_enrichment(
+                str(campaign_id), 
+                submission_data.questionnaire_data
+            )
+            
+            if result.get("success"):
+                updated_campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+                if not updated_campaign:
+                    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve campaign after update.")
+                
+                return {
+                    "status": "success",
+                    "message": "Questionnaire processed successfully with social media enrichment",
+                    "campaign": CampaignInDB(**updated_campaign),
+                    "social_insights": {
+                        "social_handles_found": len(result.get("social_profile", {}).get("handles", [])),
+                        "expertise_topics": result.get("social_profile", {}).get("expertise_topics", []),
+                        "ideal_podcast_description": result.get("ideal_podcast_description", "")
+                    }
+                }
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Enhanced questionnaire processing failed: {result.get('error', 'Unknown error')}"
+                )
+        else:
+            # Use legacy processing (backward compatibility)
+            success = await process_campaign_questionnaire_submission(str(campaign_id), submission_data.questionnaire_responses)
+            
+            if success:
+                updated_campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+                if not updated_campaign:
+                    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve campaign after update.")
+                
+                return {
+                    "status": "success", 
+                    "message": "Questionnaire processed successfully (legacy mode)",
+                    "campaign": CampaignInDB(**updated_campaign)
+                }
+            else:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process questionnaire data.")
+                
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.exception(f"Unhandled exception during questionnaire submission for campaign {campaign_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
     
 
 @router.post("/{campaign_id}/save-questionnaire-draft", 
@@ -288,15 +341,21 @@ async def save_campaign_questionnaire_draft_api(
 
 
 @router.post("/{campaign_id}/generate-angles-bio", response_model=AnglesBioTriggerResponse, summary="Trigger Bio & Angles Generation")
-async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_staff_user)): # Changed to get_staff_user
+async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
     """
     Triggers the AI-powered generation of client bio and talking angles for a campaign.
     Requires the campaign to have mock_interview_trancript populated (usually from questionnaire).
-    Staff or Admin access required.
+    Clients can generate bio/angles for their own campaigns. Staff/Admin can generate for any campaign.
     """
     campaign_exists = await campaign_queries.get_campaign_by_id(campaign_id)
     if not campaign_exists:
          raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+    
+    # Authorization: Ensure user can access this campaign
+    if user.get("role") == "client":
+        if campaign_exists.get("person_id") != user.get("person_id"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only generate bio/angles for your own campaigns.")
+    # Admin/staff can generate for any campaign
     
     if not campaign_exists.get("mock_interview_trancript"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Campaign {campaign_id} does not have a mock interview transcript. Please submit the questionnaire first.")
@@ -323,5 +382,7 @@ async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict =
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
     finally:
         processor.cleanup()
+
+
 
 

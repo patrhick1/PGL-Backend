@@ -27,6 +27,31 @@ class DataMergerService:
     def __init__(self):
         logger.info("DataMergerService initialized with confidence-based merging logic.")
 
+    def _clean_initial_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean initial data to fix common validation issues."""
+        cleaned_data = data.copy()
+        
+        # Fix emails being stored in URL fields
+        url_fields = [
+            'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',
+            'podcast_facebook_url', 'podcast_youtube_url', 'podcast_tiktok_url',
+            'podcast_other_social_url', 'website', 'image_url', 'rss_feed_url'
+        ]
+        
+        for field in url_fields:
+            if field in cleaned_data and cleaned_data[field]:
+                value = str(cleaned_data[field]).strip()
+                # Check if it's an email (contains @ but not a valid URL)
+                if '@' in value and not value.startswith(('http://', 'https://')):
+                    logger.warning(f"Found email '{value}' in URL field '{field}', moving to primary_email")
+                    # Move email to primary_email field if it's not already set
+                    if not cleaned_data.get('primary_email'):
+                        cleaned_data['primary_email'] = value
+                    # Clear the URL field
+                    cleaned_data[field] = None
+        
+        return cleaned_data
+
     def _normalize_url(self, url: Optional[str]) -> Optional[HttpUrl]:
         """Validates and normalizes a URL string to a Pydantic HttpUrl or None."""
         if not url or not isinstance(url, str) or url.lower() in ['null', 'n/a', 'none']:
@@ -34,6 +59,25 @@ class DataMergerService:
         url = url.strip()
         if not url:
             return None
+        
+        # Filter out specific URLs that the LLM is hallucinating/cross-contaminating
+        # These are legitimate URLs but are being incorrectly assigned to wrong podcasts
+        problematic_urls = [
+            'twitter.com/masterofnonepod',
+            'linkedin.com/company/none-of-your-business-podcast',
+            'youtube.com/@noonecanknowaboutthispodca',
+            'example.com',
+            'placeholder',
+            'generic',
+            'sample',
+            'test'
+        ]
+        
+        url_lower = url.lower()
+        for pattern in problematic_urls:
+            if pattern in url_lower:
+                logger.warning(f"Rejecting cross-contaminated URL that doesn't belong to this podcast: {url}")
+                return None
         
         if '://' not in url:
             url = "https://" + url
@@ -70,9 +114,13 @@ class DataMergerService:
         source_field = f"{field_name}_source"
         confidence_field = f"{field_name}_confidence"
 
+        # Check if the model has source and confidence fields for this field
+        has_source_field = hasattr(profile, source_field)
+        has_confidence_field = hasattr(profile, confidence_field)
+
         # Safely get current values from the Pydantic model
-        existing_source = getattr(profile, source_field, None)
-        existing_confidence = getattr(profile, confidence_field, 0.0)
+        existing_source = getattr(profile, source_field, None) if has_source_field else None
+        existing_confidence = getattr(profile, confidence_field, 0.0) if has_confidence_field else 0.0
 
         # Rule 1: Never overwrite manually entered data
         if existing_source == 'manual':
@@ -81,10 +129,19 @@ class DataMergerService:
 
         # Rule 2: Only update if the new data has higher or equal confidence
         if new_value is not None and new_confidence >= (existing_confidence or 0.0):
-            setattr(profile, field_name, new_value)
-            setattr(profile, source_field, new_source)
-            setattr(profile, confidence_field, new_confidence)
-            logger.debug(f"Updated '{field_name}' with new value from '{new_source}' (confidence: {new_confidence}).")
+            # Always update the main field if it exists
+            if hasattr(profile, field_name):
+                setattr(profile, field_name, new_value)
+                
+                # Only set source/confidence fields if they exist in the model
+                if has_source_field:
+                    setattr(profile, source_field, new_source)
+                if has_confidence_field:
+                    setattr(profile, confidence_field, new_confidence)
+                    
+                logger.debug(f"Updated '{field_name}' with new value from '{new_source}' (confidence: {new_confidence}).")
+            else:
+                logger.warning(f"Field '{field_name}' does not exist in EnrichedPodcastProfile model")
         else:
             logger.debug(f"Skipping update for '{field_name}'; new confidence ({new_confidence}) is not higher than existing ({existing_confidence}).")
 
@@ -103,11 +160,13 @@ class DataMergerService:
             return None
 
         api_id = initial_db_data.get('api_id') or initial_db_data.get('media_id')
-        logger.info(f"Merging data for podcast ID: {api_id or 'Unknown'} (Title: {initial_db_data.get('name', 'N/A')})")
+        logger.info(f"Merging data for podcast ID: {api_id or 'Unknown'} (Name: {initial_db_data.get('name', 'N/A')})")
 
         try:
+            # Clean the initial data before validation
+            cleaned_data = self._clean_initial_data(initial_db_data)
             # Initialize the profile with data from the database
-            profile = EnrichedPodcastProfile(**initial_db_data)
+            profile = EnrichedPodcastProfile(**cleaned_data)
         except ValidationError as ve:
             logger.error(f"Pydantic validation error initializing EnrichedPodcastProfile for {api_id}: {ve}")
             return None
@@ -162,5 +221,13 @@ class DataMergerService:
         # Consolidate primary_email: prefer direct contact_email from DB, then rss_owner_email
         self._merge_field(profile, 'contact_email', profile.rss_owner_email, 'rss_feed', 0.7)
 
-        logger.info(f"Successfully merged data for podcast: {profile.api_id} - {profile.title}")
+        # Add social stats timestamp if we processed any social media data
+        if social_media_results and any(social_media_results.values()):
+            from datetime import datetime, timezone
+            # Set social_stats_last_fetched_at since we just fetched social data
+            if hasattr(profile, 'social_stats_last_fetched_at'):
+                setattr(profile, 'social_stats_last_fetched_at', datetime.now(timezone.utc))
+                logger.debug(f"Set social_stats_last_fetched_at timestamp for {profile.api_id}")
+
+        logger.info(f"Successfully merged data for podcast: {profile.api_id} - {getattr(profile, 'name', None) or getattr(profile, 'title', None) or 'Unknown'}")
         return profile

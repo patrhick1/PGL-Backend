@@ -24,23 +24,22 @@ media_kit_service = MediaKitService() # Instantiate the service
 async def create_or_update_campaign_media_kit(
     campaign_id: uuid.UUID,
     editable_content: mk_schemas.MediaKitEditableContentSchema,
-    user: Dict[str, Any] = Depends(get_staff_user) # Staff/Admin can manage
+    user: Dict[str, Any] = Depends(get_current_user) # Clients can manage their own, Staff/Admin can manage any
 ):
     """
     Creates a new media kit for a campaign or updates an existing one.
     The service will pull bio/angles from the campaign's GDocs.
     Editable content like headline, intro, achievements are passed in the request body.
+    Clients can create/update media kits for their own campaigns. Staff/Admin can manage any campaign.
     """
-    # Authorization: Ensure user has access to this campaign if not admin (e.g. staff assigned to it)
-    # For now, get_staff_user is a broad check. More granular checks can be added.
     campaign = await campaign_queries.get_campaign_by_id(campaign_id)
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
     
-    # If user is client, ensure they own this campaign
-    # This endpoint is currently staff/admin. If clients were to use it directly:
-    # if user.get("role") == "client" and campaign.get("person_id") != user.get("person_id"):
-    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this campaign's media kit.")
+    # Authorization: Ensure user can access this campaign
+    if user.get("role") == "client" and campaign.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this campaign's media kit.")
+    # Admin/staff can manage any campaign
 
     try:
         media_kit = await media_kit_service.create_or_update_media_kit(
@@ -147,15 +146,8 @@ async def add_media_kit_image(
     image_url_str = str(request_data.image_url)
 
     if request_data.image_type == 'headshot':
-        # Safely handle the headshots array
-        current_headshots = kit.get("headshot_image_urls") or []
-        if not isinstance(current_headshots, list):
-            current_headshots = []
-        
-        if image_url_str not in current_headshots:
-            current_headshots.append(image_url_str)
-        
-        update_payload["headshot_image_urls"] = current_headshots
+        # Update single headshot image URL
+        update_payload["headshot_image_url"] = image_url_str
 
     elif request_data.image_type == 'logo':
         update_payload["logo_image_url"] = image_url_str

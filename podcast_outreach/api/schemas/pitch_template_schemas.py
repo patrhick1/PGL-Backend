@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
@@ -11,9 +11,10 @@ class PitchTemplateBase(BaseModel):
     prompt_body: str = Field(..., description="The main template content with placeholders like {client_name}, {podcast_name}, {custom_angle}, etc.")
     created_by: Optional[str] = Field(None, description="Identifier of the user who created/last modified the template", max_length=255)
 
-    class Config:
-        orm_mode = True # For SQLAlchemy compatibility if ever needed, good practice
-        anystr_strip_whitespace = True
+    model_config = ConfigDict(
+        from_attributes=True,  # Replaces orm_mode = True
+        str_strip_whitespace=True  # Replaces anystr_strip_whitespace = True
+    )
 
 class PitchTemplateCreate(PitchTemplateBase):
     pass # template_id is required and part of PitchTemplateBase
@@ -27,13 +28,15 @@ class PitchTemplateUpdate(BaseModel):
     # created_by can also be updated if desired, or left to be set only on creation
     # created_by: Optional[str] = Field(None, description="Identifier of the user who modified the template", max_length=255)
 
-    class Config:
-        anystr_strip_whitespace = True
+    model_config = ConfigDict(
+        str_strip_whitespace=True
+    )
 
 class PitchTemplateInDB(PitchTemplateBase):
     created_at: datetime
     # Add updated_at if you add it to the table and queries
     # updated_at: Optional[datetime] = None 
 
-    class Config:
-        orm_mode = True 
+    model_config = ConfigDict(
+        from_attributes=True
+    ) 

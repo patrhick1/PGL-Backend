@@ -895,7 +895,7 @@ Provide *only* the final, professional social proof section content below, with 
             
             "key_achievements": key_achievements_list,
             "social_media_stats": editable_content.get("social_media_stats", {}),
-            "headshot_image_urls": editable_content.get("headshot_image_urls", []), # Initialize from editable_content
+            "headshot_image_url": editable_content.get("headshot_image_url"), # Initialize from editable_content
             "logo_image_url": editable_content.get("logo_image_url"), # Initialize from editable_content
             "call_to_action_text": editable_content.get("call_to_action_text"),
             "custom_sections": custom_sections_list, # Use the populated list
@@ -906,11 +906,8 @@ Provide *only* the final, professional social proof section content below, with 
         # Populate headshot and logo from assets if available in questionnaire_responses
         if isinstance(assets_data, dict): # assets_data defined earlier
             if assets_data.get("headshotUrl"):
-                # Add to existing list, ensuring it's a list and avoiding duplicates
-                if not isinstance(kit_data["headshot_image_urls"], list):
-                    kit_data["headshot_image_urls"] = []
-                if assets_data["headshotUrl"] not in kit_data["headshot_image_urls"]:
-                    kit_data["headshot_image_urls"].append(assets_data["headshotUrl"])
+                # Set single headshot image URL
+                kit_data["headshot_image_url"] = assets_data["headshotUrl"]
             
             if assets_data.get("logoUrl"):
                 kit_data["logo_image_url"] = assets_data["logoUrl"] # Override or set

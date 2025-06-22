@@ -89,7 +89,7 @@ class EnrichmentAgent:
         self, 
         initial_data: Dict[str, Any] 
     ) -> Optional[GeminiPodcastEnrichment]:
-        podcast_name = initial_data.get('title', initial_data.get('name', 'Unknown Podcast'))
+        podcast_name = initial_data.get('name') or initial_data.get('title') or 'Unknown Podcast'
         podcast_description = initial_data.get('description', '')
         podcast_api_id = initial_data.get('api_id', initial_data.get('media_id', 'Unknown ID'))
         logger.info(f"Starting Gemini+Tavily discovery for {podcast_api_id} ({podcast_name})")
@@ -142,7 +142,9 @@ class EnrichmentAgent:
                     snippets = "\n".join([f"- {res.get('title', '')}: {res.get('content', '')[:200]}... (URL: {res.get('url')})" for res in tavily_response["results"]])
                     search_output_for_gemini += f"Tavily Snippets:\n{snippets}\n"
                 else: search_output_for_gemini += "Tavily: No specific answer or results found.\n"
-            else: search_output_for_gemini += f"Tavily: Search failed or error: {tavily_response.get('error', 'Unknown error')}\n"
+            else: 
+                error_msg = tavily_response.get('error', 'Unknown error') if tavily_response else 'No response (rate limited or failed)'
+                search_output_for_gemini += f"Tavily: Search failed or error: {error_msg}\n"
             found_info_texts.append(search_output_for_gemini)
 
             if gemini_key == 'host_names' and not current_host_names_str and tavily_response and not tavily_response.get("error"):
@@ -175,7 +177,7 @@ class EnrichmentAgent:
     2. Prioritize information that is clearly labeled or directly answers a search query.
     3. For social media URLs, look for full, valid HTTP/HTTPS links. Ensure the extracted URL corresponds to the type requested (e.g., a LinkedIn Company Page URL for 'podcast_linkedin_url', not a personal profile).
     4. If the text for a specific URL search explicitly states "unable to find", "no official page", or similar, then the value for that URL field in the JSON output should be null.
-    5. Host names should be a list of strings. If multiple hosts are mentioned (e.g., "Host A and Host B"), list them as ["Host A", "Host B"]. If a search for host names yields no clear names, use null for the host_names field.
+    5. Host names should ONLY be actual human names (e.g., "John Smith", "Sarah Johnson"). Extract only specific person names, not descriptions, instructions, or generic terms. If multiple hosts are mentioned (e.g., "John Smith and Sarah Johnson"), list them as ["John Smith", "Sarah Johnson"]. If no specific person names are found, use null for the host_names field. Do NOT include any instructional text, descriptions, or generic phrases.
 
     Provided Text:
     ---
@@ -261,8 +263,8 @@ class EnrichmentAgent:
             return None
         
         media_id = initial_media_data.get('media_id')
-        podcast_title = initial_media_data.get('title') or initial_media_data.get('name')
-        logger.info(f"Starting enrichment for media_id: {media_id}, Title: {podcast_title}")
+        podcast_name = initial_media_data.get('name') or initial_media_data.get('title') or 'Unknown Podcast'
+        logger.info(f"Starting enrichment for media_id: {media_id}, Name: {podcast_name}")
 
         gemini_output = await self._discover_initial_info_with_gemini_and_tavily(initial_media_data)
 
@@ -318,6 +320,28 @@ class EnrichmentAgent:
                         logger.error(f"A social scraping task failed: {result}")
             
             logger.info(f"Social scraping finished. Found data for {len(social_scraping_results)} profiles.")
+            
+            # Transform URL-keyed results to platform-keyed results for data merger
+            transformed_social_results = {}
+            for url, social_data in social_scraping_results.items():
+                if not social_data:
+                    continue
+                    
+                url_lower = url.lower()
+                if 'twitter.com' in url_lower or 'x.com' in url_lower:
+                    transformed_social_results['podcast_twitter'] = social_data
+                elif 'instagram.com' in url_lower:
+                    transformed_social_results['podcast_instagram'] = social_data
+                elif 'tiktok.com' in url_lower:
+                    transformed_social_results['podcast_tiktok'] = social_data
+                elif 'linkedin.com/company' in url_lower:
+                    transformed_social_results['podcast_linkedin_company'] = social_data
+                elif 'facebook.com' in url_lower:
+                    transformed_social_results['podcast_facebook'] = social_data
+                elif 'youtube.com' in url_lower:
+                    transformed_social_results['podcast_youtube'] = social_data
+            
+            logger.info(f"Transformed social results: {list(transformed_social_results.keys())}")
             # --- END OF NEW FIX ---
         
         if not self.data_merger_service:
@@ -327,11 +351,12 @@ class EnrichmentAgent:
         final_enriched_profile = self.data_merger_service.merge_podcast_data(
             initial_db_data=initial_media_data,
             gemini_enrichment=gemini_output, 
-            social_media_results=social_scraping_results
+            social_media_results=transformed_social_results
         )
 
         if final_enriched_profile:
-            logger.info(f"Successfully enriched profile for media_id: {media_id}, Title: {final_enriched_profile.title}")
+            profile_name = getattr(final_enriched_profile, 'name', None) or getattr(final_enriched_profile, 'title', None) or 'Unknown'
+            logger.info(f"Successfully enriched profile for media_id: {media_id}, Name: {profile_name}")
         else:
             logger.error(f"Data merging failed for media_id: {media_id}")
 

@@ -320,5 +320,31 @@ async def logout_api(request: Request, response: Response):
 
 @router.get("/me", response_model=Dict[str, Any], summary="Get Current User Info")
 async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Get information about the currently authenticated user."""
-    return current_user
+    """Get information about the currently authenticated user including profile and banner images."""
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=401, detail="User not authenticated.")
+    
+    # Fetch full user profile from database to get image URLs
+    person = await people_queries.get_person_by_id_from_db(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+    
+    # Combine session data with profile data
+    user_info = {
+        **current_user,  # Include session data (username, role, person_id, full_name)
+        "profile_image_url": person.get("profile_image_url"),
+        "profile_banner_url": person.get("profile_banner_url"),
+        "bio": person.get("bio"),
+        "website": person.get("website"),
+        "location": person.get("location"),
+        "timezone": person.get("timezone"),
+        "linkedin_profile_url": person.get("linkedin_profile_url"),
+        "twitter_profile_url": person.get("twitter_profile_url"),
+        "instagram_profile_url": person.get("instagram_profile_url"),
+        "tiktok_profile_url": person.get("tiktok_profile_url"),
+        "notification_settings": person.get("notification_settings"),
+        "privacy_settings": person.get("privacy_settings")
+    }
+    
+    return user_info

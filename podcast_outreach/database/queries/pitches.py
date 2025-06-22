@@ -28,10 +28,10 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
         campaign_id, media_id, attempt_no, match_score, matched_keywords,
         score_evaluated_at, outreach_type, subject_line, body_snippet,
         send_ts, reply_bool, reply_ts, pitch_gen_id, placement_id,
-        pitch_state, client_approval_status, created_by, created_at,
-        instantly_lead_id -- New column
+        pitch_state, client_approval_status, created_by,
+        instantly_lead_id
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -56,8 +56,7 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
                 pitch_data.get('pitch_state', 'generated'),
                 pitch_data.get('client_approval_status', 'pending_review'),
                 pitch_data.get('created_by', 'system'),
-                pitch_data.get('created_at', datetime.utcnow()),
-                pitch_data.get('instantly_lead_id') # New value
+                pitch_data.get('instantly_lead_id')
             )
             if row:
                 logger.info(f"Pitch record created: {row['pitch_id']}")
@@ -111,6 +110,35 @@ async def update_pitch_in_db(pitch_id: int, update_data: Dict[str, Any]) -> Opti
             logger.exception(f"Error updating pitch {pitch_id}: {e}")
             raise
 
+async def get_pitches_by_state(pitch_state: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Get pitches by their state.
+    
+    Args:
+        pitch_state: The state to filter by (e.g., 'ready_to_send')
+        limit: Maximum number of pitches to return
+        
+    Returns:
+        List of pitch records
+    """
+    query = """
+    SELECT p.*, pg.final_text, pg.draft_text
+    FROM pitches p
+    LEFT JOIN pitch_generations pg ON p.pitch_gen_id = pg.pitch_gen_id
+    WHERE p.pitch_state = $1
+    ORDER BY p.created_at ASC
+    LIMIT $2
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, pitch_state, limit)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching pitches by state {pitch_state}: {e}")
+            return []
+
 async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dict[str, Any]]:
     """Fetches a pitch record by its Instantly Lead ID."""
     query = "SELECT * FROM pitches WHERE instantly_lead_id = $1;"
@@ -122,6 +150,18 @@ async def get_pitch_by_instantly_lead_id(instantly_lead_id: str) -> Optional[Dic
         except Exception as e:
             logger.exception(f"Error fetching pitch by Instantly Lead ID {instantly_lead_id}: {e}")
             raise
+
+async def get_pitch_by_id(pitch_id: int) -> Optional[Dict[str, Any]]:
+    """Get a pitch by its ID."""
+    query = "SELECT * FROM pitches WHERE pitch_id = $1"
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, pitch_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.exception(f"Error fetching pitch {pitch_id}: {e}")
+            return None
 
 async def get_pitch_by_pitch_gen_id(pitch_gen_id: int) -> Optional[Dict[str, Any]]:
     """Fetches a pitch record by its associated pitch_gen_id."""

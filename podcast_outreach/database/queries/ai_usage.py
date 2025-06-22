@@ -1,23 +1,32 @@
 # podcast_outreach/database/queries/ai_usage.py
 
 import logging
+import asyncio
 from typing import Any, Dict, Optional, List
 from datetime import datetime, date, timedelta
 import uuid
 
-from podcast_outreach.database.connection import get_db_pool
+from podcast_outreach.database.connection import get_db_pool, get_background_task_pool
 
 logger = logging.getLogger(__name__)
 
-async def log_ai_usage_in_db(log_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def log_ai_usage_in_db(log_data: Dict[str, Any], max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """
-    Logs AI usage data into the ai_usage_logs table.
+    Logs AI usage data into the ai_usage_logs table with retry mechanism.
+    
+    IMPORTANT: This function uses get_background_task_pool() instead of get_db_pool()
+    because AI usage logging is often called from background tasks (transcription,
+    analysis, etc.). Using the frontend pool can cause timeout errors and connection
+    conflicts since it has shorter timeouts (60s vs 30min).
+    
+    See: Database connection issues fix - 2025-06-20
 
     Args:
         log_data: Dictionary containing usage details.
                   Expected keys: workflow, model, tokens_in, tokens_out, total_tokens,
                   cost, execution_time_sec, endpoint, related_pitch_gen_id (optional),
                   related_campaign_id (optional), related_media_id (optional).
+        max_retries: Maximum number of retry attempts for connection failures.
 
     Returns:
         The created log record as a dictionary, or None on failure.
@@ -31,31 +40,47 @@ async def log_ai_usage_in_db(log_data: Dict[str, Any]) -> Optional[Dict[str, Any
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
     ) RETURNING *;
     """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
+    
+    for attempt in range(max_retries + 1):
         try:
-            row = await conn.fetchrow(
-                query,
-                log_data.get('timestamp', datetime.utcnow()),
-                log_data['workflow'],
-                log_data['model'],
-                log_data['tokens_in'],
-                log_data['tokens_out'],
-                log_data['total_tokens'],
-                log_data['cost'],
-                log_data['execution_time_sec'],
-                log_data.get('endpoint'),
-                log_data.get('related_pitch_gen_id'),
-                log_data.get('related_campaign_id'),
-                log_data.get('related_media_id')
-            )
-            if row:
-                logger.debug(f"AI usage logged: {row['log_id']} for workflow {row['workflow']}")
-                return dict(row)
-            return None
+            # Use background task pool for AI operations to prevent timeout errors
+            pool = await get_background_task_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    query,
+                    log_data.get('timestamp', datetime.utcnow()),
+                    log_data['workflow'],
+                    log_data['model'],
+                    log_data['tokens_in'],
+                    log_data['tokens_out'],
+                    log_data['total_tokens'],
+                    log_data['cost'],
+                    log_data['execution_time_sec'],
+                    log_data.get('endpoint'),
+                    log_data.get('related_pitch_gen_id'),
+                    log_data.get('related_campaign_id'),
+                    log_data.get('related_media_id')
+                )
+                if row:
+                    logger.debug(f"AI usage logged: {row['log_id']} for workflow {row['workflow']}")
+                    return dict(row)
+                return None
         except Exception as e:
-            logger.exception(f"Error logging AI usage to DB for workflow {log_data.get('workflow')}: {e}")
-            raise
+            if attempt < max_retries and "connection is closed" in str(e).lower():
+                logger.warning(f"Connection closed during AI usage logging (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                # Force background task pool reset and retry (not frontend pool)
+                from podcast_outreach.database.connection import reset_background_task_pool
+                try:
+                    await reset_background_task_pool()
+                except:
+                    pass  # If reset fails, continue with retry anyway
+                await asyncio.sleep(0.5)  # Brief delay before retry
+                continue
+            else:
+                logger.exception(f"Error logging AI usage to DB for workflow {log_data.get('workflow')}: {e}")
+                return None  # Return None instead of raising to allow process to continue
+    
+    return None
 
 async def get_ai_usage_logs(
     start_date: Optional[date] = None,
@@ -121,14 +146,14 @@ async def get_ai_usage_logs(
 
     final_query = base_query.format(select_columns=select_cols) + group_by_clause
 
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        try:
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             rows = await conn.fetch(final_query, *query_params)
             return [dict(row) for row in rows]
-        except Exception as e:
-            logger.exception(f"Error fetching AI usage logs: {e}")
-            return []
+    except Exception as e:
+        logger.exception(f"Error fetching AI usage logs: {e}")
+        return []
 
 async def get_total_ai_usage(
     start_date: Optional[date] = None,
@@ -180,17 +205,17 @@ async def get_total_ai_usage(
     if where_clauses:
         query += " AND " + " AND ".join(where_clauses)
 
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        try:
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             row = await conn.fetchrow(query, *query_params)
             return dict(row) if row else {
                 'total_calls': 0, 'total_tokens_in': 0, 'total_tokens_out': 0,
                 'total_tokens': 0, 'total_cost': 0.0, 'total_execution_time_sec': 0.0
             }
-        except Exception as e:
-            logger.exception(f"Error getting total AI usage: {e}")
-            return {
-                'total_calls': 0, 'total_tokens_in': 0, 'total_tokens_out': 0,
-                'total_tokens': 0, 'total_cost': 0.0, 'total_execution_time_sec': 0.0
-            }
+    except Exception as e:
+        logger.exception(f"Error getting total AI usage: {e}")
+        return {
+            'total_calls': 0, 'total_tokens_in': 0, 'total_tokens_out': 0,
+            'total_tokens': 0, 'total_cost': 0.0, 'total_execution_time_sec': 0.0
+        }

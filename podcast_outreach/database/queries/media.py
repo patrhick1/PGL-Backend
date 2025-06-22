@@ -71,6 +71,29 @@ async def upsert_media_in_db(media_data: Dict[str, Any]) -> Optional[Dict[str, A
     This version uses a standard, non-dynamic ON CONFLICT statement for robustness.
     A UNIQUE index on `api_id` is required in the `media` table.
     """
+    # Clean the data before processing
+    cleaned_data = media_data.copy()
+    
+    # URL fields that should contain valid URLs
+    url_fields = [
+        'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',
+        'podcast_facebook_url', 'podcast_youtube_url', 'podcast_tiktok_url',
+        'podcast_other_social_url', 'website', 'image_url', 'rss_url'
+    ]
+    
+    # Clean URL fields - move emails to contact_email if needed
+    for field in url_fields:
+        if field in cleaned_data and cleaned_data[field]:
+            value = str(cleaned_data[field]).strip()
+            # Check if it's an email (contains @ but not a valid URL)
+            if '@' in value and not value.startswith(('http://', 'https://')):
+                logger.warning(f"Found email '{value}' in URL field '{field}', moving to contact_email")
+                # Move email to contact_email field if it's not already set
+                if not cleaned_data.get('contact_email'):
+                    cleaned_data['contact_email'] = value
+                # Clear the URL field
+                cleaned_data[field] = None
+    
     # Define the full list of columns that can be inserted or updated.
     # This order MUST match the order of values provided in the query.
     cols = [
@@ -85,7 +108,7 @@ async def upsert_media_in_db(media_data: Dict[str, Any]) -> Optional[Dict[str, A
     ]
 
     # Prepare values tuple, using .get(col, None) to prevent KeyErrors
-    values = [media_data.get(c) for c in cols]
+    values = [cleaned_data.get(c) for c in cols]
 
     # Build the SET clause for the UPDATE part of the query
     # This will update every column (except api_id) with the new value if it's not NULL,
@@ -187,25 +210,114 @@ async def get_media_to_sync_episodes(interval_hours: int = 24) -> List[Dict[str,
             logger.exception(f"Error fetching media to sync episodes: {e}")
             raise
 
-async def get_media_for_enrichment(batch_size: int = 10, enriched_before_hours: int = 24 * 7) -> List[Dict[str, Any]]:
+async def get_media_for_enrichment(batch_size: int = 10, enriched_before_hours: int = 24 * 7, only_new: bool = False) -> List[Dict[str, Any]]:
     """
     Fetches media items that need enrichment or re-enrichment.
-    Criteria: last_enriched_timestamp is NULL OR last_enriched_timestamp is older than enriched_before_hours.
+    
+    Args:
+        batch_size: Number of records to return
+        enriched_before_hours: Consider re-enrichment if older than this (default: 1 week)
+        only_new: If True, only return media that have NEVER been enriched (core enrichment)
+    """
+    if only_new:
+        # Core enrichment: only media that have never been enriched
+        query = """
+        SELECT *
+        FROM media
+        WHERE last_enriched_timestamp IS NULL
+        ORDER BY created_at ASC
+        LIMIT $1;
+        """
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            try:
+                rows = await conn.fetch(query, batch_size)
+                return [dict(row) for row in rows]
+            except Exception as e:
+                logger.exception(f"Error fetching new media for core enrichment: {e}")
+                raise
+    else:
+        # Regular enrichment: includes re-enrichment of old data
+        query = """
+        SELECT *
+        FROM media
+        WHERE last_enriched_timestamp IS NULL OR last_enriched_timestamp < NOW() - INTERVAL '%d hours'
+        ORDER BY last_enriched_timestamp ASC NULLS FIRST
+        LIMIT $1;
+        """ % enriched_before_hours
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            try:
+                rows = await conn.fetch(query, batch_size)
+                return [dict(row) for row in rows]
+            except Exception as e:
+                logger.exception(f"Error fetching media for enrichment: {e}")
+                raise
+
+async def get_media_for_social_refresh(batch_size: int = 20, stale_hours: int = 24 * 7) -> List[Dict[str, Any]]:
+    """
+    Fetches media items that need social stats refresh (weekly updates).
+    Only returns media that have social URLs and need stats refreshing.
     """
     query = """
-    SELECT *
+    SELECT media_id, podcast_twitter_url, podcast_instagram_url, podcast_tiktok_url, 
+           podcast_linkedin_url, podcast_facebook_url, podcast_youtube_url,
+           social_stats_last_fetched_at
     FROM media
-    WHERE last_enriched_timestamp IS NULL OR last_enriched_timestamp < NOW() - INTERVAL '$1 hours'
-    ORDER BY last_enriched_timestamp ASC NULLS FIRST
-    LIMIT $2;
-    """
+    WHERE (
+        social_stats_last_fetched_at IS NULL OR 
+        social_stats_last_fetched_at < NOW() - INTERVAL '%d hours'
+    )
+    AND (
+        podcast_twitter_url IS NOT NULL OR 
+        podcast_instagram_url IS NOT NULL OR 
+        podcast_tiktok_url IS NOT NULL OR 
+        podcast_linkedin_url IS NOT NULL OR
+        podcast_facebook_url IS NOT NULL OR
+        podcast_youtube_url IS NOT NULL
+    )
+    AND last_enriched_timestamp IS NOT NULL  -- Only refresh stats for already enriched media
+    ORDER BY social_stats_last_fetched_at ASC NULLS FIRST
+    LIMIT $1;
+    """ % stale_hours
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, enriched_before_hours, batch_size)
+            rows = await conn.fetch(query, batch_size)
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.exception(f"Error fetching media for enrichment: {e}")
+            logger.exception(f"Error fetching media for social refresh: {e}")
+            raise
+
+async def get_media_for_quality_score_update(batch_size: int = 20, stale_hours: int = 24 * 7) -> List[Dict[str, Any]]:
+    """
+    Fetches media items that need quality score updates.
+    Only returns enriched media with sufficient episodes for scoring.
+    """
+    query = """
+    SELECT m.*
+    FROM media m
+    WHERE m.last_enriched_timestamp IS NOT NULL  -- Must be enriched first
+    AND (
+        m.quality_score IS NULL OR 
+        m.updated_at < NOW() - INTERVAL '%d hours'
+    )
+    AND EXISTS (
+        SELECT 1 FROM episodes e 
+        WHERE e.media_id = m.media_id 
+        AND (e.transcript IS NOT NULL OR e.ai_episode_summary IS NOT NULL)
+        LIMIT 3  -- Need at least 3 episodes with content
+    )
+    ORDER BY m.updated_at ASC NULLS FIRST
+    LIMIT $1;
+    """ % stale_hours
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, batch_size)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching media for quality score update: {e}")
             raise
 
 async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -214,10 +326,33 @@ async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, A
         logger.warning(f"No enrichment update data for media {media_id}.")
         return await get_media_by_id_from_db(media_id)
 
+    # Clean the update fields before processing
+    cleaned_fields = update_fields.copy()
+    
+    # URL fields that should contain valid URLs
+    url_fields = [
+        'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',
+        'podcast_facebook_url', 'podcast_youtube_url', 'podcast_tiktok_url',
+        'podcast_other_social_url', 'website', 'image_url', 'rss_url'
+    ]
+    
+    # Clean URL fields - move emails to contact_email if needed
+    for field in url_fields:
+        if field in cleaned_fields and cleaned_fields[field]:
+            value = str(cleaned_fields[field]).strip()
+            # Check if it's an email (contains @ but not a valid URL)
+            if '@' in value and not value.startswith(('http://', 'https://')):
+                logger.warning(f"Found email '{value}' in URL field '{field}', moving to contact_email")
+                # Move email to contact_email field if it's not already set
+                if not cleaned_fields.get('contact_email'):
+                    cleaned_fields['contact_email'] = value
+                # Clear the URL field
+                cleaned_fields[field] = None
+
     set_clauses = []
     values = []
     idx = 1
-    for key, val in update_fields.items():
+    for key, val in cleaned_fields.items():
         if key in ["media_id", "created_at", "updated_at", "last_enriched_timestamp"]: continue
         set_clauses.append(f"{key} = ${idx}")
         values.append(val)
@@ -237,26 +372,188 @@ async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, A
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *values)
-            logger.info(f"Media {media_id} enrichment data updated.")
+            if row:
+                logger.info(f"Media {media_id} enrichment data updated.")
+                
+                # Update all pending discovery statuses for this media to 'completed'
+                # since core enrichment is now complete (last_enriched_timestamp set)
+                discovery_update_query = """
+                UPDATE campaign_media_discoveries 
+                SET enrichment_status = 'completed',
+                    enrichment_completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE media_id = $1 AND enrichment_status = 'pending'
+                RETURNING id;
+                """
+                updated_discoveries = await conn.fetch(discovery_update_query, media_id)
+                if updated_discoveries:
+                    discovery_count = len(updated_discoveries)
+                    logger.info(f"Updated {discovery_count} discovery statuses to 'completed' for media {media_id}")
+                
             return dict(row) if row else None
         except Exception as e:
             logger.exception(f"Error updating media {media_id} enrichment data: {e}")
             raise
 
+async def update_media_with_confidence_check(media_id: int, update_fields: Dict[str, Any], source: str = "api", confidence: float = 0.8) -> Optional[Dict[str, Any]]:
+    """
+    Updates media data while respecting manual overrides and confidence levels.
+    
+    Args:
+        media_id: ID of media to update
+        update_fields: Fields to update
+        source: Source of the data ('api', 'llm', 'manual')
+        confidence: Confidence level (0.0-1.0, where 1.0 = manual/certain)
+    
+    Rules:
+        - Manual data (confidence 1.0) is never overridden
+        - Higher confidence data can override lower confidence
+        - Always respect last_manual_update_ts
+    """
+    if not update_fields:
+        return await get_media_by_id_from_db(media_id)
+    
+    # Clean the update fields before processing
+    cleaned_update_fields = update_fields.copy()
+    
+    # URL fields that should contain valid URLs
+    url_fields = [
+        'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',
+        'podcast_facebook_url', 'podcast_youtube_url', 'podcast_tiktok_url',
+        'podcast_other_social_url', 'website', 'image_url', 'rss_url'
+    ]
+    
+    # Clean URL fields - move emails to contact_email if needed
+    for field in url_fields:
+        if field in cleaned_update_fields and cleaned_update_fields[field]:
+            value = str(cleaned_update_fields[field]).strip()
+            # Check if it's an email (contains @ but not a valid URL)
+            if '@' in value and not value.startswith(('http://', 'https://')):
+                logger.warning(f"Found email '{value}' in URL field '{field}', moving to contact_email")
+                # Move email to contact_email field if it's not already set
+                if not cleaned_update_fields.get('contact_email'):
+                    cleaned_update_fields['contact_email'] = value
+                # Clear the URL field
+                cleaned_update_fields[field] = None
+    
+    # Get current media data to check existing confidence levels
+    current_media = await get_media_by_id_from_db(media_id)
+    if not current_media:
+        logger.warning(f"Media {media_id} not found for confidence-based update")
+        return None
+    
+    # Fields that have confidence tracking
+    confidence_fields = {
+        'website': ('website_source', 'website_confidence'),
+        'contact_email': ('contact_email_source', 'contact_email_confidence'),
+        'host_names': ('host_names_source', 'host_names_confidence'),
+    }
+    
+    filtered_updates = {}
+    confidence_updates = {}
+    
+    for field, value in cleaned_update_fields.items():
+        if field in confidence_fields:
+            source_field, confidence_field = confidence_fields[field]
+            current_confidence = current_media.get(confidence_field, 0.0) or 0.0
+            current_source = current_media.get(source_field)
+            
+            # Check if we should override based on confidence
+            should_update = False
+            
+            if source == "manual":
+                # Manual updates always win
+                should_update = True
+                confidence = 1.0
+            elif current_source == "manual":
+                # Never override manual data with API/LLM data
+                logger.info(f"Skipping update to {field} for media {media_id} - manual data takes precedence")
+                continue
+            elif confidence > current_confidence:
+                # Higher confidence can override lower confidence
+                should_update = True
+            elif confidence == current_confidence and current_media.get(field) is None:
+                # Same confidence but no existing data
+                should_update = True
+            
+            if should_update:
+                filtered_updates[field] = value
+                confidence_updates[source_field] = source
+                confidence_updates[confidence_field] = confidence
+        else:
+            # Fields without confidence tracking - update normally
+            filtered_updates[field] = value
+    
+    # Add confidence tracking updates
+    filtered_updates.update(confidence_updates)
+    
+    # Add manual update timestamp if this is a manual update
+    if source == "manual":
+        filtered_updates["last_manual_update_ts"] = "NOW()"
+    
+    if not filtered_updates:
+        logger.info(f"No updates applied to media {media_id} after confidence checks")
+        return current_media
+    
+    # Use existing update function
+    return await update_media_enrichment_data(media_id, filtered_updates)
+
+async def update_media_manual_override(media_id: int, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Updates media data with manual overrides. These always have the highest confidence (1.0)
+    and will not be overridden by API or LLM data.
+    """
+    return await update_media_with_confidence_check(
+        media_id, update_fields, source="manual", confidence=1.0
+    )
+
 async def update_media_quality_score(media_id: int, quality_score: float) -> bool:
-    """Updates the quality_score for a media item."""
-    query = """
+    """Updates the quality_score for a media item and compiles episode summaries."""
+    # First, compile episode summaries
+    compile_query = """
+    WITH episode_summaries AS (
+        SELECT 
+            media_id,
+            string_agg(
+                COALESCE(ai_episode_summary, episode_summary, ''), 
+                E'\n\n---\n\n'
+                ORDER BY publish_date DESC
+            ) as compiled_summaries
+        FROM episodes
+        WHERE media_id = $1
+        AND (ai_episode_summary IS NOT NULL OR episode_summary IS NOT NULL)
+        GROUP BY media_id
+    )
+    UPDATE media m
+    SET quality_score = $2,
+        episode_summaries_compiled = es.compiled_summaries,
+        updated_at = NOW()
+    FROM episode_summaries es
+    WHERE m.media_id = $1 AND m.media_id = es.media_id
+    RETURNING m.media_id;
+    """
+    
+    # Fallback query if no episodes have summaries
+    fallback_query = """
     UPDATE media
-    SET quality_score = $1
+    SET quality_score = $1,
+        updated_at = NOW()
     WHERE media_id = $2
     RETURNING media_id;
     """
+    
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow(query, quality_score, media_id)
+            # Try to update with episode summaries compilation
+            row = await conn.fetchrow(compile_query, media_id, quality_score)
+            
+            # If no row returned (no episodes with summaries), use fallback
+            if not row:
+                row = await conn.fetchrow(fallback_query, quality_score, media_id)
+            
             if row:
-                logger.info(f"Media {media_id} quality score updated to {quality_score}.")
+                logger.info(f"Media {media_id} quality score updated to {quality_score} and episode summaries compiled.")
                 return True
             logger.warning(f"Media {media_id} not found for quality score update.")
             return False
@@ -330,4 +627,100 @@ async def link_person_to_media(media_id: int, person_id: int, role: str) -> bool
             return True
         except Exception as e:
             logger.error(f"Error linking person {person_id} to media {media_id}: {e}", exc_info=True)
+            return False
+
+async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, keyword: str) -> bool:
+    """
+    Track that a media was discovered for a campaign during discovery phase.
+    This will be used later to create match suggestions after enrichment.
+    """
+    query = """
+    INSERT INTO campaign_media_discoveries (campaign_id, media_id, discovery_keyword, discovered_at)
+    VALUES ($1, $2, $3, NOW())
+    ON CONFLICT (campaign_id, media_id) 
+    DO UPDATE SET 
+        discovery_keyword = EXCLUDED.discovery_keyword,
+        discovered_at = NOW();
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(query, campaign_id, media_id, keyword)
+            logger.debug(f"Tracked discovery of media {media_id} for campaign {campaign_id} with keyword '{keyword}'")
+            return True
+        except Exception as e:
+            # Table might not exist yet - this is expected during transition
+            logger.debug(f"Could not track campaign media discovery (table may not exist): {e}")
+            return False
+
+async def get_enriched_media_for_campaigns() -> List[Dict[str, Any]]:
+    """
+    Get media that have been discovered for campaigns and are ready for match creation.
+    Returns media that are enriched and have episodes analyzed.
+    """
+    query = """
+    SELECT DISTINCT cmd.campaign_id, cmd.media_id, cmd.discovery_keyword, m.name as media_name
+    FROM campaign_media_discoveries cmd
+    JOIN media m ON cmd.media_id = m.media_id
+    LEFT JOIN match_suggestions ms ON cmd.campaign_id = ms.campaign_id AND cmd.media_id = ms.media_id
+    WHERE ms.match_id IS NULL  -- No match suggestion created yet
+    AND m.last_enriched_timestamp IS NOT NULL  -- Has been enriched
+    AND m.quality_score IS NOT NULL  -- Quality score calculated
+    AND EXISTS (
+        SELECT 1 FROM episodes e 
+        WHERE e.media_id = m.media_id 
+        AND e.ai_analysis_done = TRUE
+        LIMIT 3  -- At least 3 episodes analyzed
+    )
+    ORDER BY cmd.discovered_at ASC
+    LIMIT 100;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            # Table might not exist yet - this is expected during transition
+            logger.debug(f"Could not fetch enriched media for campaigns (table may not exist): {e}")
+            return []
+
+async def update_media_ai_description(media_id: int, ai_description: str) -> bool:
+    """Updates the AI-generated description for a media item."""
+    query = """
+    UPDATE media
+    SET ai_description = $1, updated_at = NOW()
+    WHERE media_id = $2
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(query, ai_description, media_id)
+            logger.info(f"Updated AI description for media {media_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating AI description for media {media_id}: {e}")
+            return False
+
+async def update_media_embedding(media_id: int, embedding: list) -> bool:
+    """Updates the embedding vector for a media item."""
+    query = """
+    UPDATE media
+    SET embedding = $1, updated_at = NOW()
+    WHERE media_id = $2
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Convert embedding to proper vector format
+            if isinstance(embedding, list):
+                embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+            else:
+                embedding_str = str(embedding)
+            
+            await conn.execute(query, embedding_str, media_id)
+            logger.info(f"Updated embedding for media {media_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating embedding for media {media_id}: {e}")
             return False

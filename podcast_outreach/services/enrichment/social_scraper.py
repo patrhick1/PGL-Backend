@@ -215,6 +215,31 @@ class SocialDiscoveryService:
         }
 
     def _map_tiktok_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        # Handle apidojo/tiktok-scraper format (flattened with dot notation)
+        if 'channel.username' in item:
+            username = item.get('channel.username')
+            profile_url = item.get('channel.url') or (f"https://www.tiktok.com/@{username}" if username else None)
+            name = item.get('channel.name')
+            followers_count = self._safe_int_cast(item.get('channel.followers'))
+            following_count = self._safe_int_cast(item.get('channel.following'))
+            videos_count = self._safe_int_cast(item.get('channel.videos'))
+            is_verified = item.get('channel.verified')
+            profile_picture_url = self._normalize_url(item.get('channel.avatar'))
+            
+            return {
+                'profile_url': profile_url,
+                'username': username,
+                'name': name,
+                'description': None,  # Not available in this format
+                'followers_count': followers_count,
+                'following_count': following_count,
+                'likes_count': None,  # Not available in channel data
+                'is_verified': is_verified,
+                'profile_picture_url': profile_picture_url,
+                'videos_count': videos_count
+            }
+        
+        # Handle legacy format (nested objects)
         author_meta = item.get('authorMeta') or item.get('author') or item.get('channel') or item.get('user') or {}
         username = author_meta.get('name') or author_meta.get('nickName') or author_meta.get('uniqueId') or item.get('unique_id')
         profile_url = f"https://www.tiktok.com/@{username}" if username else self._normalize_url(author_meta.get('webUrl') or item.get('webVideoUrl') or item.get('url'))
@@ -400,14 +425,25 @@ class SocialDiscoveryService:
         return final_results
 
     async def get_tiktok_data_for_urls(self, tiktok_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-        # Actor: 'tensfer/tiktok-profile-scraper', Input: 'profileURLs' (list of strings)
-        return await self._fetch_social_data_batch_generic(
-            tiktok_urls, 
-            'tensfer/tiktok-profile-scraper', 
-            {"profileURLs": tiktok_urls}, # Pass the full input dict for the actor
-            self._map_tiktok_result,
-            actor_item_url_key_candidates=['profile_url', 'webUrl']
-        )
+        # Actor: 'apidojo/tiktok-scraper', Input: 'startUrls' (list of strings)
+        # Note: This scraper processes one URL at a time, so we need to run them individually
+        results = {}
+        
+        for url in tiktok_urls:
+            try:
+                single_result = await self._fetch_social_data_batch_generic(
+                    [url], 
+                    'apidojo/tiktok-scraper', 
+                    {"startUrls": [url], "maxItems": 1}, # Single URL input for this actor
+                    self._map_tiktok_result,
+                    actor_item_url_key_candidates=['channel.url', 'postPage']
+                )
+                results.update(single_result)
+            except Exception as e:
+                logger.error(f"Error scraping TikTok URL {url}: {e}")
+                results[url] = None
+        
+        return results
 
     async def get_facebook_data_for_urls(self, facebook_urls: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
         logger.warning("Facebook scraping is not reliably implemented. Returning empty results.")

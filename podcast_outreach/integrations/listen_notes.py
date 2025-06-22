@@ -73,14 +73,13 @@ class ListenNotesAPIClient(PodcastAPIClient):
             "type": kwargs.get("type", "podcast"),
             "offset": kwargs.get("offset", 0),
             "language": kwargs.get("language", "English"),
-            "episode_count_min": kwargs.get("episode_count_min", 10), # From original script
+            "episode_count_min": kwargs.get("episode_count_min", 10), # Minimum episodes for quality podcasts
+            "interviews_only": kwargs.get("interviews_only", 1), # Only podcasts with guest interviews
             "region": kwargs.get("region", "us"), # Changed from US to us (lowercase)
             **{k: v for k, v in kwargs.items() if k in [
                 'genre_ids', 'published_after', 'ocid', 'safe_mode', 'page_size' # Added page_size
             ]}
         }
-        if kwargs.get('interviews_only') == 1: # From original script
-             params['only_in'] = 'title,description'
         if 'page_size' not in params: # Ensure default page_size if not provided
             params['page_size'] = 10
 

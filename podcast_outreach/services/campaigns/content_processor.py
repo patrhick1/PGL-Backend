@@ -163,9 +163,18 @@ class ClientContentProcessor:
                     "processed_at": str(uuid.uuid4())  # Using UUID as timestamp placeholder
                 }
                 
-                # Update campaign with transcription results
+                # Store transcription results in questionnaire_responses JSONB field
+                # First get the current campaign to preserve existing questionnaire_responses
+                current_campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+                current_responses = current_campaign.get('questionnaire_responses', {}) if current_campaign else {}
+                if current_responses is None:
+                    current_responses = {}
+                
+                # Add transcription results to the existing responses
+                current_responses['podcast_transcription_results'] = transcription_summary
+                
                 await campaign_queries.update_campaign(campaign_id, {
-                    "podcast_transcription_results": transcription_summary
+                    "questionnaire_responses": current_responses
                 })
                 
                 logger.info(f"Stored transcription results for campaign {campaign_id}")

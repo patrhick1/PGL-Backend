@@ -59,22 +59,43 @@ class VettingOrchestrator:
 
             # 3. Update the match suggestion with the results
             if vetting_results:
-                # Also update the match status to 'pending_human_review'
-                vetting_results['status'] = 'pending_human_review'
+                # Update the match status to 'pending_client_review' so clients can see and act on it
+                vetting_results['status'] = 'pending_client_review'
                 await match_queries.update_match_suggestion_in_db(match_id, vetting_results)
                 
                 # Mark the vetting task as completed
                 await review_task_queries.update_review_task_status_in_db(task_id, "completed", f"Vetting successful. Score: {vetting_results['vetting_score']}")
                 
-                # Create the final human review task
+                # Create client review task (instead of staff review task)
                 await review_task_queries.create_review_task_in_db({
                     "task_type": "match_suggestion",
                     "related_id": match_id,
                     "campaign_id": campaign_id,
                     "status": "pending",
-                    "notes": f"Final human review for AI-vetted match. Score: {vetting_results['vetting_score']}"
+                    "notes": f"AI-vetted match ready for client review. Vetting Score: {vetting_results['vetting_score']}"
                 })
-                logger.info(f"Successfully vetted match_id: {match_id}. Score: {vetting_results['vetting_score']}. Ready for human review.")
+                logger.info(f"Successfully vetted match_id: {match_id}. Score: {vetting_results['vetting_score']}. Ready for client review.")
+                
+                # Publish vetting completed event
+                try:
+                    from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
+                    event_bus = get_event_bus()
+                    event = Event(
+                        event_type=EventType.VETTING_COMPLETED,
+                        entity_id=str(match_id),
+                        entity_type="match",
+                        data={
+                            "vetting_score": vetting_results['vetting_score'],
+                            "campaign_id": str(campaign_id),
+                            "media_id": match_suggestion['media_id'],
+                            "status": "pending_client_review"
+                        },
+                        source="vetting_orchestrator"
+                    )
+                    await event_bus.publish(event)
+                    logger.info(f"Published VETTING_COMPLETED event for match {match_id}")
+                except Exception as e:
+                    logger.error(f"Error publishing vetting completed event: {e}")
             else:
                 # Mark vetting task as failed
                 await review_task_queries.update_review_task_status_in_db(task_id, "failed", "Vetting agent failed to produce a result.")

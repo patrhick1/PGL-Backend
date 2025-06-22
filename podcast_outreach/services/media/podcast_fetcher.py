@@ -24,6 +24,7 @@ from podcast_outreach.utils.exceptions import APIClientError, RateLimitError
 from podcast_outreach.services.ai.utils import generate_genre_ids, generate_podscan_category_ids
 from podcast_outreach.utils.data_processor import parse_date
 from podcast_outreach.services.media.episode_handler import EpisodeHandlerService # ENSURED IMPORT
+from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO,
@@ -37,6 +38,7 @@ API_CALL_DELAY = 1.2
 KEYWORD_PROCESSING_DELAY = 2
 ENRICHMENT_FRESHNESS_THRESHOLD_DAYS = 180
 TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD = 10 # For testing purposes
+MIN_EPISODE_COUNT = 10 # Minimum number of episodes required for podcasts
 
 
 def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[Any]:
@@ -104,6 +106,23 @@ class MediaFetcher:
             url = item.get('url')
             if not platform or not url:
                 continue
+            
+            # Validate that the URL is actually a URL and not an email
+            url_str = str(url).strip()
+            # Skip if it's an email (contains @ but doesn't start with http)
+            if '@' in url_str and not url_str.startswith(('http://', 'https://')):
+                logger.debug(f"Skipping email address '{url_str}' found in social links for platform '{platform}'")
+                continue
+            
+            # Basic URL validation - must start with http or be a valid domain
+            if not url_str.startswith(('http://', 'https://')):
+                # Add https:// if it looks like a domain
+                if '.' in url_str and not '@' in url_str:
+                    url_str = f'https://{url_str}'
+                else:
+                    logger.debug(f"Skipping invalid URL '{url_str}' for platform '{platform}'")
+                    continue
+            
             key = {
                 'twitter': 'podcast_twitter_url',
                 'linkedin': 'podcast_linkedin_url',
@@ -113,10 +132,81 @@ class MediaFetcher:
                 'tiktok': 'podcast_tiktok_url',
             }.get(platform)
             if key:
-                social_map[key] = url
+                social_map[key] = url_str
             else:
-                social_map.setdefault('podcast_other_social_url', url)
+                social_map.setdefault('podcast_other_social_url', url_str)
         return social_map
+
+    async def _quick_rss_email_discovery(self, rss_url: str) -> Optional[str]:
+        """
+        Attempt to extract email from RSS feed XML for email validation.
+        Looks for managingEditor, webMaster, or itunes:owner email fields.
+        Returns the first valid email found, or None if none found or on error.
+        """
+        if not rss_url:
+            return None
+            
+        try:
+            import aiohttp
+            import re
+            from bs4 import BeautifulSoup
+            
+            timeout = aiohttp.ClientTimeout(total=10)  # Quick timeout for discovery
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; PodcastEmailDiscovery/1.0)",
+                "Accept": "application/xml,text/xml,application/rss+xml"
+            }
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(rss_url, headers=headers) as response:
+                    if response.status != 200:
+                        logger.debug(f"RSS email discovery failed for {rss_url}: HTTP {response.status}")
+                        return None
+                        
+                    content = await response.text()
+                    
+            # Parse XML content
+            soup = BeautifulSoup(content, 'xml')
+            if not soup:
+                logger.debug(f"RSS email discovery: Could not parse XML for {rss_url}")
+                return None
+                
+            # Look for various email fields in RSS/iTunes namespace
+            email_fields = [
+                'managingEditor',
+                'webMaster', 
+                'itunes:owner',
+                'itunes:email'
+            ]
+            
+            for field in email_fields:
+                elements = soup.find_all(field)
+                for element in elements:
+                    if field == 'itunes:owner':
+                        # Look for nested email in owner
+                        email_elem = element.find('itunes:email')
+                        if email_elem and email_elem.get_text():
+                            email_text = email_elem.get_text().strip()
+                        else:
+                            continue
+                    else:
+                        email_text = element.get_text().strip() if element else ""
+                    
+                    if email_text:
+                        # Extract email using regex
+                        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                        email_match = re.search(email_pattern, email_text)
+                        if email_match:
+                            found_email = email_match.group(0)
+                            logger.debug(f"RSS email discovery: Found email in {field}: {found_email}")
+                            return found_email
+                            
+            logger.debug(f"RSS email discovery: No email found in RSS feed {rss_url}")
+            return None
+            
+        except Exception as e:
+            logger.debug(f"RSS email discovery error for {rss_url}: {e}")
+            return None
 
     async def _get_existing_media_by_identifiers(self, initial_data: Dict[str, Any], source_api: str) -> Optional[Dict[str, Any]]:
         rss_url = None
@@ -339,10 +429,22 @@ class MediaFetcher:
         media_name_for_log = podcast_data.get('name', '[Name N/A]')
         logger.debug(f"merge_and_upsert_media: Processing '{media_name_for_log}' from source '{source_api}', keyword '{keyword}'.")
 
-        contact_email = podcast_data.get('contact_email')
-        # if not contact_email: # Business rule: if contact email is critical, keep this check
-        #     logger.debug(f"merge_and_upsert_media: Skipping '{media_name_for_log}', no contact email")
-        #     return None
+        # BUSINESS RULE: Only process podcasts with contact email
+        # First check API-provided emails
+        contact_email = podcast_data.get('contact_email') or podcast_data.get('rss_owner_email')
+        
+        # If no API email found, try quick RSS parsing for contact email
+        if not contact_email and podcast_data.get('rss_url'):
+            logger.debug(f"merge_and_upsert_media: No API email for '{media_name_for_log}', attempting RSS email discovery")
+            rss_email = await self._quick_rss_email_discovery(podcast_data.get('rss_url'))
+            if rss_email:
+                contact_email = rss_email
+                podcast_data['rss_owner_email'] = rss_email
+                logger.info(f"merge_and_upsert_media: Found email in RSS for '{media_name_for_log}': {rss_email}")
+        
+        if not contact_email:
+            logger.debug(f"merge_and_upsert_media: Skipping '{media_name_for_log}' - no contact email found in API or RSS")
+            return None
         
         name_val = str(podcast_data.get('name', '')).strip()
         if not name_val:
@@ -358,6 +460,14 @@ class MediaFetcher:
             media = await media_queries.upsert_media_in_db(podcast_data)
             if media and media.get('media_id'):
                 logger.info(f"merge_and_upsert_media: Media upserted/updated: '{media.get('name')}' (ID: {media['media_id']}) from source {podcast_data.get('source_api')}")
+                
+                # Track discovery in campaign_media_discoveries
+                try:
+                    await media_queries.track_campaign_media_discovery(campaign_uuid, media['media_id'], keyword)
+                    logger.debug(f"Tracked discovery for campaign {campaign_uuid}, media {media['media_id']}")
+                except Exception as track_error:
+                    logger.debug(f"Could not track discovery (expected during transition): {track_error}")
+                
                 return media['media_id']
             else:
                 logger.warning(f"merge_and_upsert_media: upsert_media_in_db for '{media_name_for_log}' did not return a valid media record or media_id. Media dict: {media}")
@@ -417,6 +527,8 @@ class MediaFetcher:
                     genre_ids=genre_ids_str, # Pass the string of genre IDs
                     offset=ln_offset,
                     page_size=LISTENNOTES_PAGE_SIZE,
+                    episode_count_min=MIN_EPISODE_COUNT, # Minimum episodes required
+                    interviews_only=1, # Only podcasts with guest interviews
                 )
                 results = response.get('results', []) if isinstance(response, dict) else []
                 if not results:
@@ -507,7 +619,9 @@ class MediaFetcher:
                     keyword,
                     page=ps_page,
                     per_page=PODSCAN_PAGE_SIZE,
-                    category_ids=category_ids_str # MODIFIED: Pass category_ids to Podscan client
+                    category_ids=category_ids_str, # MODIFIED: Pass category_ids to Podscan client
+                    min_episode_count=MIN_EPISODE_COUNT, # Minimum episodes required
+                    has_guests=True, # Only podcasts with guest interviews
                 )
                 results = response.get('podcasts', []) if isinstance(response, dict) else []
                 if not results:
@@ -644,7 +758,11 @@ class MediaFetcher:
                     logger.info(f"Reached max_matches limit ({max_matches}) for new suggestions for campaign {campaign_uuid}. Halting further suggestion creation for this run.")
                     break
                 
-                created_new_suggestion = await self.create_match_suggestions(media_id_map_key, campaign_uuid, originating_keyword)
+                # WORKFLOW OPTIMIZATION: Match creation moved to after enrichment/vetting
+                # Match suggestions will be created after full enrichment and episode analysis
+                # This ensures higher quality matches with complete podcast data
+                # created_new_suggestion = await self.create_match_suggestions(media_id_map_key, campaign_uuid, originating_keyword)
+                created_new_suggestion = False  # Temporarily disabled
                 
                 if created_new_suggestion:
                     new_matches_created_this_run += 1
@@ -654,6 +772,24 @@ class MediaFetcher:
 
         logger.info(f"Discovery and Match Suggestion process COMPLETED for campaign {campaign_uuid}. "
                     f"Total new match suggestions created in this run: {new_matches_created_this_run}")
+        
+        # Publish events for newly created media
+        try:
+            event_bus = get_event_bus()
+            for media_id in newly_created_media_ids:
+                event = Event(
+                    event_type=EventType.MEDIA_CREATED,
+                    entity_id=str(media_id),
+                    entity_type="media",
+                    data={"campaign_id": str(campaign_uuid)},
+                    source="media_fetcher"
+                )
+                await event_bus.publish(event)
+            
+            if newly_created_media_ids:
+                logger.info(f"Published MEDIA_CREATED events for {len(newly_created_media_ids)} new media items")
+        except Exception as e:
+            logger.error(f"Error publishing MEDIA_CREATED events: {e}", exc_info=True)
         
         return newly_created_media_ids
 
@@ -709,8 +845,9 @@ class MediaFetcher:
                                 discovered_media_db_ids.append(media_id)
                                 ln_found_count += 1
                                 if ln_item_id: processed_api_items_this_admin_call.add(ln_item_id)
-                                if campaign_id_for_association: # Only create suggestion if admin specified a campaign
-                                    await self.create_match_suggestions(media_id, campaign_id_for_association, keyword)
+                                # WORKFLOW OPTIMIZATION: Track discovery for later match creation
+                                if campaign_id_for_association: # Only track if admin specified a campaign
+                                    await media_queries.track_campaign_media_discovery(campaign_id_for_association, media_id, keyword)
                         
                         ln_has_more = response.get('has_next', False)
                         ln_offset = response.get('next_offset', ln_offset + LISTENNOTES_PAGE_SIZE) if ln_has_more else ln_offset
@@ -759,8 +896,9 @@ class MediaFetcher:
                             discovered_media_db_ids.append(media_id)
                             ps_found_count += 1
                             if ps_item_id: processed_api_items_this_admin_call.add(ps_item_id)
+                            # WORKFLOW OPTIMIZATION: Track discovery for later match creation
                             if campaign_id_for_association:
-                                await self.create_match_suggestions(media_id, campaign_id_for_association, keyword)
+                                await media_queries.track_campaign_media_discovery(campaign_id_for_association, media_id, keyword)
                     
                     ps_has_more = len(results) >= PODSCAN_PAGE_SIZE
                     if ps_has_more and ps_found_count < max_results_per_source: 

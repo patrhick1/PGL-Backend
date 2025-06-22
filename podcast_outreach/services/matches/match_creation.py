@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import uuid
+import json
+import re
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 from datetime import timezone, datetime
@@ -20,20 +22,77 @@ WEIGHT_EMBEDDING = 0.7
 WEIGHT_KEYWORD = 0.3
 MIN_SCORE_FOR_VETTING = 0.5 # Threshold to create a review task
 
-def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+def convert_embedding_to_list(embedding) -> Optional[List[float]]:
+    """Convert various embedding formats to a list of floats."""
+    if embedding is None:
+        return None
+        
+    # If it's already a list of numbers, return as is
+    if isinstance(embedding, list) and all(isinstance(x, (int, float)) for x in embedding):
+        return [float(x) for x in embedding]
+    
+    # If it's a numpy array, convert to list
+    if isinstance(embedding, np.ndarray):
+        return embedding.tolist()
+    
+    # If it's a string representation from PostgreSQL
+    if isinstance(embedding, str):
+        # Handle numpy string representation like np.str_('[-0.009, 0.015, ...]')
+        if embedding.startswith("np.str_('") and embedding.endswith("')"):
+            clean_embedding = embedding[9:-2]  # Remove np.str_(' and ')
+            try:
+                # Parse as JSON array
+                return json.loads(clean_embedding)
+            except json.JSONDecodeError:
+                # Fall back to regex parsing
+                numbers = re.findall(r'-?\d+\.?\d*(?:[eE][+-]?\d+)?', clean_embedding)
+                return [float(x) for x in numbers] if numbers else None
+        
+        # Handle direct JSON array string
+        if embedding.startswith('[') and embedding.endswith(']'):
+            try:
+                return json.loads(embedding)
+            except json.JSONDecodeError:
+                # Fall back to regex parsing
+                numbers = re.findall(r'-?\d+\.?\d*(?:[eE][+-]?\d+)?', embedding)
+                return [float(x) for x in numbers] if numbers else None
+        
+        # Handle comma-separated values
+        if ',' in embedding:
+            try:
+                return [float(x.strip()) for x in embedding.split(',')]
+            except ValueError:
+                return None
+    
+    # If all else fails, try to extract numbers with regex
+    if isinstance(embedding, str):
+        numbers = re.findall(r'-?\d+\.?\d*(?:[eE][+-]?\d+)?', str(embedding))
+        return [float(x) for x in numbers] if numbers else None
+    
+    return None
+
+def cosine_similarity(vec1, vec2) -> float:
     """Computes cosine similarity between two vectors."""
-    if not vec1 or not vec2:
+    # Convert embeddings to lists if needed
+    vec1_list = convert_embedding_to_list(vec1)
+    vec2_list = convert_embedding_to_list(vec2)
+    
+    if not vec1_list or not vec2_list:
         return 0.0
     
-    v1 = np.array(vec1)
-    v2 = np.array(vec2)
-    norm_v1 = np.linalg.norm(v1)
-    norm_v2 = np.linalg.norm(v2)
-    if norm_v1 == 0 or norm_v2 == 0:
+    try:
+        v1 = np.array(vec1_list)
+        v2 = np.array(vec2_list)
+        norm_v1 = np.linalg.norm(v1)
+        norm_v2 = np.linalg.norm(v2)
+        if norm_v1 == 0 or norm_v2 == 0:
+            return 0.0
+        
+        similarity = np.dot(v1, v2) / (norm_v1 * norm_v2)
+        return float(similarity) if not np.isnan(similarity) else 0.0
+    except Exception as e:
+        logger.error(f"Error computing cosine similarity: {e}", exc_info=True)
         return 0.0
-    
-    similarity = np.dot(v1, v2) / (norm_v1 * norm_v2)
-    return float(similarity) if not np.isnan(similarity) else 0.0
 
 def jaccard_similarity(list1: List[str], list2: List[str]) -> float:
     """Computes Jaccard similarity between two lists of keywords."""
@@ -164,7 +223,10 @@ class MatchCreationService:
         
         if existing_suggestion:
             # Update if score changed significantly or if it was previously rejected and can be re-evaluated
-            significant_change = abs(existing_suggestion.get('match_score', 0) - final_quantitative_score) > 0.01
+            existing_score = existing_suggestion.get('match_score', 0)
+            # Convert Decimal to float for arithmetic operations
+            existing_score = float(existing_score) if existing_score is not None else 0.0
+            significant_change = abs(existing_score - final_quantitative_score) > 0.01
             if significant_change:
                 updated_suggestion = await match_queries.update_match_suggestion_in_db(existing_suggestion["match_id"], match_suggestion_payload)
                 logger.info(f"Updated match suggestion for campaign {campaign_id} and media {media_id}. New score: {final_quantitative_score:.3f}")
@@ -179,6 +241,27 @@ class MatchCreationService:
                 return None
             logger.info(f"Created new match suggestion for campaign {campaign_id} and media {media_id}. Score: {final_quantitative_score:.3f}")
             existing_suggestion = new_suggestion
+            
+            # Publish match created event for new matches
+            try:
+                from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
+                event_bus = get_event_bus()
+                event = Event(
+                    event_type=EventType.MATCH_CREATED,
+                    entity_id=str(new_suggestion['match_id']),
+                    entity_type="match",
+                    data={
+                        "campaign_id": str(campaign_id),
+                        "media_id": media_id,
+                        "match_score": final_quantitative_score,
+                        "matched_keywords": overlapping_keywords
+                    },
+                    source="match_creation"
+                )
+                await event_bus.publish(event)
+                logger.info(f"Published MATCH_CREATED event for match {new_suggestion['match_id']}")
+            except Exception as e:
+                logger.error(f"Error publishing match created event: {e}")
 
         # *** NEW: TRIGGER VETTING TASK ***
         if existing_suggestion and final_quantitative_score >= MIN_SCORE_FOR_VETTING:

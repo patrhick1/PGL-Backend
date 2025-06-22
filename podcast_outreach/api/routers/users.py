@@ -506,6 +506,24 @@ async def admin_get_client_profile(person_id: int, admin_user: dict = Depends(ge
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client profile not found for this person.")
     return client_profile_schemas.ClientProfileInDB(**profile)
 
+@router.get("/me", response_model=PersonInDB, summary="Get My Profile")
+async def get_my_profile(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Gets the profile information for the currently authenticated user,
+    including profile_image_url and other profile details.
+    """
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=401, detail="User not authenticated.")
+
+    person = await people_queries.get_person_by_id_from_db(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+
+    return PersonInDB(**person)
+
 @router.patch("/me/profile-image", response_model=PersonInDB, summary="Update My Profile Image")
 async def update_my_profile_image(
     update_data: ProfileImageUpdateRequest,

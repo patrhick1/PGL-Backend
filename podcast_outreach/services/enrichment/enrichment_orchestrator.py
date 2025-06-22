@@ -38,10 +38,33 @@ class EnrichmentOrchestrator:
         self.social_discovery_service = social_discovery_service
         logger.info("EnrichmentOrchestrator initialized with EnrichmentAgent, QualityService, and SocialDiscoveryService.")
 
+    def _clean_media_data_for_validation(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean media data to fix common validation issues (same logic as data_merger)."""
+        cleaned_data = data.copy()
+        
+        # Fix emails being stored in URL fields
+        url_fields = [
+            'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',
+            'podcast_facebook_url', 'podcast_youtube_url', 'podcast_tiktok_url',
+            'podcast_other_social_url', 'website', 'image_url', 'rss_feed_url'
+        ]
+        
+        for field in url_fields:
+            if field in cleaned_data and cleaned_data[field]:
+                value = str(cleaned_data[field]).strip()
+                # Check if it's an email (contains @ but not a valid URL)
+                if '@' in value and not value.startswith(('http://', 'https://')):
+                    logger.warning(f"Found email '{value}' in URL field '{field}' during quality scoring, cleaning...")
+                    # Clear the URL field (don't move to email since we don't want to overwrite)
+                    cleaned_data[field] = None
+        
+        return cleaned_data
+
     async def run_social_stats_refresh(self, batch_size: int = 20):
         """Refreshes only social media follower counts for stale records."""
         logger.info("Starting social stats refresh batch...")
-        media_to_refresh = await media_queries.get_media_for_social_refresh(batch_size)
+        refresh_interval = ORCHESTRATOR_CONFIG["social_stats_refresh_interval_hours"]
+        media_to_refresh = await media_queries.get_media_for_social_refresh(batch_size, refresh_interval)
         
         if not media_to_refresh:
             logger.info("No media items found needing social stats refresh.")
@@ -89,10 +112,21 @@ class EnrichmentOrchestrator:
                 update_payload["social_stats_last_fetched_at"] = datetime.now(timezone.utc)
                 
                 if len(update_payload) > 1: # Only update if new data was actually fetched
-                    await media_queries.update_media_in_db(media_id, update_payload)
+                    await media_queries.update_media_enrichment_data(media_id, update_payload)
                     logger.info(f"Successfully updated social stats for media_id: {media_id}. Payload: {update_payload}")
+                    
+                    # Trigger quality score update since social stats affect quality calculation
+                    try:
+                        # Get updated media data for quality score calculation
+                        updated_media_data = await media_queries.get_media_by_id_from_db(media_id)
+                        if updated_media_data:
+                            await self._update_quality_score_for_media(updated_media_data)
+                            logger.info(f"Triggered quality score update after social refresh for media_id: {media_id}")
+                    except Exception as quality_e:
+                        logger.error(f"Error updating quality score after social refresh for media_id {media_id}: {quality_e}")
+                        
                 else: # Otherwise, just update the timestamp
-                    await media_queries.update_media_in_db(media_id, {"social_stats_last_fetched_at": datetime.now(timezone.utc)})
+                    await media_queries.update_media_enrichment_data(media_id, {"social_stats_last_fetched_at": datetime.now(timezone.utc)})
 
             except Exception as e:
                 logger.error(f"Error refreshing social stats for media_id {media_id}: {e}", exc_info=True)
@@ -122,7 +156,10 @@ class EnrichmentOrchestrator:
                     if 'primary_email' in update_data: update_data['contact_email'] = update_data.pop('primary_email')
                     if 'rss_feed_url' in update_data: update_data['rss_url'] = update_data.pop('rss_feed_url')
 
-                    await media_queries.update_media_in_db(media_id, update_data)
+                    # Use confidence-aware update for core enrichment (API source, medium confidence)
+                    await media_queries.update_media_with_confidence_check(
+                        media_id, update_data, source="api", confidence=0.85
+                    )
                     logger.info(f"Successfully ran core enrichment for new media_id: {media_id}")
                 else:
                     logger.warning(f"Core enrichment returned no profile for media_id: {media_id}.")
@@ -134,7 +171,8 @@ class EnrichmentOrchestrator:
     async def run_quality_score_updates(self, batch_size: int = 20):
         """Refreshes quality scores for records where the score is stale."""
         logger.info("Starting quality score update batch...")
-        media_to_score = await media_queries.get_media_for_quality_score_update(batch_size)
+        update_interval = ORCHESTRATOR_CONFIG["quality_score_update_interval_hours"]
+        media_to_score = await media_queries.get_media_for_quality_score_update(batch_size, update_interval)
         
         if not media_to_score:
             logger.info("No media items found for quality score update in this batch.")
@@ -143,15 +181,21 @@ class EnrichmentOrchestrator:
         for media_data in media_to_score:
             media_id = media_data['media_id']
             try:
-                profile = EnrichedPodcastProfile(**media_data)
+                # Clean the data before validation (same logic as in data_merger)
+                cleaned_media_data = self._clean_media_data_for_validation(media_data)
+                profile = EnrichedPodcastProfile(**cleaned_media_data)
                 
-                _, score_components = self.quality_service.calculate_podcast_quality_score(profile)
+                quality_score_val, score_components = self.quality_service.calculate_podcast_quality_score(profile)
                 
-                if score_components:
-                    await media_queries.update_media_in_db(media_id, score_components)
-                    logger.info(f"Updated quality score components for media_id: {media_id}")
+                if quality_score_val is not None:
+                    # Use update_media_quality_score which also compiles episode summaries
+                    success = await media_queries.update_media_quality_score(media_id, quality_score_val)
+                    if success:
+                        logger.info(f"Updated quality score and compiled episode summaries for media_id: {media_id}")
+                    else:
+                        logger.error(f"Failed to update quality score for media_id: {media_id}")
                 else:
-                    logger.warning(f"Quality score calculation returned no components for media_id: {media_id}")
+                    logger.warning(f"Quality score calculation returned None for media_id: {media_id}")
 
             except Exception as e:
                 logger.error(f"Error updating quality score for media_id {media_id}: {e}", exc_info=True)
@@ -202,17 +246,20 @@ class EnrichmentOrchestrator:
             
             if transcribed_count >= ORCHESTRATOR_CONFIG["quality_score_min_transcribed_episodes"]:
                 try:
-                    profile_for_scoring = EnrichedPodcastProfile(**media_data_dict)
+                    # Clean the data before validation (same as in data_merger)
+                    cleaned_media_data = self._clean_media_data_for_validation(media_data_dict)
+                    profile_for_scoring = EnrichedPodcastProfile(**cleaned_media_data)
                 except Exception as val_err:
                     logger.error(f"Could not construct EnrichedPodcastProfile for media_id {media_id} from DB data for quality scoring: {val_err}")
                     return
 
                 quality_score_val, score_components = self.quality_service.calculate_podcast_quality_score(profile_for_scoring)
                 
-                if score_components:
-                    success = await media_queries.update_media_in_db(media_id, score_components)
+                if quality_score_val is not None:
+                    # Use update_media_quality_score which also compiles episode summaries
+                    success = await media_queries.update_media_quality_score(media_id, quality_score_val)
                     if success:
-                        logger.info(f"Successfully updated quality score for media_id: {media_id} to {quality_score_val}")
+                        logger.info(f"Successfully updated quality score and compiled episode summaries for media_id: {media_id} to {quality_score_val}")
                     else:
                         logger.error(f"Failed to update quality score in DB for media_id: {media_id}")
                 else:
@@ -221,6 +268,111 @@ class EnrichmentOrchestrator:
                 logger.info(f"Skipping quality score for media_id: {media_id}, transcribed episodes: {transcribed_count} (need {ORCHESTRATOR_CONFIG['quality_score_min_transcribed_episodes']}).")
         except Exception as e:
             logger.error(f"Error during quality score update for single media_id {media_id}: {e}", exc_info=True)
+
+    async def _trigger_match_creation_for_ready_media(self):
+        """
+        Check for media that have completed enrichment and episode analysis,
+        and trigger match creation for them.
+        """
+        try:
+            from podcast_outreach.services.business_logic.match_processing import create_matches_for_enriched_media
+            from podcast_outreach.services.database_service import DatabaseService
+            from podcast_outreach.database.connection import get_db_pool
+            
+            # Create a temporary database service for this operation
+            pool = await get_db_pool()
+            db_service = DatabaseService(pool)
+            
+            logger.info("Checking for enriched media ready for match creation")
+            success = await create_matches_for_enriched_media(db_service)
+            
+            if success:
+                logger.info("Match creation for enriched media completed successfully")
+            else:
+                logger.warning("Match creation for enriched media completed with some issues")
+                
+        except Exception as e:
+            logger.error(f"Error during match creation trigger: {e}", exc_info=True)
+
+    async def enrich_media(self, media_id: int) -> bool:
+        """
+        Enrich a single media item completely.
+        This is the main method called by discovery_processing.py
+        
+        Returns:
+            bool: True if enrichment was successful, False otherwise
+        """
+        try:
+            logger.info(f"Starting enrichment for media_id: {media_id}")
+            
+            # Get current media data
+            media_data = await media_queries.get_media_by_id_from_db(media_id)
+            if not media_data:
+                logger.error(f"Media {media_id} not found")
+                return False
+            
+            # 1. Run core enrichment (social data, contact info, etc.)
+            enriched_profile = await self.enrichment_agent.enrich_podcast_profile(media_data)
+            if enriched_profile:
+                update_data = enriched_profile.model_dump(exclude_none=True)
+                
+                # Clean up data
+                fields_to_remove = ['unified_profile_id', 'recent_episodes', 'quality_score']
+                for field in fields_to_remove:
+                    if field in update_data:
+                        del update_data[field]
+                
+                if 'primary_email' in update_data:
+                    update_data['contact_email'] = update_data.pop('primary_email')
+                if 'rss_feed_url' in update_data:
+                    update_data['rss_url'] = update_data.pop('rss_feed_url')
+                
+                # Update media with enriched data
+                await media_queries.update_media_enrichment_data(media_id, update_data)
+                logger.info(f"Core enrichment completed for media_id: {media_id}")
+            
+            # 2. Generate AI description if missing
+            media_data = await media_queries.get_media_by_id_from_db(media_id)
+            if not media_data.get('ai_description'):
+                # Check if we have enough episode data for AI description
+                from podcast_outreach.database.queries import episodes as episode_queries
+                episodes = await episode_queries.get_episodes_for_media_with_content(media_id, limit=3)
+                
+                if episodes:
+                    # Use episode summaries to generate AI description
+                    from podcast_outreach.services.media.analyzer import MediaAnalyzerService
+                    analyzer = MediaAnalyzerService()
+                    podcast_analysis = await analyzer.analyze_podcast_from_episodes(media_id)
+                    
+                    if podcast_analysis.get("status") == "success" and podcast_analysis.get("ai_description"):
+                        await media_queries.update_media_ai_description(media_id, podcast_analysis["ai_description"])
+                        logger.info(f"AI description generated for media_id: {media_id}")
+            
+            # 3. Update quality score and compile episode summaries
+            # Refetch media data to get latest updates
+            media_data = await media_queries.get_media_by_id_from_db(media_id)
+            transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id)
+            
+            if transcribed_count >= ORCHESTRATOR_CONFIG.get("quality_score_min_transcribed_episodes", 3):
+                try:
+                    # Clean data and calculate quality score
+                    cleaned_media_data = self._clean_media_data_for_validation(media_data)
+                    profile = EnrichedPodcastProfile(**cleaned_media_data)
+                    quality_score_val, _ = self.quality_service.calculate_podcast_quality_score(profile)
+                    
+                    if quality_score_val is not None:
+                        # Use update_media_quality_score which also compiles episode summaries
+                        await media_queries.update_media_quality_score(media_id, quality_score_val)
+                        logger.info(f"Quality score updated and episode summaries compiled for media_id: {media_id}")
+                except Exception as e:
+                    logger.error(f"Error updating quality score for media {media_id}: {e}")
+            
+            logger.info(f"Enrichment completed successfully for media_id: {media_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error enriching media {media_id}: {e}", exc_info=True)
+            return False
 
     async def run_pipeline_once(self):
         """Runs all selective tasks in sequence."""
@@ -231,6 +383,7 @@ class EnrichmentOrchestrator:
         await self.run_social_stats_refresh()
         await self.run_quality_score_updates()
         await self._manage_transcription_flags()
+        await self._trigger_match_creation_for_ready_media()
         
         end_time = datetime.now(timezone.utc)
         logger.info(f"=== Single Enrichment Pipeline Run Finished. Duration: {end_time - start_time} ===")
