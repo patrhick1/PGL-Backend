@@ -346,7 +346,7 @@ async def update_pitch_generation_content_api(
     updated_pitch = None
 
     if update_data.draft_text is not None:
-        updated_pitch_gen = await pitch_gen_queries.update_pitch_generation(
+        updated_pitch_gen = await pitch_gen_queries.update_pitch_generation_in_db(
             pitch_gen_id,
             {"draft_text": update_data.draft_text}
         )
