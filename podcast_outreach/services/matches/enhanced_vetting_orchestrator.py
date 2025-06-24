@@ -132,7 +132,7 @@ class EnhancedVettingOrchestrator:
                     successful += 1
                     
                     # If score is high enough, automatically create match suggestion
-                    if vetting_results['vetting_score'] >= 5.0:
+                    if vetting_results['vetting_score'] >= 50:
                         match_created = await self._create_match_suggestion(
                             discovery, 
                             vetting_results
@@ -225,7 +225,7 @@ class EnhancedVettingOrchestrator:
                     'related_id': match_id,
                     'campaign_id': discovery['campaign_id'],
                     'status': 'pending',
-                    'notes': f"AI-vetted match ready for client review. Score: {vetting_results['vetting_score']:.1f}/10"
+                    'notes': f"AI-vetted match ready for client review. Score: {vetting_results['vetting_score']}/100"
                 }
                 
                 review_task = await review_task_queries.create_review_task_in_db(review_task_data)

@@ -24,7 +24,7 @@ class VettingChecklist(BaseModel):
 
 class CriterionScore(BaseModel):
     criterion: str = Field(description="The specific criterion being scored.")
-    score: int = Field(description="The score from 0 to 10 for this criterion.", ge=0, le=10)
+    score: int = Field(description="The score from 0 to 100 for this criterion.", ge=0, le=100)
     justification: str = Field(description="The justification for the score, citing specific evidence from the podcast data.")
 
 class VettingAnalysis(BaseModel):
@@ -287,19 +287,19 @@ class EnhancedVettingAgent:
         {user_query}
 
         For each criterion:
-        1. Provide a score from 0 (no fit) to 10 (perfect fit) using this scale:
-           - 0-2: No alignment or very poor fit
-           - 3-4: Minimal alignment, significant gaps
-           - 5-6: Moderate alignment, some relevant overlap  
-           - 7-8: Strong alignment, good fit with minor gaps
-           - 9-10: Excellent alignment, near-perfect or perfect fit
+        1. Provide a score from 0 (no fit) to 100 (perfect fit) using this scale:
+           - 0-20: No alignment or very poor fit
+           - 21-40: Minimal alignment, significant gaps
+           - 41-60: Moderate alignment, some relevant overlap  
+           - 61-80: Strong alignment, good fit with minor gaps
+           - 81-100: Excellent alignment, near-perfect or perfect fit
         2. Justify your score with specific evidence from the podcast data
         3. When evaluating topic match, look for:
            - Direct keyword matches with client's expertise
            - Conceptual alignment even if exact words differ
            - Recent episode themes that align with client's areas
            - Guest types that match the client's profile
-        4. Be generous with scoring - if there's reasonable alignment, score in the 7-8 range
+        4. Be generous with scoring - if there's reasonable alignment, score in the 70-80 range
 
         Additionally, provide:
         - A detailed topic match analysis explaining how well the podcast's content aligns with the client's expertise
@@ -334,8 +334,8 @@ class EnhancedVettingAgent:
             logger.error(f"Failed to score podcast with topic matching: {e}", exc_info=True)
             return None
 
-    def _calculate_final_weighted_score(self, analysis: VettingAnalysis, checklist: VettingChecklist) -> float:
-        """Calculate the final weighted score out of 10."""
+    def _calculate_final_weighted_score(self, analysis: VettingAnalysis, checklist: VettingChecklist) -> int:
+        """Calculate the final weighted score out of 100."""
         total_score = 0
         total_weight = 0
         
@@ -347,10 +347,10 @@ class EnhancedVettingAgent:
             total_weight += weight
         
         if total_weight == 0:
-            return 0.0
+            return 0
 
-        normalized_score = (total_score / (total_weight * 10)) * 10
-        return round(normalized_score, 2)
+        normalized_score = total_score / total_weight
+        return round(normalized_score)
 
     async def vet_match_enhanced(self, campaign_data: Dict[str, Any], media_id: int) -> Optional[Dict[str, Any]]:
         """Enhanced vetting that uses comprehensive questionnaire data."""

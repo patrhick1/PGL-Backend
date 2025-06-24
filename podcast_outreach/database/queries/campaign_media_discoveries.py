@@ -112,6 +112,12 @@ async def get_discoveries_ready_for_vetting(limit: int = 50) -> List[Dict[str, A
     AND cmd.vetting_status = 'pending'
     AND m.ai_description IS NOT NULL
     AND c.ideal_podcast_description IS NOT NULL
+    -- Only include podcasts that have at least one episode
+    AND EXISTS (
+        SELECT 1 FROM episodes e 
+        WHERE e.media_id = m.media_id
+        LIMIT 1
+    )
     ORDER BY cmd.enrichment_completed_at ASC
     LIMIT $1;
     """
@@ -141,6 +147,12 @@ async def acquire_vetting_work_batch(limit: int = 10) -> List[Dict[str, Any]]:
         AND c.ideal_podcast_description IS NOT NULL
         -- Check if not already being processed (using vetting_error field temporarily for lock)
         AND (cmd.vetting_error IS NULL OR cmd.vetting_error NOT LIKE 'PROCESSING:%')
+        -- Only vet podcasts that have at least one episode
+        AND EXISTS (
+            SELECT 1 FROM episodes e 
+            WHERE e.media_id = m.media_id
+            LIMIT 1
+        )
         ORDER BY cmd.enrichment_completed_at ASC
         LIMIT $1
         FOR UPDATE OF cmd SKIP LOCKED
@@ -217,7 +229,7 @@ async def update_vetting_results(
             return False
 
 async def get_discoveries_ready_for_match_creation(
-    min_vetting_score: float = 5.0, 
+    min_vetting_score: int = 50, 
     limit: int = 50
 ) -> List[Dict[str, Any]]:
     """Get vetted discoveries ready for match suggestion creation."""
@@ -396,7 +408,7 @@ async def get_discoveries_for_campaign(
         elif status_filter == 'vetting':
             base_query += f" AND cmd.enrichment_status = 'completed' AND cmd.vetting_status != 'completed'"
         elif status_filter == 'ready':
-            base_query += f" AND cmd.vetting_status = 'completed' AND cmd.vetting_score >= 5.0"
+            base_query += f" AND cmd.vetting_status = 'completed' AND cmd.vetting_score >= 50"
         elif status_filter == 'approved':
             base_query += f" AND cmd.review_status = 'approved'"
     

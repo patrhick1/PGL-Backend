@@ -76,7 +76,7 @@ async def get_enhanced_review_tasks(
     campaign_id: Optional[str] = Query(None, description="Filter by campaign ID"),
     task_type: Optional[str] = Query(None, description="Filter by task type (match_suggestion, pitch_review)"),
     status: Optional[str] = Query("pending", description="Filter by status (pending, approved, rejected)"),
-    min_vetting_score: Optional[float] = Query(None, description="Minimum AI vetting score (0-10)"),
+    min_vetting_score: Optional[int] = Query(None, ge=0, le=100, description="Minimum AI vetting score (0-100)"),
     limit: int = Query(20, description="Number of results", ge=1, le=100),
     offset: int = Query(0, description="Results to skip", ge=0),
     current_user: dict = Depends(get_current_user)
@@ -95,6 +95,21 @@ async def get_enhanced_review_tasks(
         # Get review tasks with enhanced data
         enhanced_tasks = []
         
+        # OWNERSHIP FILTER: For clients, only show their campaigns
+        filtered_campaign_id = campaign_id
+        if current_user.get("role") == "client":
+            # Get all campaigns owned by this client
+            client_campaigns = await campaign_queries.get_campaigns_by_person_id(current_user.get("person_id"))
+            client_campaign_ids = [str(c["campaign_id"]) for c in client_campaigns]
+            
+            # If they specified a campaign_id, verify they own it
+            if campaign_id and campaign_id not in client_campaign_ids:
+                # Return empty list if they're trying to access a campaign they don't own
+                return []
+            
+            # If no campaign_id specified, we'll filter results later
+            # to only include their campaigns
+        
         # Get basic tasks first
         # Convert offset to page number
         page = (offset // limit) + 1 if limit > 0 else 1
@@ -103,7 +118,8 @@ async def get_enhanced_review_tasks(
             task_type=task_type,
             status=status,
             page=page,
-            size=limit
+            size=limit,
+            campaign_id=filtered_campaign_id  # Use filtered campaign_id
         )
         
         for task in tasks:
@@ -118,6 +134,11 @@ async def get_enhanced_review_tasks(
                 # Apply campaign filter if specified  
                 if campaign_id and str(enhanced_task.campaign_id) != campaign_id:
                     continue
+                
+                # OWNERSHIP FILTER: For clients without campaign_id filter, check ownership
+                if current_user.get("role") == "client" and not campaign_id:
+                    if str(enhanced_task.campaign_id) not in client_campaign_ids:
+                        continue
                     
                 enhanced_tasks.append(enhanced_task)
                 
@@ -155,6 +176,15 @@ async def update_review_task(
     existing_task = await review_task_queries.get_review_task_by_id_from_db(review_task_id)
     if not existing_task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review task not found")
+    
+    # OWNERSHIP CHECK: Ensure clients can only update tasks for their own campaigns
+    if current_user.get("role") == "client":
+        campaign = await campaign_queries.get_campaign_by_id(existing_task.get("campaign_id"))
+        if not campaign or campaign.get("person_id") != current_user.get("person_id"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to update tasks for this campaign"
+            )
 
     # For status updates, we might trigger specific processing logic
     if update_data.status:
@@ -234,6 +264,28 @@ async def approve_review_task(
         existing_task = await review_task_queries.get_review_task_by_id_from_db(review_task_id)
         if not existing_task:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review task not found")
+        
+        # OWNERSHIP CHECK: Ensure clients can only approve their own campaigns
+        if current_user.get("role") == "client":
+            # Get the campaign associated with this review task
+            campaign = await campaign_queries.get_campaign_by_id(existing_task.get("campaign_id"))
+            if not campaign:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, 
+                    detail="Campaign not found for this review task"
+                )
+            
+            # Check if the client owns this campaign
+            if campaign.get("person_id") != current_user.get("person_id"):
+                logger.warning(
+                    f"Client {current_user.get('username')} attempted to approve task "
+                    f"{review_task_id} for campaign they don't own"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have permission to approve tasks for this campaign"
+                )
+        # Staff and admin users can approve any task (no additional check needed)
         
         # Process the approval (this handles match suggestion updates, etc.)
         if existing_task.get('task_type') == 'match_suggestion' and approval_data.status in ['approved', 'rejected']:
@@ -348,18 +400,18 @@ async def _build_enhanced_review_task(task: dict) -> EnhancedReviewTaskResponse:
     
     if task.get("vetting_score"):
         score = task["vetting_score"]
-        if score >= 8.0:
+        if score >= 80:
             recommendation = "Highly Recommended"
-            key_highlights.append(f"Excellent vetting score ({score}/10)")
-        elif score >= 6.5:
+            key_highlights.append(f"Excellent vetting score ({score}/100)")
+        elif score >= 65:
             recommendation = "Good Match"
-            key_highlights.append(f"Good vetting score ({score}/10)")
-        elif score >= 5.0:
+            key_highlights.append(f"Good vetting score ({score}/100)")
+        elif score >= 50:
             recommendation = "Acceptable Match"
-            key_highlights.append(f"Meets minimum criteria ({score}/10)")
+            key_highlights.append(f"Meets minimum criteria ({score}/100)")
         else:
             recommendation = "Below Threshold"
-            potential_concerns.append(f"Low vetting score ({score}/10)")
+            potential_concerns.append(f"Low vetting score ({score}/100)")
     
     # Add highlights from vetting criteria
     if task.get("vetting_criteria_met"):

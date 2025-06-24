@@ -640,6 +640,25 @@ async def flag_recent_episodes_for_transcription(media_id: int, count: int = 4) 
                 logger.exception("Error flagging episodes for transcription for media_id %s: %s", media_id, e)
                 raise
 
+async def get_most_recent_episode_for_media(media_id: int) -> Optional[Dict[str, Any]]:
+    """Get the most recent episode for a specific media."""
+    query = """
+    SELECT episode_id, title, publish_date
+    FROM episodes
+    WHERE media_id = $1
+    ORDER BY publish_date DESC
+    LIMIT 1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, media_id)
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error fetching most recent episode for media {media_id}: {e}")
+            return None
+
+
 async def get_episodes_with_embeddings_for_media(media_id: int) -> List[Dict[str, Any]]:
     """Get all episodes with embeddings for a specific media."""
     query = """
@@ -657,18 +676,28 @@ async def get_episodes_with_embeddings_for_media(media_id: int) -> List[Dict[str
             for row in rows:
                 episode = dict(row)
                 # Convert vector string to numpy array if needed
-                if episode.get('embedding') and isinstance(episode['embedding'], str):
-                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
-                    try:
-                        episode['embedding'] = np.array(eval(episode['embedding']))
-                    except:
-                        # If eval fails, try parsing as JSON
+                embedding = episode.get('embedding')
+                if embedding:
+                    if isinstance(embedding, str):
+                        # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
                         try:
-                            episode['embedding'] = np.array(json.loads(episode['embedding']))
-                        except:
-                            logger.warning(f"Could not parse embedding for episode {episode['episode_id']}")
+                            # Safe parsing: remove brackets and split by comma
+                            vector_str = embedding.strip('[]')
+                            values = [float(x.strip()) for x in vector_str.split(',')]
+                            episode['embedding'] = np.array(values)
+                        except Exception as e:
+                            logger.warning(f"Could not parse embedding for episode {episode['episode_id']}: {e}")
                             episode['embedding'] = None
-                results.append(episode)
+                    elif isinstance(embedding, (list, np.ndarray)):
+                        # Already in proper format
+                        episode['embedding'] = np.array(embedding)
+                    else:
+                        logger.warning(f"Unexpected embedding type for episode {episode['episode_id']}: {type(embedding)}")
+                        episode['embedding'] = None
+                
+                # Only include episodes with valid embeddings
+                if episode.get('embedding') is not None:
+                    results.append(episode)
             return results
         except Exception as e:
             logger.error(f"Error fetching episodes with embeddings for media {media_id}: {e}")

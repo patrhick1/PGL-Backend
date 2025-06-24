@@ -109,6 +109,23 @@ async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]
             logger.exception(f"Error fetching campaign {campaign_id}: {e}")
             raise
 
+async def get_campaigns_by_person_id(person_id: int) -> List[Dict[str, Any]]:
+    """Get all campaigns for a specific person."""
+    query = """
+    SELECT * FROM campaigns 
+    WHERE person_id = $1
+    ORDER BY created_at DESC;
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, person_id)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.exception(f"Error fetching campaigns for person {person_id}: {e}")
+            return []
+
 async def get_all_campaigns_from_db(
     skip: int = 0, 
     limit: int = 100,

@@ -99,7 +99,7 @@ async def create_matches_for_enriched_media(db_service: DatabaseService) -> bool
                 
                 if vetting_result.get('status') == 'success':
                     vetting_score = vetting_result.get('vetting_score', 0)
-                    min_vetting_score = 6.0  # Only create matches for well-vetted podcasts
+                    min_vetting_score = 60  # Only create matches for well-vetted podcasts
                     
                     if vetting_score >= min_vetting_score:
                         # Create match suggestion only if vetting passes

@@ -35,10 +35,10 @@ class ReviewTaskResponse(ReviewTaskBase):
     
     # AI Context Fields (for match_suggestion tasks)
     ai_reasoning: Optional[str] = Field(None, description="AI reasoning for the match")
-    vetting_score: Optional[float] = Field(None, description="AI vetting score (0-10)")
+    vetting_score: Optional[int] = Field(None, description="AI vetting score (0-100)")
     vetting_reasoning: Optional[str] = Field(None, description="AI detailed vetting analysis")
     vetting_checklist: Optional[Dict[str, Any]] = Field(None, description="Dynamic vetting criteria with weights")
-    match_score: Optional[float] = Field(None, description="Basic similarity match score")
+    match_score: Optional[int] = Field(None, description="Quantitative match score (0-100)")
 
     model_config = ConfigDict(
         from_attributes=True,  # Replaces orm_mode = True

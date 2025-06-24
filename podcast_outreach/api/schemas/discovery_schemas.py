@@ -28,7 +28,7 @@ class DiscoveryStatus(BaseModel):
     overall_status: str = Field(..., description="Overall processing status")
     
     # Results
-    vetting_score: Optional[float] = Field(None, description="AI vetting score (0-10)")
+    vetting_score: Optional[int] = Field(None, description="AI vetting score (0-100)")
     match_created: bool = Field(False, description="Whether match suggestion was created")
     review_task_created: bool = Field(False, description="Whether review task was created")
     
@@ -83,7 +83,7 @@ class EnhancedReviewTaskResponse(BaseModel):
     discovered_at: Optional[datetime] = Field(None, description="When podcast was discovered")
     
     # AI Vetting Results (for match_suggestion tasks)
-    vetting_score: Optional[float] = Field(None, description="AI vetting score (0-10)")
+    vetting_score: Optional[int] = Field(None, description="AI vetting score (0-100)")
     vetting_reasoning: Optional[str] = Field(None, description="Detailed AI reasoning")
     vetting_criteria_met: Optional[Dict[str, Any]] = Field(None, description="Specific criteria analysis")
     
@@ -119,7 +119,7 @@ class ReviewTaskFilters(BaseModel):
     campaign_id: Optional[uuid.UUID] = None
     task_type: Optional[str] = Field(None, description="match_suggestion, pitch_review")
     status: Optional[str] = Field(None, description="pending, approved, rejected")
-    min_vetting_score: Optional[float] = Field(None, description="Minimum AI vetting score")
+    min_vetting_score: Optional[int] = Field(None, ge=0, le=100, description="Minimum AI vetting score (0-100)")
     discovery_keyword: Optional[str] = Field(None, description="Filter by discovery keyword")
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None

@@ -104,7 +104,7 @@ async def process_discovery_workflow(
         elif discovery["match_created"]:
             result["next_step"] = "creating_review_task"
         elif discovery["vetting_status"] == "completed":
-            if discovery["vetting_score"] >= 5.0:
+            if discovery["vetting_score"] >= 50:
                 result["next_step"] = "creating_match"
             else:
                 result["next_step"] = "vetting_score_too_low"

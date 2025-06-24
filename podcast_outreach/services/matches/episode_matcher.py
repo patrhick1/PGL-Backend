@@ -27,26 +27,37 @@ class EpisodeMatcher:
         try:
             # Get campaign embedding
             campaign = await campaign_queries.get_campaign_by_id(campaign_id)
-            if not campaign or not campaign.get('embedding'):
+            if not campaign:
+                logger.warning(f"Campaign {campaign_id} not found")
+                return None
+            
+            campaign_embedding = campaign.get('embedding')
+            if campaign_embedding is None:
                 logger.warning(f"Campaign {campaign_id} has no embedding")
                 return None
             
-            campaign_embedding = np.array(campaign['embedding'])
+            # Convert to numpy array if needed
+            if not isinstance(campaign_embedding, np.ndarray):
+                campaign_embedding = np.array(campaign_embedding)
             
             # Get all episodes for this media with embeddings
             episodes = await episode_queries.get_episodes_with_embeddings_for_media(media_id)
             
             if not episodes:
-                logger.info(f"No episodes with embeddings found for media {media_id}")
-                return None
+                logger.info(f"No episodes with embeddings found for media {media_id}, trying fallback methods")
+                # Fallback: Get most recent episode regardless of embeddings
+                return await self._get_fallback_episode(media_id)
             
             # Calculate cosine similarities
             best_episode_id = None
             best_similarity = -1.0
             
             for episode in episodes:
-                if episode.get('embedding'):
-                    episode_embedding = np.array(episode['embedding'])
+                episode_embedding = episode.get('embedding')
+                if episode_embedding is not None:
+                    # Ensure it's a numpy array
+                    if not isinstance(episode_embedding, np.ndarray):
+                        episode_embedding = np.array(episode_embedding)
                     
                     # Calculate cosine similarity
                     similarity = self._cosine_similarity(campaign_embedding, episode_embedding)
@@ -81,3 +92,32 @@ class EpisodeMatcher:
         except Exception as e:
             logger.error(f"Error calculating cosine similarity: {e}")
             return 0.0
+    
+    async def _get_fallback_episode(self, media_id: int) -> Optional[int]:
+        """Get the most recent episode as a fallback when no embeddings are available."""
+        try:
+            # First try to get the most recent episode
+            most_recent = await episode_queries.get_most_recent_episode_for_media(media_id)
+            if most_recent:
+                logger.info(f"Selected most recent episode {most_recent['episode_id']} as fallback for media {media_id}")
+                return most_recent['episode_id']
+            
+            # If that doesn't work, try getting any episode
+            from podcast_outreach.database.connection import get_db_pool
+            pool = await get_db_pool()
+            
+            async with pool.acquire() as conn:
+                episode_id = await conn.fetchval(
+                    "SELECT episode_id FROM episodes WHERE media_id = $1 LIMIT 1",
+                    media_id
+                )
+                if episode_id:
+                    logger.info(f"Selected episode {episode_id} as last resort fallback for media {media_id}")
+                    return episode_id
+            
+            logger.warning(f"No episodes found at all for media {media_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting fallback episode: {e}")
+            return None

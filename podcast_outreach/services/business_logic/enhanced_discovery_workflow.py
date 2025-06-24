@@ -127,7 +127,7 @@ class EnhancedDiscoveryWorkflow:
                     result["steps_completed"].append("waiting_for_ai_description")
             
             # Step 5: Create match if vetting score is high enough
-            if discovery["vetting_status"] == "completed" and discovery["vetting_score"] >= 5.0:
+            if discovery["vetting_status"] == "completed" and discovery["vetting_score"] >= 50:
                 if not discovery["match_created"]:
                     match_result = await self._create_match_and_review_task(discovery)
                     result["steps_completed"].extend(match_result["steps_completed"])

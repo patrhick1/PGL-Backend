@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Constants for scoring
 WEIGHT_EMBEDDING = 0.7
 WEIGHT_KEYWORD = 0.3
-MIN_SCORE_FOR_VETTING = 0.5 # Threshold to create a review task
+MIN_SCORE_FOR_VETTING = 50 # Threshold to create a review task (on 0-100 scale)
 
 def convert_embedding_to_list(embedding) -> Optional[List[float]]:
     """Convert various embedding formats to a list of floats."""
@@ -205,9 +205,10 @@ class MatchCreationService:
             keyword_score = jaccard_similarity(campaign_keywords, best_episode_keywords)
             overlapping_keywords = list(set(campaign_keywords).intersection(set(best_episode_keywords)))
         
-        final_quantitative_score = (best_embedding_score * WEIGHT_EMBEDDING) + (keyword_score * WEIGHT_KEYWORD)
+        # Calculate final score on 0-100 scale
+        final_quantitative_score = ((best_embedding_score * WEIGHT_EMBEDDING) + (keyword_score * WEIGHT_KEYWORD)) * 100
         
-        ai_reasoning = f"Quantitative match score: {final_quantitative_score:.3f}. Content similarity (max {best_embedding_score:.3f}). Keyword Jaccard score ({keyword_score:.3f})."
+        ai_reasoning = f"Quantitative match score: {final_quantitative_score:.0f}/100. Content similarity (max {best_embedding_score:.3f}). Keyword Jaccard score ({keyword_score:.3f})."
 
         match_suggestion_payload = {
             "campaign_id": campaign_id,

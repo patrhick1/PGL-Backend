@@ -43,7 +43,7 @@ async def discover_matches_for_campaign_enhanced(
     This endpoint:
     1. Starts podcast discovery immediately
     2. Processes each discovered podcast through automated pipeline
-    3. Creates review tasks for client approval when vetting score ≥ 6.0
+    3. Creates review tasks for client approval when vetting score ≥ 60
     4. Returns immediate response with tracking information
     
     The full pipeline (enrichment → vetting → matches → review tasks) runs automatically in the background.
@@ -310,8 +310,8 @@ async def list_approved_matches_without_pitches_api(
         JOIN media m ON ms.media_id = m.media_id
         JOIN campaigns c ON ms.campaign_id = c.campaign_id
         LEFT JOIN people p ON c.person_id = p.person_id
-        LEFT JOIN pitches pitch ON ms.match_id = ANY(pitch.matched_keywords::int[])
-        WHERE ms.status = 'client_approved'
+        LEFT JOIN pitches pitch ON (ms.campaign_id = pitch.campaign_id AND ms.media_id = pitch.media_id)
+        WHERE (ms.status = 'client_approved' OR ms.status = 'approved')
         AND ms.client_approved = TRUE
         AND pitch.pitch_id IS NULL
         """

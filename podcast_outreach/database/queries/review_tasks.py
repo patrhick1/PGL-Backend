@@ -198,7 +198,7 @@ async def get_all_review_tasks_paginated(
     FROM review_tasks rt
     {' '.join(joins)}
     WHERE {where_clause}
-    ORDER BY rt.created_at DESC
+    ORDER BY COALESCE(ms.vetting_score, ms.match_score, 0) DESC, rt.created_at DESC
     LIMIT ${param_idx} OFFSET ${param_idx + 1};
     """
     params_for_query = params + [size, offset]

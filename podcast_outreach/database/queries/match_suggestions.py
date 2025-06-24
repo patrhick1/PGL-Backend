@@ -217,11 +217,13 @@ async def get_all_match_suggestions_enriched(
         m.name AS media_name,
         m.website AS media_website,
         c.campaign_name AS campaign_name,
-        p.full_name AS client_name
+        p.full_name AS client_name,
+        rt.review_task_id
     FROM match_suggestions ms
     JOIN media m ON ms.media_id = m.media_id
     JOIN campaigns c ON ms.campaign_id = c.campaign_id
     LEFT JOIN people p ON c.person_id = p.person_id -- LEFT JOIN in case person_id is nullable or person is deleted
+    LEFT JOIN review_tasks rt ON ms.match_id = rt.related_id AND rt.task_type = 'match_suggestion'
     WHERE {where_clause}
     ORDER BY ms.created_at DESC
     OFFSET ${skip_param_idx} LIMIT ${limit_param_idx};
@@ -244,11 +246,13 @@ async def get_match_suggestion_by_id_enriched(match_id: int) -> Optional[Dict[st
         m.name AS media_name,
         m.website AS media_website,
         c.campaign_name AS campaign_name,
-        p.full_name AS client_name
+        p.full_name AS client_name,
+        rt.review_task_id
     FROM match_suggestions ms
     JOIN media m ON ms.media_id = m.media_id
     JOIN campaigns c ON ms.campaign_id = c.campaign_id
     LEFT JOIN people p ON c.person_id = p.person_id
+    LEFT JOIN review_tasks rt ON ms.match_id = rt.related_id AND rt.task_type = 'match_suggestion'
     WHERE ms.match_id = $1;
     """
     pool = await get_db_pool()

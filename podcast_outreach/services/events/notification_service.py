@@ -199,12 +199,12 @@ class NotificationService:
                 return
             
             # Determine notification type based on vetting score
-            if vetting_score >= 5.0:
+            if vetting_score >= 50:
                 notification = NotificationData(
                     id=str(uuid.uuid4()),
                     type="review_ready",
                     title="New Review Ready",
-                    message=f"✨ {media_name} passed vetting (score: {vetting_score:.1f}/10) - Ready for your review!",
+                    message=f"✨ {media_name} passed vetting (score: {vetting_score}/100) - Ready for your review!",
                     data={
                         "match_id": event.entity_id,
                         "media_name": media_name,
@@ -221,7 +221,7 @@ class NotificationService:
                     id=str(uuid.uuid4()),
                     type="vetting_failed",
                     title="Podcast Filtered Out",
-                    message=f"{media_name} didn't meet criteria (score: {vetting_score:.1f}/10)",
+                    message=f"{media_name} didn't meet criteria (score: {vetting_score}/100)",
                     data={
                         "match_id": event.entity_id,
                         "media_name": media_name,
