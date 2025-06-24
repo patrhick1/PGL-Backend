@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pgl_env/
+venv/
+env/
+ENV/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# Documentation
+*.md
+LICENSE
+docs/
+
+# Logs
+logs/
+*.log
+
+# Testing
+tests/
+test_*.py
+*_test.py
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+tmp/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Media files (if any)
+media/
+uploads/
+
+# Static files (will be copied separately in Dockerfile)
+# Uncomment if you want to exclude and handle separately
+# static/
+# templates/
+
+# Scripts that shouldn't be in the container
+scripts/test_*.py
+scripts/*_test.py
+
+# Any local development files
+*.local
+local_*
+
+# Poetry lock file (if using requirements.txt instead)
+poetry.lock

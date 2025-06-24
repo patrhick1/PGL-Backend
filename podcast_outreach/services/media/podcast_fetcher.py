@@ -3,7 +3,7 @@
 import asyncio
 import argparse
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple, Set
 import concurrent.futures
 import html
 import functools
@@ -37,7 +37,6 @@ PODSCAN_PAGE_SIZE = 20
 API_CALL_DELAY = 1.2
 KEYWORD_PROCESSING_DELAY = 2
 ENRICHMENT_FRESHNESS_THRESHOLD_DAYS = 180
-TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD = 10 # For testing purposes
 MIN_EPISODE_COUNT = 10 # Minimum number of episodes required for podcasts
 
 
@@ -461,12 +460,8 @@ class MediaFetcher:
             if media and media.get('media_id'):
                 logger.info(f"merge_and_upsert_media: Media upserted/updated: '{media.get('name')}' (ID: {media['media_id']}) from source {podcast_data.get('source_api')}")
                 
-                # Track discovery in campaign_media_discoveries
-                try:
-                    await media_queries.track_campaign_media_discovery(campaign_uuid, media['media_id'], keyword)
-                    logger.debug(f"Tracked discovery for campaign {campaign_uuid}, media {media['media_id']}")
-                except Exception as track_error:
-                    logger.debug(f"Could not track discovery (expected during transition): {track_error}")
+                # Discovery tracking removed - this is now handled exclusively in fetch_podcasts_for_campaign
+                # to respect the max_matches limit properly
                 
                 return media['media_id']
             else:
@@ -515,12 +510,11 @@ class MediaFetcher:
         
         upserted_media_ids_this_call: List[int] = []
         ln_offset = 0
-        ln_has_more = True
-        processed_podcasts_count_for_test = 0 
+        ln_has_more = True 
 
         while ln_has_more:
             try:
-                logger.info(f"ListenNotes: Searching '{keyword}', offset {ln_offset}, current test count for keyword: {processed_podcasts_count_for_test}")
+                logger.info(f"ListenNotes: Searching '{keyword}', offset {ln_offset}")
                 response = await self._run_in_executor(
                     self.listennotes_client.search_podcasts,
                     keyword,
@@ -537,14 +531,8 @@ class MediaFetcher:
                     break 
 
                 for item in results:
-                    logger.debug(f"ListenNotes: Processing item: {item.get('title_original', 'N/A')}, API ID: {item.get('id')}")
-                    logger.debug(f"ListenNotes: Current test count for '{keyword}' BEFORE check: {processed_podcasts_count_for_test}")
-                    if processed_podcasts_count_for_test >= TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD:
-                        logger.info(f"ListenNotes: TEST LIMIT MET ({TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD}) for '{keyword}'. Halting.")
-                        ln_has_more = False 
-                        break 
+                    logger.debug(f"ListenNotes: Processing item: {item.get('title_original', 'N/A')}, API ID: {item.get('id')}") 
                     
-                    # *** CORRECTED INDENTATION STARTS HERE ***
                     ln_api_id = str(item.get('id', '')).strip()
                     ln_rss = item.get('rss')
                     current_item_source_identifier = ln_rss or ln_api_id
@@ -560,8 +548,7 @@ class MediaFetcher:
                     
                     if media_id:
                         upserted_media_ids_this_call.append(media_id)
-                        processed_podcasts_count_for_test += 1 
-                        logger.debug(f"ListenNotes: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
+                        logger.debug(f"ListenNotes: Added media ID: {media_id}")
 
                         if existing_media_in_db is None: 
                             logger.info(f"New media_id {media_id} (ListenNotes) for '{enriched.get('name')}'. Fetching episodes...")
@@ -572,8 +559,7 @@ class MediaFetcher:
                         if current_item_source_identifier: 
                             processed_ids_session.add(current_item_source_identifier)
                     else:
-                        logger.warning(f"ListenNotes: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
-                    # *** CORRECTED INDENTATION ENDS HERE ***
+                        logger.warning(f"ListenNotes: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'.")
                                 
                 if not ln_has_more: 
                     logger.debug(f"ListenNotes: Breaking outer pagination loop for '{keyword}' (ln_has_more is False).")
@@ -594,7 +580,7 @@ class MediaFetcher:
             except Exception as e:
                 logger.error(f"ListenNotes error for '{keyword}': {e}", exc_info=True)
                 ln_has_more = False
-        logger.info(f"ListenNotes: Finished search for keyword '{keyword}'. Final test count: {processed_podcasts_count_for_test}.")
+        logger.info(f"ListenNotes: Finished search for keyword '{keyword}'.")
         return upserted_media_ids_this_call
 
     async def search_podscan_for_media(self, keyword: str, campaign_uuid: uuid.UUID, 
@@ -608,12 +594,11 @@ class MediaFetcher:
 
         upserted_media_ids_this_call: List[int] = []
         ps_page = 1
-        ps_has_more = True
-        processed_podcasts_count_for_test = 0 
+        ps_has_more = True 
 
         while ps_has_more:
             try:
-                logger.info(f"PodscanFM: Searching '{keyword}' page {ps_page}, current test count for keyword: {processed_podcasts_count_for_test}")
+                logger.info(f"PodscanFM: Searching '{keyword}' page {ps_page}")
                 response = await self._run_in_executor(
                     self.podscan_client.search_podcasts,
                     keyword,
@@ -630,14 +615,8 @@ class MediaFetcher:
                     break 
 
                 for item in results:
-                    logger.debug(f"PodscanFM: Processing item: {item.get('podcast_name', 'N/A')}, API ID: {item.get('podcast_id')}")
-                    logger.debug(f"PodscanFM: Current test count for '{keyword}' BEFORE check: {processed_podcasts_count_for_test}")
-                    if processed_podcasts_count_for_test >= TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD:
-                        logger.info(f"PodscanFM: TEST LIMIT MET ({TEST_MODE_MAX_PODCASTS_PER_SOURCE_PER_KEYWORD}) for '{keyword}'. Halting.")
-                        ps_has_more = False
-                        break 
+                    logger.debug(f"PodscanFM: Processing item: {item.get('podcast_name', 'N/A')}, API ID: {item.get('podcast_id')}") 
                     
-                    # *** CORRECTED INDENTATION STARTS HERE ***
                     ps_api_id = str(item.get('podcast_id', '')).strip()
                     ps_rss = item.get('rss_url')
                     current_item_source_identifier = ps_rss or ps_api_id
@@ -654,8 +633,7 @@ class MediaFetcher:
                     
                     if media_id:
                         upserted_media_ids_this_call.append(media_id)
-                        processed_podcasts_count_for_test += 1 
-                        logger.debug(f"PodscanFM: Incremented test count for '{keyword}' to: {processed_podcasts_count_for_test}. Media ID: {media_id}")
+                        logger.debug(f"PodscanFM: Added media ID: {media_id}")
 
                         if existing_media_in_db is None: 
                             logger.info(f"New media_id {media_id} (PodscanFM) for '{enriched.get('name')}'. Fetching episodes...")
@@ -666,8 +644,7 @@ class MediaFetcher:
                         if current_item_source_identifier:
                             processed_ids_session.add(current_item_source_identifier)
                     else:
-                        logger.warning(f"PodscanFM: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'. Not incrementing test counter.")
-                    # *** CORRECTED INDENTATION ENDS HERE ***
+                        logger.warning(f"PodscanFM: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'.")
 
                 if not ps_has_more: 
                     logger.debug(f"PodscanFM: Breaking outer pagination loop for '{keyword}' (ps_has_more is False).")
@@ -688,15 +665,21 @@ class MediaFetcher:
             except Exception as e:
                 logger.error(f"PodscanFM error for '{keyword}': {e}", exc_info=True)
                 ps_has_more = False
-        logger.info(f"PodscanFM: Finished search for keyword '{keyword}'. Final test count: {processed_podcasts_count_for_test}.")
+        logger.info(f"PodscanFM: Finished search for keyword '{keyword}'.")
         return upserted_media_ids_this_call
 
-    async def fetch_podcasts_for_campaign(self, campaign_id_str: str, max_matches: Optional[int] = None) -> List[int]:
+    async def fetch_podcasts_for_campaign(self, campaign_id_str: str, max_matches: Optional[int] = None) -> List[tuple[int, str]]:
         """
-        Main orchestration method. Returns a list of newly created media IDs.
+        Enhanced version that ensures all discovered podcasts are tracked in campaign_media_discoveries,
+        regardless of whether they already exist in the media table.
         """
-        logger.info(f"Starting podcast fetch for campaign {campaign_id_str}. Max new match suggestions for this run: {max_matches if max_matches is not None else 'unlimited'}")
-        newly_created_media_ids: List[int] = []
+        max_matches = max_matches or 50  # Default to 50 if not specified
+        logger.info(f"Starting enhanced podcast fetch for campaign {campaign_id_str}. Max new discoveries for this run: {max_matches}")
+        
+        # Track media IDs with their keywords that get NEW discovery records
+        media_with_new_discoveries: List[tuple[int, str]] = []
+        new_discoveries_count = 0
+        
         try:
             campaign_uuid = uuid.UUID(campaign_id_str)
         except ValueError:
@@ -714,9 +697,12 @@ class MediaFetcher:
             return []
         
         processed_media_identifiers_this_run: set = set()
-        unique_candidate_media_map: Dict[int, str] = {}
-
+        
         logger.info(f"Phase 1: Discovering and upserting media for campaign {campaign_uuid} based on {len(keywords)} keywords.")
+        
+        # Track all discovered media (new and existing) with their discovery source
+        all_discovered_media: List[Tuple[int, str, bool]] = []  # (media_id, keyword, is_new)
+        
         for kw in keywords:
             kw = kw.strip()
             if not kw:
@@ -727,71 +713,291 @@ class MediaFetcher:
             listennotes_genre_ids = await self._generate_genre_ids_async(kw, str(campaign_uuid))
             podscan_category_ids = await self._generate_podscan_category_ids_async(kw, str(campaign_uuid))
             
-            ln_media_ids = await self.search_listen_notes_for_media(kw, listennotes_genre_ids, campaign_uuid, processed_media_identifiers_this_run)
-            for media_id_from_ln in ln_media_ids: 
-                if media_id_from_ln not in unique_candidate_media_map: 
-                    unique_candidate_media_map[media_id_from_ln] = kw
-                    if media_id_from_ln not in newly_created_media_ids: # Track all unique new IDs
-                        newly_created_media_ids.append(media_id_from_ln)
-
-            ps_media_ids = await self.search_podscan_for_media(kw, campaign_uuid, processed_media_identifiers_this_run, podscan_category_ids_override=podscan_category_ids)
-            for media_id_from_ps in ps_media_ids: 
-                if media_id_from_ps not in unique_candidate_media_map: 
-                    unique_candidate_media_map[media_id_from_ps] = kw
-                    if media_id_from_ps not in newly_created_media_ids:
-                        newly_created_media_ids.append(media_id_from_ps)
+            # Search ListenNotes with enhanced tracking
+            ln_discovered = await self._search_and_track_discoveries(
+                'ListenNotes', kw, campaign_uuid, processed_media_identifiers_this_run,
+                listennotes_genre_ids=listennotes_genre_ids
+            )
+            all_discovered_media.extend(ln_discovered)
+            
+            # Search Podscan with enhanced tracking
+            ps_discovered = await self._search_and_track_discoveries(
+                'PodscanFM', kw, campaign_uuid, processed_media_identifiers_this_run,
+                podscan_category_ids=podscan_category_ids
+            )
+            all_discovered_media.extend(ps_discovered)
             
             logger.info(f"Finished media discovery for keyword '{kw}' for campaign {campaign_uuid}.")
-            await asyncio.sleep(KEYWORD_PROCESSING_DELAY) 
+            await asyncio.sleep(KEYWORD_PROCESSING_DELAY)
         
         logger.info(f"Phase 1 (Media Discovery) completed for campaign {campaign_uuid}. "
-                    f"{len(unique_candidate_media_map)} unique media items identified and upserted.")
-
-        new_matches_created_this_run = 0
-        if not unique_candidate_media_map:
-            logger.info(f"No new or existing media candidates found for campaign {campaign_uuid}. No match suggestions to create.")
-        else:
-            logger.info(f"Phase 2: Creating match suggestions for campaign {campaign_uuid} from {len(unique_candidate_media_map)} candidates. Limit for this run: {max_matches if max_matches is not None else 'unlimited'}.")
-            
-            for media_id_map_key, originating_keyword in unique_candidate_media_map.items(): 
-                if max_matches is not None and new_matches_created_this_run >= max_matches:
-                    logger.info(f"Reached max_matches limit ({max_matches}) for new suggestions for campaign {campaign_uuid}. Halting further suggestion creation for this run.")
-                    break
-                
-                # WORKFLOW OPTIMIZATION: Match creation moved to after enrichment/vetting
-                # Match suggestions will be created after full enrichment and episode analysis
-                # This ensures higher quality matches with complete podcast data
-                # created_new_suggestion = await self.create_match_suggestions(media_id_map_key, campaign_uuid, originating_keyword)
-                created_new_suggestion = False  # Temporarily disabled
-                
-                if created_new_suggestion:
-                    new_matches_created_this_run += 1
-                    logger.debug(f"New match suggestion created for media_id {media_id_map_key}, campaign {campaign_uuid}. Total new suggestions this run: {new_matches_created_this_run}")
-                else:
-                    logger.debug(f"Match suggestion attempt for media_id {media_id_map_key}, campaign {campaign_uuid} did not result in a new suggestion (likely already exists or error)." )
-
-        logger.info(f"Discovery and Match Suggestion process COMPLETED for campaign {campaign_uuid}. "
-                    f"Total new match suggestions created in this run: {new_matches_created_this_run}")
+                    f"{len(all_discovered_media)} total media items discovered.")
         
-        # Publish events for newly created media
+        # Phase 2: Create campaign_media_discoveries records for ALL discovered media
+        logger.info(f"Phase 2: Creating campaign_media_discoveries records. Limit: {max_matches}")
+        
+        # Remove duplicates while preserving order
+        seen_media_ids = set()
+        unique_discovered_media = []
+        for media_id, keyword, is_new in all_discovered_media:
+            if media_id not in seen_media_ids:
+                seen_media_ids.add(media_id)
+                unique_discovered_media.append((media_id, keyword, is_new))
+        
+        # Track discoveries for ALL media (new and existing) up to max_matches
+        for media_id, keyword, is_new_media in unique_discovered_media:
+            if new_discoveries_count >= max_matches:
+                logger.info(f"Reached max_matches limit ({max_matches}) for new discoveries. Stopping.")
+                break
+            
+            # Check if this campaign-media discovery already exists
+            exists = await media_queries.check_campaign_media_discovery_exists(campaign_uuid, media_id)
+            
+            if not exists:
+                # Create new discovery record
+                discovery_created = await media_queries.track_campaign_media_discovery(campaign_uuid, media_id, keyword)
+                if discovery_created:
+                    new_discoveries_count += 1
+                    media_with_new_discoveries.append((media_id, keyword))
+                    logger.info(f"Created discovery #{new_discoveries_count} for {'NEW' if is_new_media else 'EXISTING'} "
+                               f"media {media_id} with keyword '{keyword}'")
+            else:
+                logger.debug(f"Discovery already exists for campaign {campaign_uuid}, media {media_id}")
+        
+        logger.info(f"Discovery process COMPLETED for campaign {campaign_uuid}. "
+                    f"Created {new_discoveries_count} new campaign_media_discoveries records.")
+        
+        # Publish events for media with new discoveries
         try:
             event_bus = get_event_bus()
-            for media_id in newly_created_media_ids:
+            for media_id, keyword in media_with_new_discoveries:
                 event = Event(
                     event_type=EventType.MEDIA_CREATED,
                     entity_id=str(media_id),
                     entity_type="media",
-                    data={"campaign_id": str(campaign_uuid)},
+                    data={"campaign_id": str(campaign_uuid), "discovery_keyword": keyword},
                     source="media_fetcher"
                 )
                 await event_bus.publish(event)
             
-            if newly_created_media_ids:
-                logger.info(f"Published MEDIA_CREATED events for {len(newly_created_media_ids)} new media items")
+            if media_with_new_discoveries:
+                logger.info(f"Published MEDIA_CREATED events for {len(media_with_new_discoveries)} new discoveries")
         except Exception as e:
             logger.error(f"Error publishing MEDIA_CREATED events: {e}", exc_info=True)
         
-        return newly_created_media_ids
+        return media_with_new_discoveries
+    
+    async def _search_and_track_discoveries(
+        self,
+        source_api: str,
+        keyword: str,
+        campaign_uuid: uuid.UUID,
+        processed_ids_session: Set[str],
+        listennotes_genre_ids: Optional[str] = None,
+        podscan_category_ids: Optional[str] = None
+    ) -> List[Tuple[int, str, bool]]:
+        """
+        Search for media and track whether each result is new or existing.
+        Returns list of (media_id, keyword, is_new) tuples.
+        """
+        discovered_media = []
+        
+        if source_api == 'ListenNotes':
+            media_results = await self._search_listennotes_with_tracking(
+                keyword, listennotes_genre_ids, campaign_uuid, processed_ids_session
+            )
+        else:  # PodscanFM
+            media_results = await self._search_podscan_with_tracking(
+                keyword, campaign_uuid, processed_ids_session, podscan_category_ids
+            )
+        
+        for media_id, is_new in media_results:
+            discovered_media.append((media_id, keyword, is_new))
+        
+        return discovered_media
+    
+    async def _search_listennotes_with_tracking(
+        self,
+        keyword: str,
+        genre_ids_str: Optional[str],
+        campaign_uuid: uuid.UUID,
+        processed_ids_session: Set[str]
+    ) -> List[Tuple[int, bool]]:
+        """
+        Search ListenNotes and track whether each result is new or existing.
+        Returns list of (media_id, is_new) tuples.
+        """
+        if not genre_ids_str:
+            logger.warning(f"ListenNotes: No genre IDs available for keyword '{keyword}', skipping ListenNotes search.")
+            return []
+        
+        logger.info(f"ListenNotes: Using genre_ids_str '{genre_ids_str}' for keyword '{keyword}'.")
+        
+        media_results = []
+        ln_offset = 0
+        ln_has_more = True
+        
+        while ln_has_more:
+            try:
+                logger.info(f"ListenNotes: Searching '{keyword}' offset {ln_offset}")
+                response = await self._run_in_executor(
+                    self.listennotes_client.search_podcasts,
+                    keyword,
+                    genre_ids=genre_ids_str,
+                    offset=ln_offset,
+                    page_size=LISTENNOTES_PAGE_SIZE,
+                    episode_count_min=MIN_EPISODE_COUNT,
+                    interviews_only=1
+                )
+                results = response.get('results', []) if isinstance(response, dict) else []
+                if not results:
+                    logger.info(f"ListenNotes: No results from API for '{keyword}' at offset {ln_offset}.")
+                    ln_has_more = False
+                    break
+                
+                for item in results:
+                    current_item_source_identifier = item.get('rss') or str(item.get('id', '')).strip()
+                    
+                    if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
+                        logger.debug(f"ListenNotes: Item {current_item_source_identifier} already processed in this session. Skipping.")
+                        continue
+                    
+                    # Check if media exists
+                    existing_media_in_db = await self._get_existing_media_by_identifiers(item, "ListenNotes")
+                    is_new = existing_media_in_db is None
+                    
+                    # Enrich and upsert regardless of whether it's new
+                    enriched = await self._enrich_podcast_data(item, "ListenNotes", existing_media_from_db=existing_media_in_db)
+                    
+                    # Discovery tracking is now handled exclusively in fetch_podcasts_for_campaign
+                    media_id = await self.merge_and_upsert_media(
+                        enriched, "ListenNotes", campaign_uuid, keyword
+                    )
+                    
+                    if media_id:
+                        media_results.append((media_id, is_new))
+                        logger.debug(f"ListenNotes: Processed {'NEW' if is_new else 'EXISTING'} media ID: {media_id}")
+                        
+                        if is_new:
+                            logger.info(f"New media_id {media_id} (ListenNotes) for '{enriched.get('name')}'. Fetching episodes...")
+                            await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
+                        
+                        if current_item_source_identifier:
+                            processed_ids_session.add(current_item_source_identifier)
+                    else:
+                        logger.warning(f"ListenNotes: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'.")
+                
+                ln_has_more = response.get('has_next', False)
+                if ln_has_more:
+                    ln_offset = response.get('next_offset', ln_offset + LISTENNOTES_PAGE_SIZE)
+                    await asyncio.sleep(API_CALL_DELAY)
+                    
+            except RateLimitError as rle:
+                logger.warning(f"ListenNotes rate limit for '{keyword}': {rle}")
+                await asyncio.sleep(60)
+                ln_has_more = False
+            except APIClientError as apie:
+                logger.error(f"ListenNotes API error for '{keyword}': {apie}")
+                ln_has_more = False
+            except Exception as e:
+                logger.error(f"ListenNotes error for '{keyword}': {e}", exc_info=True)
+                ln_has_more = False
+        
+        logger.info(f"ListenNotes: Finished search for keyword '{keyword}'.")
+        return media_results
+    
+    async def _search_podscan_with_tracking(
+        self,
+        keyword: str,
+        campaign_uuid: uuid.UUID,
+        processed_ids_session: Set[str],
+        podscan_category_ids_override: Optional[str] = None
+    ) -> List[Tuple[int, bool]]:
+        """
+        Search Podscan and track whether each result is new or existing.
+        Returns list of (media_id, is_new) tuples.
+        """
+        category_ids_str = podscan_category_ids_override or await self._generate_podscan_category_ids_async(keyword, str(campaign_uuid))
+        if not category_ids_str:
+            logger.warning(f"PodscanFM: No category IDs generated for keyword '{keyword}', skipping Podscan search.")
+            return []
+        
+        logger.info(f"PodscanFM: Using category_ids_str '{category_ids_str}' for keyword '{keyword}'.")
+        
+        media_results = []
+        ps_page = 1
+        ps_has_more = True
+        
+        while ps_has_more:
+            try:
+                logger.info(f"PodscanFM: Searching '{keyword}' page {ps_page}")
+                response = await self._run_in_executor(
+                    self.podscan_client.search_podcasts,
+                    keyword,
+                    page=ps_page,
+                    per_page=PODSCAN_PAGE_SIZE,
+                    category_ids=category_ids_str,
+                    min_episode_count=MIN_EPISODE_COUNT,
+                    has_guests=True,
+                )
+                results = response.get('podcasts', []) if isinstance(response, dict) else []
+                if not results:
+                    logger.info(f"PodscanFM: No results from API for '{keyword}' at page {ps_page}.")
+                    ps_has_more = False
+                    break
+                
+                for item in results:
+                    ps_api_id = str(item.get('podcast_id', '')).strip()
+                    ps_rss = item.get('rss_url')
+                    current_item_source_identifier = ps_rss or ps_api_id
+                    
+                    if current_item_source_identifier and current_item_source_identifier in processed_ids_session:
+                        logger.debug(f"PodscanFM: Item {current_item_source_identifier} already processed in this session. Skipping.")
+                        continue
+                    
+                    # Check if media exists
+                    existing_media_in_db = await self._get_existing_media_by_identifiers(item, "PodscanFM")
+                    is_new = existing_media_in_db is None
+                    
+                    # Enrich and upsert regardless of whether it's new
+                    enriched = await self._enrich_podcast_data(item, "PodscanFM", existing_media_from_db=existing_media_in_db)
+                    
+                    # Discovery tracking is now handled exclusively in fetch_podcasts_for_campaign
+                    media_id = await self.merge_and_upsert_media(
+                        enriched, "PodscanFM", campaign_uuid, keyword
+                    )
+                    
+                    if media_id:
+                        media_results.append((media_id, is_new))
+                        logger.debug(f"PodscanFM: Processed {'NEW' if is_new else 'EXISTING'} media ID: {media_id}")
+                        
+                        if is_new:
+                            logger.info(f"New media_id {media_id} (PodscanFM) for '{enriched.get('name')}'. Fetching episodes...")
+                            await self.episode_handler_service.fetch_and_store_latest_episodes(media_id=media_id, num_latest=10)
+                        
+                        if current_item_source_identifier:
+                            processed_ids_session.add(current_item_source_identifier)
+                    else:
+                        logger.warning(f"PodscanFM: merge_and_upsert_media FAILED for item '{enriched.get('name')}' from keyword '{keyword}'.")
+                
+                ps_has_more = len(results) >= PODSCAN_PAGE_SIZE
+                if ps_has_more:
+                    ps_page += 1
+                    await asyncio.sleep(API_CALL_DELAY)
+                    
+            except RateLimitError as rle:
+                logger.warning(f"PodscanFM rate limit for '{keyword}': {rle}")
+                await asyncio.sleep(60)
+                ps_has_more = False
+            except APIClientError as apie:
+                logger.error(f"PodscanFM API error for '{keyword}': {apie}")
+                ps_has_more = False
+            except Exception as e:
+                logger.error(f"PodscanFM error for '{keyword}': {e}", exc_info=True)
+                ps_has_more = False
+        
+        logger.info(f"PodscanFM: Finished search for keyword '{keyword}'.")
+        return media_results
 
     async def admin_discover_and_process_podcasts(
         self,

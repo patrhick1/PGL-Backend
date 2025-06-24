@@ -149,6 +149,12 @@ class EnrichmentOrchestrator:
                 if enriched_profile:
                     update_data = enriched_profile.model_dump(exclude_none=True)
                     
+                    # Convert HttpUrl objects to strings
+                    from pydantic import HttpUrl
+                    for key, value in update_data.items():
+                        if isinstance(value, HttpUrl):
+                            update_data[key] = str(value)
+                    
                     fields_to_remove = ['unified_profile_id', 'recent_episodes', 'quality_score']
                     for field in fields_to_remove:
                         if field in update_data: del update_data[field]
@@ -315,6 +321,12 @@ class EnrichmentOrchestrator:
             enriched_profile = await self.enrichment_agent.enrich_podcast_profile(media_data)
             if enriched_profile:
                 update_data = enriched_profile.model_dump(exclude_none=True)
+                
+                # Convert HttpUrl objects to strings
+                from pydantic import HttpUrl
+                for key, value in update_data.items():
+                    if isinstance(value, HttpUrl):
+                        update_data[key] = str(value)
                 
                 # Clean up data
                 fields_to_remove = ['unified_profile_id', 'recent_episodes', 'quality_score']

@@ -44,6 +44,8 @@ class EnhancedVettingAgent:
     def _extract_comprehensive_client_profile(self, campaign_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract all relevant information from questionnaire responses for vetting."""
         questionnaire = campaign_data.get('questionnaire_responses', {})
+        if questionnaire is None:
+            questionnaire = {}
         
         # Extract all relevant fields
         profile = {
@@ -138,18 +140,15 @@ class EnhancedVettingAgent:
 
     async def _generate_enhanced_vetting_checklist(self, client_profile: Dict[str, Any]) -> Optional[VettingChecklist]:
         """Generate a comprehensive vetting checklist using all questionnaire data."""
-        prompt = f"""
+        # Create the prompt with properly escaped audience requirements
+        # to avoid template variable issues
+        audience_req_str = str(client_profile['audience_requirements']).replace('"', "'")
+        
+        prompt_template = """
         Based on the following comprehensive client profile, create a prioritized checklist of 7-10 specific, measurable criteria to evaluate potential podcasts. Consider all aspects of the client's expertise, preferences, and requirements.
 
         Client Profile:
-        - Ideal Podcast Description: {client_profile['ideal_podcast_description']}
-        - Expertise Topics: {', '.join(client_profile['expertise_topics'])}
-        - Suggested Discussion Topics: {', '.join(client_profile['suggested_topics'])}
-        - Key Messages: {'; '.join(client_profile['key_messages'][:3])}  # Limit to avoid too long prompt
-        - Content Themes: {', '.join(client_profile['content_themes'])}
-        - Audience Requirements: {json.dumps(client_profile['audience_requirements'])}
-        - Previous Show Types: {', '.join(client_profile['media_preferences'].get('previous_show_types', [])[:5])}
-        - Items to Promote: {'; '.join(client_profile['promotion_items'][:2])}
+        {user_query}
 
         Create criteria that:
         1. Assess topic alignment with the client's expertise areas
@@ -166,10 +165,20 @@ class EnhancedVettingAgent:
         Generate a JSON object that adheres to the VettingChecklist schema.
         """
         
+        # Build the client profile details
+        profile_details = f"""- Ideal Podcast Description: {client_profile['ideal_podcast_description']}
+        - Expertise Topics: {', '.join(client_profile['expertise_topics'][:10])}
+        - Suggested Discussion Topics: {', '.join(client_profile['suggested_topics'][:10])}
+        - Key Messages: {'; '.join(client_profile['key_messages'][:3])}
+        - Content Themes: {', '.join(client_profile['content_themes'][:5])}
+        - Audience Requirements: {audience_req_str}
+        - Previous Show Types: {', '.join(client_profile['media_preferences'].get('previous_show_types', [])[:5])}
+        - Items to Promote: {'; '.join(client_profile['promotion_items'][:2])}"""
+        
         try:
             checklist_obj = await self.gemini_service.get_structured_data(
-                prompt_template_str=prompt,
-                user_query="",
+                prompt_template_str=prompt_template,
+                user_query=profile_details,
                 output_model=VettingChecklist,
                 workflow="enhanced_vetting_checklist_generation"
             )
@@ -193,7 +202,7 @@ class EnhancedVettingAgent:
             f"Description: {media_record.get('description')}",
             f"AI-Generated Description: {media_record.get('ai_description')}",
             f"Category: {media_record.get('category')}",
-            f"Host(s): {', '.join(media_record.get('host_names', []))}",
+            f"Host(s): {', '.join(media_record.get('host_names') or [])}",
             f"Audience Size Estimate: {media_record.get('audience_size')}",
             f"ListenNotes Score: {media_record.get('listen_score')}",
             f"Social Followers: Twitter={media_record.get('twitter_followers')}, LinkedIn={media_record.get('linkedin_followers')}",
@@ -269,30 +278,28 @@ class EnhancedVettingAgent:
         client_profile: Dict[str, Any]
     ) -> Optional[VettingAnalysis]:
         """Enhanced scoring that specifically analyzes topic matching."""
-        prompt = f"""
+        # Format checklist without curly braces that could be interpreted as template variables
+        checklist_str = json.dumps(checklist.model_dump(), indent=2).replace('{', '{{').replace('}', '}}')
+        
+        prompt_template = """
         You are an expert podcast vetting analyst. Evaluate the following podcast based on the provided checklist and evidence, with special attention to topic matching.
 
-        **Client's Expertise Areas:**
-        - Primary Expertise: {', '.join(client_profile['expertise_topics'][:10])}
-        - Suggested Topics: {', '.join(client_profile['suggested_topics'][:10])}
-        - Content Themes: {', '.join(client_profile['content_themes'][:5])}
-
-        **Vetting Checklist:**
-        {json.dumps(checklist.model_dump(), indent=2)}
-
-        **Podcast Evidence:**
-        ---
-        {evidence}
-        ---
+        {user_query}
 
         For each criterion:
-        1. Provide a score from 0 (no fit) to 10 (perfect fit)
+        1. Provide a score from 0 (no fit) to 10 (perfect fit) using this scale:
+           - 0-2: No alignment or very poor fit
+           - 3-4: Minimal alignment, significant gaps
+           - 5-6: Moderate alignment, some relevant overlap  
+           - 7-8: Strong alignment, good fit with minor gaps
+           - 9-10: Excellent alignment, near-perfect or perfect fit
         2. Justify your score with specific evidence from the podcast data
         3. When evaluating topic match, look for:
            - Direct keyword matches with client's expertise
            - Conceptual alignment even if exact words differ
            - Recent episode themes that align with client's areas
            - Guest types that match the client's profile
+        4. Be generous with scoring - if there's reasonable alignment, score in the 7-8 range
 
         Additionally, provide:
         - A detailed topic match analysis explaining how well the podcast's content aligns with the client's expertise
@@ -301,10 +308,24 @@ class EnhancedVettingAgent:
         Generate a JSON object that adheres to the VettingAnalysis schema.
         """
         
+        # Build the analysis context
+        context = f"""**Client's Expertise Areas:**
+        - Primary Expertise: {', '.join(client_profile['expertise_topics'][:10])}
+        - Suggested Topics: {', '.join(client_profile['suggested_topics'][:10])}
+        - Content Themes: {', '.join(client_profile['content_themes'][:5])}
+
+        **Vetting Checklist:**
+        {checklist_str}
+
+        **Podcast Evidence:**
+        ---
+        {evidence}
+        ---"""
+        
         try:
             analysis_obj = await self.gemini_service.get_structured_data(
-                prompt_template_str=prompt,
-                user_query="",
+                prompt_template_str=prompt_template,
+                user_query=context,
                 output_model=VettingAnalysis,
                 workflow="enhanced_vetting_scoring"
             )
@@ -370,8 +391,8 @@ class EnhancedVettingAgent:
                         "justification": score.justification
                     } for score in analysis.scores
                 ],
-                "client_expertise_matched": client_profile['expertise_topics'][:10],  # Top 10 for storage
-                "last_vetted_at": datetime.now(timezone.utc)
+                "client_expertise_matched": client_profile['expertise_topics'][:10]  # Top 10 for storage
+                # Note: last_vetted_at is handled by the database with vetted_at = NOW()
             }
             
             return vetting_results
@@ -379,3 +400,36 @@ class EnhancedVettingAgent:
         except Exception as e:
             logger.error(f"Error in enhanced vetting for media {media_id}: {e}", exc_info=True)
             return None
+    
+    async def vet_match(self, campaign_data: Dict[str, Any], media_id: int) -> Optional[Dict[str, Any]]:
+        """Compatibility method that calls vet_match_enhanced."""
+        # Ensure we have minimum required data
+        if not campaign_data:
+            logger.error("No campaign data provided for vetting")
+            return None
+            
+        # If no ideal_podcast_description and no questionnaire, we can't vet
+        if not campaign_data.get('ideal_podcast_description') and not campaign_data.get('questionnaire_responses'):
+            logger.warning(f"Campaign {campaign_data.get('campaign_id')} lacks both ideal_podcast_description and questionnaire_responses")
+            return None
+            
+        return await self.vet_match_enhanced(campaign_data, media_id)
+    
+    async def vet_media_for_campaign(self, media_id: int, campaign_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Compatibility method with reversed parameters."""
+        result = await self.vet_match_enhanced(campaign_data, media_id)
+        if result:
+            return {
+                'status': 'success',
+                'vetting_score': result.get('vetting_score', 0),
+                'vetting_reasoning': result.get('vetting_reasoning', ''),
+                'vetting_checklist': result.get('vetting_checklist', {}),
+                'topic_match_analysis': result.get('topic_match_analysis', ''),
+                'client_expertise_matched': result.get('client_expertise_matched', [])
+            }
+        else:
+            return {
+                'status': 'failed',
+                'vetting_score': 0,
+                'error': 'Vetting failed to produce results'
+            }

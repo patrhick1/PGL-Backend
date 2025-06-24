@@ -629,10 +629,30 @@ async def link_person_to_media(media_id: int, person_id: int, role: str) -> bool
             logger.error(f"Error linking person {person_id} to media {media_id}: {e}", exc_info=True)
             return False
 
+async def check_campaign_media_discovery_exists(campaign_id: uuid.UUID, media_id: int) -> bool:
+    """
+    Check if a campaign-media discovery record already exists.
+    """
+    query = """
+    SELECT EXISTS(
+        SELECT 1 FROM campaign_media_discoveries 
+        WHERE campaign_id = $1 AND media_id = $2
+    );
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.fetchval(query, campaign_id, media_id)
+            return result
+        except Exception as e:
+            logger.debug(f"Could not check campaign media discovery (table may not exist): {e}")
+            return False
+
 async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, keyword: str) -> bool:
     """
     Track that a media was discovered for a campaign during discovery phase.
     This will be used later to create match suggestions after enrichment.
+    Returns True if a NEW record was created, False if it already existed or on error.
     """
     query = """
     INSERT INTO campaign_media_discoveries (campaign_id, media_id, discovery_keyword, discovered_at)
@@ -640,14 +660,16 @@ async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, 
     ON CONFLICT (campaign_id, media_id) 
     DO UPDATE SET 
         discovery_keyword = EXCLUDED.discovery_keyword,
-        discovered_at = NOW();
+        discovered_at = NOW()
+    RETURNING (xmax = 0) AS inserted;
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            await conn.execute(query, campaign_id, media_id, keyword)
-            logger.debug(f"Tracked discovery of media {media_id} for campaign {campaign_id} with keyword '{keyword}'")
-            return True
+            result = await conn.fetchrow(query, campaign_id, media_id, keyword)
+            is_new = result['inserted'] if result else False
+            logger.debug(f"{'Created new' if is_new else 'Updated existing'} discovery for media {media_id}, campaign {campaign_id}")
+            return is_new
         except Exception as e:
             # Table might not exist yet - this is expected during transition
             logger.debug(f"Could not track campaign media discovery (table may not exist): {e}")

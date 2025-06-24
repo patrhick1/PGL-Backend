@@ -120,7 +120,7 @@ async def _run_enhanced_discovery_pipeline(campaign_id: uuid.UUID, max_matches: 
         reviews_ready = 0
         
         # Track each discovered media through campaign_media_discoveries
-        for media_id in discovery_results:
+        for media_id, discovery_keyword in discovery_results:
             try:
                 if media_id:
                     # Send progress notification
@@ -131,15 +131,11 @@ async def _run_enhanced_discovery_pipeline(campaign_id: uuid.UUID, max_matches: 
                         in_progress=1
                     )
                     
-                    # Get media info for keyword tracking
-                    media_info = await media_queries.get_media_by_id_from_db(media_id)
-                    keyword = media_info.get('category', 'general') if media_info else 'general'
-                    
                     # Run the enhanced automated pipeline for this discovery
                     pipeline_result = await enhanced_workflow.process_discovery(
                         campaign_id=campaign_id,
                         media_id=media_id,
-                        discovery_keyword=keyword
+                        discovery_keyword=discovery_keyword
                     )
                     
                     processed_count += 1

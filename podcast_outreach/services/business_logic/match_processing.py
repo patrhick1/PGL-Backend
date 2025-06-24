@@ -84,7 +84,7 @@ async def create_matches_for_enriched_media(db_service: DatabaseService) -> bool
                 logger.info(f"Creating match suggestion for media '{media_name}' (ID: {media_id}) and campaign {campaign_id}")
                 
                 # NEW WORKFLOW: Vet first, then create match suggestion if approved
-                from podcast_outreach.services.matches.vetting_agent import VettingAgent
+                from podcast_outreach.services.matches.enhanced_vetting_agent import EnhancedVettingAgent
                 from podcast_outreach.database.queries import campaigns as campaign_queries
                 
                 # Get campaign details for vetting
@@ -94,7 +94,7 @@ async def create_matches_for_enriched_media(db_service: DatabaseService) -> bool
                     continue
                 
                 # Run AI vetting before creating match
-                vetting_agent = VettingAgent()
+                vetting_agent = EnhancedVettingAgent()
                 vetting_result = await vetting_agent.vet_media_for_campaign(media_id, campaign_data)
                 
                 if vetting_result.get('status') == 'success':

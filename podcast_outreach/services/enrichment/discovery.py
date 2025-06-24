@@ -38,7 +38,7 @@ class DiscoveryService:
     def __init__(self) -> None:
         self.fetcher = MediaFetcher() # MediaFetcher initializes EpisodeHandlerService
 
-    async def discover_for_campaign(self, campaign_id: str, max_matches: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def discover_for_campaign(self, campaign_id: str, max_matches: Optional[int] = None) -> List[tuple[int, str]]:
         """
         Run discovery flow for a campaign. This is the main entry point.
         1. Fetches/upserts media and creates initial match suggestions.
@@ -47,15 +47,15 @@ class DiscoveryService:
         """
         logger.info(f"DiscoveryService: Starting discovery for campaign {campaign_id}, max_matches: {max_matches}")
         
-        # Phase 1: MediaFetcher finds/upserts media, creates match suggestions, and fetches initial episodes for NEW media.
-        # The fetcher now returns a list of media_ids that were newly created.
-        newly_created_media_ids = await self.fetcher.fetch_podcasts_for_campaign(campaign_id, max_matches=max_matches)
-        logger.info(f"DiscoveryService: MediaFetcher completed. Found/created {len(newly_created_media_ids)} new media items for campaign {campaign_id}.")
+        # Phase 1: MediaFetcher finds/upserts media and tracks discoveries up to max_matches.
+        # The fetcher now returns a list of (media_id, keyword) tuples for NEW campaign_media_discoveries records.
+        media_with_new_discoveries = await self.fetcher.fetch_podcasts_for_campaign(campaign_id, max_matches=max_matches)
+        logger.info(f"DiscoveryService: MediaFetcher completed. Created {len(media_with_new_discoveries)} new campaign_media_discoveries records for campaign {campaign_id}.")
 
-        # Phase 2: For each newly created media item, trigger the full enrichment pipeline as a background task.
-        if newly_created_media_ids:
-            logger.info(f"Triggering background enrichment for {len(newly_created_media_ids)} new media items.")
-            for media_id in newly_created_media_ids:
+        # Phase 2: For each media with new discovery record, trigger the full enrichment pipeline as a background task.
+        if media_with_new_discoveries:
+            logger.info(f"Triggering background enrichment for {len(media_with_new_discoveries)} media items with new discoveries.")
+            for media_id, keyword in media_with_new_discoveries:
                 task_name = f"enrichment_media_{media_id}"
                 logger.info(f"Creating non-blocking asyncio task '{task_name}'...")
                 # Use TaskManager for enrichment instead of direct asyncio task
@@ -105,4 +105,5 @@ class DiscoveryService:
         else:
             logger.info(f"DiscoveryService: No pending suggestions found for campaign {campaign_id} to refresh episodes for.")
 
-        return pending_suggestions_for_campaign
+        # Return the media IDs with keywords that have new discovery records (to be processed by enhanced workflow)
+        return media_with_new_discoveries

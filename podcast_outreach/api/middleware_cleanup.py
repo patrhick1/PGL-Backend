@@ -120,15 +120,31 @@ class ConnectionMonitorMiddleware(BaseHTTPMiddleware):
             # Process request
             response = await call_next(request)
             
-            # Check for connection leaks after request
+            # Check for connection issues after request
             try:
                 from podcast_outreach.database.connection import DB_POOL
                 if DB_POOL and not DB_POOL._closed and before_size > 0:
                     try:
                         after_size = DB_POOL.get_size()
-                        if after_size > before_size:
+                        
+                        # Log detailed pool stats for debugging
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                f"Connection pool stats for {request.method} {request.url.path}: "
+                                f"size={after_size}, min={DB_POOL._minsize}, max={DB_POOL._maxsize}, "
+                                f"free={len(DB_POOL._free)}, used={DB_POOL._nwaiting}"
+                            )
+                        
+                        # Only warn if we exceed max_size or see a significant increase
+                        # Normal pool growth from min_size to max_size is expected
+                        if after_size > 10:  # max_size from connection.py
                             logger.warning(
-                                f"Potential connection leak in {request.method} {request.url.path}: "
+                                f"Connection pool exceeded max size in {request.method} {request.url.path}: "
+                                f"pool size {before_size} -> {after_size}"
+                            )
+                        elif after_size > before_size + 3:  # Significant sudden increase
+                            logger.warning(
+                                f"Unusual connection pool growth in {request.method} {request.url.path}: "
                                 f"pool size {before_size} -> {after_size}"
                             )
                     except Exception:

@@ -1,6 +1,7 @@
 # podcast_outreach/database/queries/campaign_media_discoveries.py
 
 import logging
+import json
 import uuid
 from typing import Any, Dict, Optional, List
 from datetime import datetime, timezone
@@ -180,12 +181,27 @@ async def update_vetting_results(
     status: str = 'completed'
 ) -> bool:
     """Update vetting results for a discovery."""
+    # Validate vetting_criteria_met is a dict, not a JSON string
+    if isinstance(vetting_criteria_met, str):
+        logger.warning(f"Received JSON string instead of dict for vetting_criteria_met in discovery {discovery_id}")
+        try:
+            vetting_criteria_met = json.loads(vetting_criteria_met)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse vetting_criteria_met JSON string for discovery {discovery_id}")
+            vetting_criteria_met = {}
+    
+    # Convert dict to JSON string for asyncpg
+    if isinstance(vetting_criteria_met, dict):
+        vetting_criteria_json = json.dumps(vetting_criteria_met)
+    else:
+        vetting_criteria_json = vetting_criteria_met
+    
     query = """
     UPDATE campaign_media_discoveries
     SET vetting_status = $1,
         vetting_score = $2,
         vetting_reasoning = $3,
-        vetting_criteria_met = $4,
+        vetting_criteria_met = $4::jsonb,
         vetted_at = NOW(),
         updated_at = NOW()
     WHERE id = $5
@@ -193,7 +209,7 @@ async def update_vetting_results(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            await conn.execute(query, status, vetting_score, vetting_reasoning, vetting_criteria_met, discovery_id)
+            await conn.execute(query, status, vetting_score, vetting_reasoning, vetting_criteria_json, discovery_id)
             logger.info(f"Updated vetting results for discovery {discovery_id}: score {vetting_score}")
             return True
         except Exception as e:
@@ -571,3 +587,68 @@ async def cleanup_stale_vetting_locks(stale_minutes: int = 60) -> int:
         except Exception as e:
             logger.error(f"Error cleaning up stale vetting locks: {e}")
             return 0
+
+async def update_vetting_results_enhanced(
+    discovery_id: int,
+    vetting_score: float,
+    vetting_reasoning: str,
+    vetting_criteria_met: dict,
+    topic_match_analysis: str,
+    vetting_criteria_scores: List[Dict[str, Any]],
+    client_expertise_matched: List[str],
+    status: str = 'completed'
+) -> bool:
+    """Update enhanced vetting results for a discovery with all vetting data."""
+    # Validate vetting_criteria_met is a dict, not a JSON string
+    if isinstance(vetting_criteria_met, str):
+        logger.warning(f"Received JSON string instead of dict for vetting_criteria_met in discovery {discovery_id}")
+        try:
+            vetting_criteria_met = json.loads(vetting_criteria_met)
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse vetting_criteria_met JSON string for discovery {discovery_id}")
+            vetting_criteria_met = {}
+    
+    # Convert dicts to JSON strings for asyncpg
+    if isinstance(vetting_criteria_met, dict):
+        vetting_criteria_json = json.dumps(vetting_criteria_met)
+    else:
+        vetting_criteria_json = vetting_criteria_met
+        
+    if isinstance(vetting_criteria_scores, list):
+        vetting_scores_json = json.dumps(vetting_criteria_scores)
+    else:
+        vetting_scores_json = vetting_criteria_scores
+    
+    query = """
+    UPDATE campaign_media_discoveries
+    SET vetting_status = $1,
+        vetting_score = $2,
+        vetting_reasoning = $3,
+        vetting_criteria_met = $4::jsonb,
+        topic_match_analysis = $5,
+        vetting_criteria_scores = $6::jsonb,
+        client_expertise_matched = $7,
+        vetted_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $8
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                query, 
+                status, 
+                vetting_score, 
+                vetting_reasoning, 
+                vetting_criteria_json, 
+                topic_match_analysis,
+                vetting_scores_json,
+                client_expertise_matched,
+                discovery_id
+            )
+            logger.info(f"Updated enhanced vetting results for discovery {discovery_id}: score {vetting_score}")
+            logger.debug(f"Enhanced data stored - topic_match: {len(topic_match_analysis) if topic_match_analysis else 0} chars, criteria_scores: {len(vetting_criteria_scores) if vetting_criteria_scores else 0} items, expertise: {len(client_expertise_matched) if client_expertise_matched else 0} items")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating enhanced vetting results for discovery {discovery_id}: {e}", exc_info=True)
+            raise  # Re-raise to trigger fallback in orchestrator

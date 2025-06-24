@@ -13,7 +13,7 @@ from podcast_outreach.database.queries import episodes as episode_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_task_queries
-from podcast_outreach.services.matches.vetting_agent import VettingAgent
+from podcast_outreach.services.matches.enhanced_vetting_agent import EnhancedVettingAgent
 from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
 from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
 
@@ -155,7 +155,7 @@ async def _run_vetting_for_discovery(discovery: Dict[str, Any]) -> Dict[str, Any
             return {"success": False, "error": "Campaign missing ideal_podcast_description"}
         
         # Run vetting
-        vetting_agent = VettingAgent()
+        vetting_agent = EnhancedVettingAgent()
         vetting_result = await vetting_agent.vet_media_for_campaign(
             discovery["media_id"], campaign_data
         )

@@ -248,7 +248,12 @@ def create_media_table(conn):
         quality_score_last_calculated TIMESTAMPTZ, -- When the score was last calculated
         
         -- NEW FIELDS FOR ENRICHMENT SUPPORT
-        first_episode_date        DATE         -- When the podcast first published an episode
+        first_episode_date        DATE,         -- When the podcast first published an episode
+        
+        -- NEW: Host name confidence tracking
+        host_names_discovery_sources JSONB DEFAULT '[]'::jsonb, -- JSON array of sources where host names were discovered
+        host_names_discovery_confidence JSONB DEFAULT '{}'::jsonb, -- JSON object mapping each host name to its confidence score
+        host_names_last_verified TIMESTAMPTZ -- Timestamp of last host name verification check
     );
  
     CREATE INDEX IF NOT EXISTS idx_media_company_id           ON media (company_id);
@@ -257,6 +262,7 @@ def create_media_table(conn):
     -- NEW INDEXES
     CREATE INDEX IF NOT EXISTS idx_media_last_enriched_ts     ON media (last_enriched_timestamp);
     CREATE INDEX IF NOT EXISTS idx_media_social_stats_fetched ON media (social_stats_last_fetched_at);
+    CREATE INDEX IF NOT EXISTS idx_media_host_names_last_verified ON media (host_names_last_verified);
     """
     execute_sql(conn, sql_statement)
     print("Table MEDIA created/ensured with extended provenance and quality score columns.")
@@ -335,10 +341,22 @@ def create_episodes_table(conn):
         -- NEW FIELDS FOR EPISODE ANALYSIS
         episode_themes TEXT[],
         episode_keywords TEXT[],
-        ai_analysis_done BOOLEAN DEFAULT FALSE
+        ai_analysis_done BOOLEAN DEFAULT FALSE,
+        
+        -- NEW: Failed URL tracking and batch transcription
+        audio_url_status VARCHAR(50) DEFAULT 'available' 
+            CHECK (audio_url_status IN ('available', 'failed_404', 'failed_temp', 'expired', 'refreshed')),
+        audio_url_last_checked TIMESTAMPTZ,
+        audio_url_failure_count INTEGER DEFAULT 0,
+        audio_url_last_error TEXT,
+        transcription_batch_id UUID,
+        transcription_batch_position INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_episodes_media_id ON episodes (media_id);
     CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON episodes USING hnsw (embedding vector_cosine_ops);
+    CREATE INDEX IF NOT EXISTS idx_episodes_audio_url_status ON episodes (audio_url_status);
+    CREATE INDEX IF NOT EXISTS idx_episodes_audio_url_last_checked ON episodes (audio_url_last_checked);
+    CREATE INDEX IF NOT EXISTS idx_episodes_transcription_batch_id ON episodes (transcription_batch_id);
     """
     execute_sql(conn, sql_statement)
     print("Table EPISODES created/ensured.")
@@ -598,6 +616,9 @@ def create_campaign_media_discoveries(conn):
             vetting_score NUMERIC(4,2),
             vetting_reasoning TEXT,
             vetting_criteria_met JSONB,
+            topic_match_analysis TEXT,
+            vetting_criteria_scores JSONB,
+            client_expertise_matched TEXT[],
             vetted_at TIMESTAMP WITH TIME ZONE,
             vetting_error TEXT,
             

@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: pgl-podcast-app
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Database configuration (using external Neon Postgres)
+      - PGHOST=${PGHOST}
+      - PGPORT=${PGPORT}
+      - PGDATABASE=${PGDATABASE}
+      - PGUSER=${PGUSER}
+      - PGPASSWORD=${PGPASSWORD}
+      
+      # API Keys
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_API=${OPENAI_API}
+      - ANTHROPIC_API=${ANTHROPIC_API}
+      - LISTEN_NOTES_API_KEY=${LISTEN_NOTES_API_KEY}
+      - PODSCANAPI=${PODSCANAPI}
+      - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      
+      # Google services
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      - GOOGLE_PODCAST_INFO_FOLDER_ID=${GOOGLE_PODCAST_INFO_FOLDER_ID}
+      - PGL_AI_DRIVE_FOLDER_ID=${PGL_AI_DRIVE_FOLDER_ID}
+      
+      # Application settings
+      - SESSION_SECRET_KEY=${SESSION_SECRET_KEY}
+      - IS_PRODUCTION=${IS_PRODUCTION:-false}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5173}
+      - PORT=${PORT:-8000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Worker settings
+      - EPISODE_SYNC_MAX_CONCURRENT_TASKS=${EPISODE_SYNC_MAX_CONCURRENT_TASKS:-10}
+      - GEMINI_TRANSCRIPTION_MAX_RETRIES=${GEMINI_TRANSCRIPTION_MAX_RETRIES:-3}
+      - GEMINI_TRANSCRIPTION_RETRY_DELAY=${GEMINI_TRANSCRIPTION_RETRY_DELAY:-5}
+      - GEMINI_API_CONCURRENCY=${GEMINI_API_CONCURRENCY:-10}
+      - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-5}
+      - TRANSCRIBER_MAX_EPISODES_PER_BATCH=${TRANSCRIBER_MAX_EPISODES_PER_BATCH:-20}
+      
+      # Optional features
+      - ENABLE_LLM_TEST_DASHBOARD=${ENABLE_LLM_TEST_DASHBOARD:-false}
+      
+      # Discovery limits
+      - FREE_PLAN_DAILY_DISCOVERY_LIMIT=${FREE_PLAN_DAILY_DISCOVERY_LIMIT:-10}
+      - FREE_PLAN_WEEKLY_DISCOVERY_LIMIT=${FREE_PLAN_WEEKLY_DISCOVERY_LIMIT:-50}
+      - PAID_PLAN_DAILY_DISCOVERY_LIMIT=${PAID_PLAN_DAILY_DISCOVERY_LIMIT:-100}
+      - PAID_PLAN_WEEKLY_DISCOVERY_LIMIT=${PAID_PLAN_WEEKLY_DISCOVERY_LIMIT:-500}
+      
+      # API settings
+      - LISTENNOTES_PAGE_SIZE=${LISTENNOTES_PAGE_SIZE:-10}
+      - PODSCAN_PAGE_SIZE=${PODSCAN_PAGE_SIZE:-10}
+      - API_CALL_DELAY=${API_CALL_DELAY:-1.0}
+      
+    volumes:
+      # Mount local code for development
+      - ./:/app
+      # Mount static files
+      - ./static:/app/static
+      - ./templates:/app/templates
+      # If you have Google credentials file, mount it
+      # - ./path/to/your/credentials.json:/app/credentials.json
+    
+    # Uncomment if you want to use a local Redis instance
+    # depends_on:
+    #   - redis
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Network
+    networks:
+      - pgl-network
+
+  # Optional: Add Redis for caching/sessions if needed
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: pgl-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - pgl-network
+  #   restart: unless-stopped
+
+networks:
+  pgl-network:
+    driver: bridge
+
+# volumes:
+#   redis-data:

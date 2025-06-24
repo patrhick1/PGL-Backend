@@ -1,6 +1,7 @@
 # podcast_outreach/database/queries/match_suggestions.py
 
 import logging
+import json
 from typing import Any, Dict, Optional, List
 import uuid # For UUID types
 
@@ -17,10 +18,27 @@ async def create_match_suggestion_in_db(suggestion: Dict[str, Any]) -> Optional[
         campaign_id, media_id, match_score, matched_keywords, ai_reasoning, status, 
         client_approved, approved_at, vetting_score, vetting_reasoning, 
         vetting_checklist, last_vetted_at, best_matching_episode_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)
     RETURNING *;
     """
     keywords = suggestion.get("matched_keywords") or []
+    
+    # Validate vetting_checklist is a dict, not a JSON string
+    vetting_checklist = suggestion.get("vetting_checklist")
+    if vetting_checklist and isinstance(vetting_checklist, str):
+        logger.warning("Received JSON string instead of dict for vetting_checklist")
+        try:
+            vetting_checklist = json.loads(vetting_checklist)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse vetting_checklist JSON string")
+            vetting_checklist = None
+    
+    # Convert vetting_checklist dict to JSON string for asyncpg
+    if vetting_checklist and isinstance(vetting_checklist, dict):
+        vetting_checklist_json = json.dumps(vetting_checklist)
+    else:
+        vetting_checklist_json = vetting_checklist
+    
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
@@ -36,7 +54,7 @@ async def create_match_suggestion_in_db(suggestion: Dict[str, Any]) -> Optional[
                 suggestion.get("approved_at"),
                 suggestion.get("vetting_score"),
                 suggestion.get("vetting_reasoning"),
-                suggestion.get("vetting_checklist"),
+                vetting_checklist_json,
                 suggestion.get("last_vetted_at"),
                 suggestion.get("best_matching_episode_id")
             )
@@ -213,19 +231,7 @@ async def get_all_match_suggestions_enriched(
     async with pool.acquire() as conn:
         try:
             rows = await conn.fetch(query, *params)
-            results = []
-            for row in rows:
-                row_dict = dict(row)
-                # Handle vetting_checklist that might be stored as JSON string
-                if row_dict.get('vetting_checklist') and isinstance(row_dict['vetting_checklist'], str):
-                    try:
-                        import json
-                        row_dict['vetting_checklist'] = json.loads(row_dict['vetting_checklist'])
-                    except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse vetting_checklist for match_id: {row_dict.get('match_id')}")
-                        row_dict['vetting_checklist'] = None
-                results.append(row_dict)
-            return results
+            return [dict(row) for row in rows]
         except Exception as e:
             logger.exception(f"Error fetching all enriched match_suggestions: {e}")
             return []
@@ -252,16 +258,7 @@ async def get_match_suggestion_by_id_enriched(match_id: int) -> Optional[Dict[st
             if not row:
                 logger.debug(f"Enriched match suggestion not found: {match_id}")
                 return None
-            row_dict = dict(row)
-            # Handle vetting_checklist that might be stored as JSON string
-            if row_dict.get('vetting_checklist') and isinstance(row_dict['vetting_checklist'], str):
-                try:
-                    import json
-                    row_dict['vetting_checklist'] = json.loads(row_dict['vetting_checklist'])
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse vetting_checklist for match_id: {match_id}")
-                    row_dict['vetting_checklist'] = None
-            return row_dict
+            return dict(row)
         except Exception as e:
             logger.exception(f"Error fetching enriched match suggestion {match_id}: {e}")
             return None # Or raise, depending on desired error handling

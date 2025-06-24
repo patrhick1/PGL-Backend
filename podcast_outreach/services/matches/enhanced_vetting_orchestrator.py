@@ -10,7 +10,7 @@ from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import media as media_queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_task_queries
-from .vetting_agent import VettingAgent
+from .enhanced_vetting_agent import EnhancedVettingAgent
 from .episode_matcher import EpisodeMatcher
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class EnhancedVettingOrchestrator:
     """
 
     def __init__(self):
-        self.vetting_agent = VettingAgent()
+        self.vetting_agent = EnhancedVettingAgent()
         self.episode_matcher = EpisodeMatcher()
         logger.info("EnhancedVettingOrchestrator initialized.")
 
@@ -92,13 +92,37 @@ class EnhancedVettingOrchestrator:
                 
                 if vetting_results:
                     # Update discovery with vetting results
-                    await cmd_queries.update_vetting_results(
-                        discovery_id,
-                        vetting_results['vetting_score'],
-                        vetting_results.get('vetting_reasoning', ''),
-                        vetting_results.get('vetting_checklist', {}),
-                        'completed'
-                    )
+                    # Store ALL vetting data in vetting_criteria_met for backward compatibility
+                    vetting_criteria_met = {
+                        'vetting_checklist': vetting_results.get('vetting_checklist', {}),
+                        'topic_match_analysis': vetting_results.get('topic_match_analysis', ''),
+                        'vetting_criteria_scores': vetting_results.get('vetting_criteria_scores', []),
+                        'client_expertise_matched': vetting_results.get('client_expertise_matched', [])
+                    }
+                    
+                    # Check if we have the enhanced columns available
+                    try:
+                        # Try to use the enhanced function first
+                        await cmd_queries.update_vetting_results_enhanced(
+                            discovery_id,
+                            vetting_results['vetting_score'],
+                            vetting_results.get('vetting_reasoning', ''),
+                            vetting_criteria_met,
+                            vetting_results.get('topic_match_analysis', ''),
+                            vetting_results.get('vetting_criteria_scores', []),
+                            vetting_results.get('client_expertise_matched', []),
+                            'completed'
+                        )
+                    except Exception as e:
+                        # Fall back to regular function if enhanced columns don't exist
+                        logger.warning(f"Enhanced vetting update failed, falling back to regular update: {e}")
+                        await cmd_queries.update_vetting_results(
+                            discovery_id,
+                            vetting_results['vetting_score'],
+                            vetting_results.get('vetting_reasoning', ''),
+                            vetting_criteria_met,
+                            'completed'
+                        )
                     
                     logger.info(
                         f"Successfully vetted discovery {discovery_id}. "
@@ -183,7 +207,6 @@ class EnhancedVettingOrchestrator:
                 'ai_reasoning': vetting_results.get('vetting_reasoning', ''),
                 'vetting_score': vetting_results['vetting_score'],
                 'vetting_reasoning': vetting_results.get('vetting_reasoning', ''),
-                'vetting_checklist': vetting_results.get('vetting_checklist', {}),
                 'last_vetted_at': datetime.now(timezone.utc),
                 'best_matching_episode_id': best_episode_id
             }
