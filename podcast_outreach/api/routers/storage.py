@@ -40,6 +40,11 @@ class UploadCompletionResponse(BaseModel):
     success: bool
     message: str
     file_url: str = Field(..., alias='fileUrl')
+    
+    model_config = ConfigDict(
+        populate_by_name=True,
+        by_alias=True,
+    )
 
 # --- API Endpoint ---
 
