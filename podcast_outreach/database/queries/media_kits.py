@@ -120,7 +120,7 @@ async def update_media_kit_in_db(media_kit_id: uuid.UUID, update_data: Dict[str,
     # Always update the updated_at timestamp implicitly via trigger, or explicitly if no trigger
     # set_clauses.append(f"updated_at = NOW()") 
 
-    query = f"UPDATE media_kits SET {", ".join(set_clauses)} WHERE media_kit_id = ${idx} RETURNING *;"
+    query = f"UPDATE media_kits SET {', '.join(set_clauses)} WHERE media_kit_id = ${idx} RETURNING *;"
     values.append(media_kit_id)
 
     pool = await get_db_pool()

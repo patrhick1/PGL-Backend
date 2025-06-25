@@ -1,8 +1,27 @@
 import os
+import json
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
 load_dotenv()
+
+# Handle Google Service Account JSON from environment (for Render deployment)
+google_creds_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+if google_creds_json:
+    try:
+        # Parse the JSON string
+        creds_dict = json.loads(google_creds_json)
+        # Write to a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(creds_dict, f)
+            temp_creds_path = f.name
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_creds_path
+        print(f"Google credentials configured from JSON at {temp_creds_path}")
+    except json.JSONDecodeError as e:
+        print(f"Error parsing GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+    except Exception as e:
+        print(f"Error setting up Google credentials: {e}")
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

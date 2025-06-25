@@ -35,7 +35,17 @@ If the script doesn't find your files, manually:
 
 ### 3. Run with Docker
 ```bash
+# For Windows users, first ensure .env.docker has no spaces around = signs
+# Run the setup script (Windows):
+./setup-docker-secrets.bat
+
+# Or manually fix the .env.docker file
+
+# Then run:
 docker-compose up --build
+
+# Or in detached mode:
+docker-compose up -d --build
 ```
 
 ## Deployment to Production (Render, AWS, etc.)
@@ -58,23 +68,30 @@ Never commit `.env.docker` or credentials to version control. Instead:
 #### Option 1: Environment Variable (Recommended for Production)
 1. Convert your `service-account-key.json` to a base64 string:
    ```bash
+   # Linux/Mac
    base64 -w 0 credentials/service-account-key.json > service-account-base64.txt
+   
+   # Windows
+   certutil -encode credentials/service-account-key.json tmp.b64 && findstr /v /c:- tmp.b64 > service-account-base64.txt
    ```
 
 2. Add to your deployment platform as `GOOGLE_SERVICE_ACCOUNT_BASE64`
 
-3. Update your application to decode it on startup:
-   ```python
-   import base64
-   import json
-   import os
-   
-   # In your config.py or startup code
-   if os.getenv('GOOGLE_SERVICE_ACCOUNT_BASE64'):
-       decoded = base64.b64decode(os.getenv('GOOGLE_SERVICE_ACCOUNT_BASE64'))
-       with open('/tmp/service-account-key.json', 'w') as f:
-           f.write(decoded.decode('utf-8'))
-       os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/tmp/service-account-key.json'
+3. Create a startup script `startup.sh`:
+   ```bash
+   #!/bin/bash
+   if [ ! -z "$GOOGLE_SERVICE_ACCOUNT_BASE64" ]; then
+       echo $GOOGLE_SERVICE_ACCOUNT_BASE64 | base64 -d > /tmp/service-account-key.json
+       export GOOGLE_APPLICATION_CREDENTIALS=/tmp/service-account-key.json
+   fi
+   exec uvicorn podcast_outreach.main:app --host 0.0.0.0 --port ${PORT:-8000}
+   ```
+
+4. Update Dockerfile to use the startup script:
+   ```dockerfile
+   COPY startup.sh /app/
+   RUN chmod +x /app/startup.sh
+   CMD ["/app/startup.sh"]
    ```
 
 #### Option 2: Secret Management Service
@@ -116,9 +133,10 @@ The Docker image includes FFmpeg. If you see errors:
 
 ### Google Credentials Issues
 If Google APIs fail:
-1. Check the credentials are mounted: `docker exec <container> ls -la /app/credentials/`
-2. Verify the path in environment: `docker exec <container> env | grep GOOGLE`
+1. Check the credentials are mounted: `docker exec pgl-podcast-app ls -la /app/podcast_outreach/credentials/`
+2. Verify the path in environment: `docker exec pgl-podcast-app env | grep GOOGLE`
 3. Ensure the service account has necessary permissions
+4. The path should be: `/app/podcast_outreach/credentials/service-account-key.json`
 
 ### Database Connection Issues
 - Verify your database allows connections from Docker's IP
@@ -128,21 +146,13 @@ If Google APIs fail:
 ## Example Deployment Configurations
 
 ### Render.com
-```yaml
-# render.yaml
-services:
-  - type: web
-    name: pgl-podcast-app
-    env: docker
-    dockerfilePath: ./podcast_outreach/Dockerfile
-    dockerContext: ./podcast_outreach
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: pgl-db
-          property: connectionString
-      # Add other environment variables in Render dashboard
-```
+See the dedicated [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) for detailed Render deployment instructions.
+
+Key points for Render:
+- Cannot mount volumes, must use environment variables
+- Use base64 encoding for service account JSON
+- All environment variables must be set in Render dashboard
+- Database URL will include `?sslmode=require`
 
 ### Docker Swarm/Kubernetes
 Use Docker secrets or Kubernetes secrets:

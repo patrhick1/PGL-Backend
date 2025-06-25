@@ -105,7 +105,7 @@ async def list_campaigns_api(
             target_person_id = person_id_query
         # If person_id_query is None, target_person_id remains None, fetching all campaigns (respecting pagination)
     else: # Should not happen if roles are well-defined and get_current_user enforces valid roles
-        logger.error(f"User with unrecognized role '{user.get("role")}' attempted to list campaigns.")
+        logger.error(f'User with unrecognized role \'{user.get("role")}\' attempted to list campaigns.')
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
     try:

@@ -816,13 +816,13 @@ Provide *only* the final, professional social proof section content below, with 
             talking_points_input_parts = []
             if isinstance(questionnaire_responses.get("professionalBio"), dict):
                 pb = questionnaire_responses["professionalBio"]
-                if pb.get("aboutWork"): talking_points_input_parts.append(f"About their work: {pb["aboutWork"]}")
-                if pb.get("expertiseTopics"): talking_points_input_parts.append(f"Areas of expertise: {pb["expertiseTopics"]}")
-                if pb.get("achievements"): talking_points_input_parts.append(f"Key achievements: {pb["achievements"]}")
+                if pb.get("aboutWork"): talking_points_input_parts.append(f"About their work: {pb['aboutWork']}")
+                if pb.get("expertiseTopics"): talking_points_input_parts.append(f"Areas of expertise: {pb['expertiseTopics']}")
+                if pb.get("achievements"): talking_points_input_parts.append(f"Key achievements: {pb['achievements']}")
             if isinstance(questionnaire_responses.get("suggestedTopics"), dict):
                 st = questionnaire_responses["suggestedTopics"]
-                if st.get("topics"): talking_points_input_parts.append(f"Suggested topics by client: {st["topics"]}")
-                if st.get("keyStoriesOrMessages"): talking_points_input_parts.append(f"Key stories/messages from client: {st["keyStoriesOrMessages"]}")
+                if st.get("topics"): talking_points_input_parts.append(f"Suggested topics by client: {st['topics']}")
+                if st.get("keyStoriesOrMessages"): talking_points_input_parts.append(f"Key stories/messages from client: {st['keyStoriesOrMessages']}")
             
             focused_content_for_talking_points = "\n".join(talking_points_input_parts) if talking_points_input_parts else questionnaire_content
 

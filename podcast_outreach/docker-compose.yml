@@ -9,38 +9,16 @@ services:
     env_file:
       - .env.docker
     environment:
-      # Database configuration (using external Neon Postgres)
-      - PGHOST=${PGHOST}
-      - PGPORT=${PGPORT}
-      - PGDATABASE=${PGDATABASE}
-      - PGUSER=${PGUSER}
-      - PGPASSWORD=${PGPASSWORD}
+      # The env_file will load all variables, we only need to override specific ones
       
-      # API Keys
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - FREE_GEMINI_KEY=${FREE_GEMINI_KEY}
-      - OPENAI_API=${OPENAI_API}
-      - ANTHROPIC_API=${ANTHROPIC_API}
-      - LISTEN_NOTES_API_KEY=${LISTEN_NOTES_API_KEY}
-      - PODSCANAPI=${PODSCANAPI}
-      - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
-      - TAVILY_API_KEY=${TAVILY_API_KEY}
-      - AIRTABLE_PERSONAL_TOKEN=${AIRTABLE_PERSONAL_TOKEN}
-      - APIFY_API_KEY=${APIFY_API_KEY}
-      - ATTIO_ACCESS_TOKEN=${ATTIO_ACCESS_TOKEN}
+      # All API keys will be loaded from env_file
       
-      # Google services
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account-key.json
-      - GOOGLE_PODCAST_INFO_FOLDER_ID=${GOOGLE_PODCAST_INFO_FOLDER_ID}
-      - PGL_AI_DRIVE_FOLDER_ID=${PGL_AI_DRIVE_FOLDER_ID}
-      - CLIENT_SPREADSHEETS_TRACKING_FOLDER_ID=${CLIENT_SPREADSHEETS_TRACKING_FOLDER_ID}
+      # Override Google credentials path for Docker
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/podcast_outreach/credentials/service-account-key.json
       
-      # Application settings
-      - SESSION_SECRET_KEY=${SESSION_SECRET_KEY}
-      - IS_PRODUCTION=${IS_PRODUCTION:-false}
-      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5173}
-      - PORT=${PORT:-8000}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Application settings with defaults
+      - IS_PRODUCTION=false
+      - LOG_LEVEL=INFO
       
       # Worker settings
       - EPISODE_SYNC_MAX_CONCURRENT_TASKS=${EPISODE_SYNC_MAX_CONCURRENT_TASKS:-10}
@@ -50,32 +28,19 @@ services:
       - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-5}
       - TRANSCRIBER_MAX_EPISODES_PER_BATCH=${TRANSCRIBER_MAX_EPISODES_PER_BATCH:-20}
       
-      # FFmpeg paths - leave empty to use system defaults
-      - FFMPEG_CUSTOM_PATH=
-      - FFPROBE_CUSTOM_PATH=
+      # Python buffering
+      - PYTHONUNBUFFERED=1
       
-      # Optional features
-      - ENABLE_LLM_TEST_DASHBOARD=${ENABLE_LLM_TEST_DASHBOARD:-false}
-      
-      # Discovery limits
-      - FREE_PLAN_DAILY_DISCOVERY_LIMIT=${FREE_PLAN_DAILY_DISCOVERY_LIMIT:-10}
-      - FREE_PLAN_WEEKLY_DISCOVERY_LIMIT=${FREE_PLAN_WEEKLY_DISCOVERY_LIMIT:-50}
-      - PAID_PLAN_DAILY_DISCOVERY_LIMIT=${PAID_PLAN_DAILY_DISCOVERY_LIMIT:-100}
-      - PAID_PLAN_WEEKLY_DISCOVERY_LIMIT=${PAID_PLAN_WEEKLY_DISCOVERY_LIMIT:-500}
-      
-      # API settings
-      - LISTENNOTES_PAGE_SIZE=${LISTENNOTES_PAGE_SIZE:-10}
-      - PODSCAN_PAGE_SIZE=${PODSCAN_PAGE_SIZE:-10}
-      - API_CALL_DELAY=${API_CALL_DELAY:-1.0}
+      # All other settings loaded from env_file
       
     volumes:
-      # Mount local code for development
-      - ./:/app
+      # Mount local code for development - parent directory to maintain import structure
+      - ../:/app
       # Mount static files
-      - ./static:/app/static
-      - ./templates:/app/templates
+      - ./static:/app/podcast_outreach/static
+      - ./templates:/app/podcast_outreach/templates
       # Mount Google credentials file securely (read-only)
-      - ./credentials:/app/credentials:ro
+      - ./credentials:/app/podcast_outreach/credentials:ro
     
     # Uncomment if you want to use a local Redis instance
     # depends_on:

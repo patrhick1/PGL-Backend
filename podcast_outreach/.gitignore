@@ -78,4 +78,5 @@ venv.bak/
 # secrets
 secrets.json
 service-account-key.json
-.env 
+.env google-service-account-minified.json
+.env.docker
