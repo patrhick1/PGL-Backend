@@ -32,8 +32,9 @@ RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
 
 # Copy startup script for production deployments
-COPY --chown=appuser:appuser startup.sh /app/
-RUN chmod +x /app/startup.sh
+COPY --chown=appuser:appuser podcast_outreach/startup.sh /app/
+# Fix line endings and make executable
+RUN sed -i 's/\r$//' /app/startup.sh && chmod +x /app/startup.sh
 
 # Switch to non-root user
 USER appuser
