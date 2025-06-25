@@ -1,6 +1,7 @@
 import os
 import uuid
 import logging
+from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -33,7 +34,7 @@ class PresignedUrlResponse(BaseModel):
 class UploadCompletionRequest(BaseModel):
     object_key: str = Field(..., alias='objectKey')
     upload_context: str = Field(..., alias='uploadContext')
-    campaign_id: uuid.UUID = Field(..., alias='campaignId')
+    campaign_id: Optional[uuid.UUID] = Field(None, alias='campaignId')
 
 class UploadCompletionResponse(BaseModel):
     success: bool
@@ -95,14 +96,16 @@ async def handle_upload_completion(
     if not person_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
 
-    # Verify the campaign exists and user has access
-    campaign = await campaign_queries.get_campaign_by_id(request_data.campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    
-    # Authorization: Ensure user can access this campaign
-    if user.get("role") == "client" and campaign.get("person_id") != person_id:
-        raise HTTPException(status_code=403, detail="Access denied to this campaign")
+    # Only verify campaign for campaign-related uploads
+    campaign = None
+    if request_data.campaign_id:
+        campaign = await campaign_queries.get_campaign_by_id(request_data.campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        # Authorization: Ensure user can access this campaign
+        if user.get("role") == "client" and campaign.get("person_id") != person_id:
+            raise HTTPException(status_code=403, detail="Access denied to this campaign")
 
     file_url = storage_service.get_object_url(request_data.object_key)
     
@@ -159,8 +162,8 @@ async def handle_upload_completion(
                     
                 message = f"Media kit created with {request_data.upload_context.replace('media_kit_', '')} successfully"
         
-        # Handle profile image uploads (existing logic could be added here)
-        elif request_data.upload_context == "profile_image":
+        # Handle profile image uploads
+        elif request_data.upload_context == "profile_picture":
             # Update user's profile_image_url
             updated_person = await people_queries.update_person_in_db(
                 person_id,
@@ -171,6 +174,19 @@ async def handle_upload_completion(
                 raise HTTPException(status_code=500, detail="Failed to update profile image")
                 
             message = "Profile image updated successfully"
+        
+        # Handle profile banner uploads
+        elif request_data.upload_context == "profile_banner":
+            # Update user's profile_banner_url
+            updated_person = await people_queries.update_person_in_db(
+                person_id,
+                {"profile_banner_url": file_url}
+            )
+            
+            if not updated_person:
+                raise HTTPException(status_code=500, detail="Failed to update profile banner")
+                
+            message = "Profile banner updated successfully"
         
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported upload context: {request_data.upload_context}")
