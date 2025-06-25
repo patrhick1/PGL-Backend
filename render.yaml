@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pgl-podcast-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      # These are just the overrides. All other variables should be set in Render dashboard
+      - key: IS_PRODUCTION
+        value: true
+      
+      - key: PORT
+        value: 8000
+        
+      # Update this to your actual frontend URL
+      - key: FRONTEND_ORIGIN
+        value: https://podcastguestlaunch.replit.app
