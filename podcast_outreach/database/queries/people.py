@@ -241,3 +241,51 @@ async def get_person_by_full_name(full_name: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             logger.error(f"Error fetching person by full name '{full_name}': {e}")
             return None
+
+async def get_people_by_role_from_db(role: Optional[str] = None, exclude_role: Optional[str] = None, skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Fetches people filtered by role or excluding a specific role.
+    If role is provided, returns only people with that role.
+    If exclude_role is provided, returns all people except those with that role.
+    If both are None, returns all people.
+    """
+    if role and exclude_role:
+        raise ValueError("Cannot filter by both role and exclude_role simultaneously")
+    
+    if role:
+        query = "SELECT * FROM people WHERE role = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3;"
+        params = [role, skip, limit]
+    elif exclude_role:
+        query = "SELECT * FROM people WHERE role != $1 OR role IS NULL ORDER BY created_at DESC OFFSET $2 LIMIT $3;"
+        params = [exclude_role, skip, limit]
+    else:
+        query = "SELECT * FROM people ORDER BY created_at DESC OFFSET $1 LIMIT $2;"
+        params = [skip, limit]
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows_proxy = await conn.fetch(query, *params)
+            return [_process_person_row(row) for row in rows_proxy if row]
+        except Exception as e:
+            logger.exception(f"Error fetching people by role: {e}")
+            return []
+
+async def get_non_host_people_from_db(skip: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Fetches all people who are not hosts (clients, admins, staff, etc.)
+    """
+    query = """
+    SELECT * FROM people 
+    WHERE role != 'host' OR role IS NULL 
+    ORDER BY created_at DESC 
+    OFFSET $1 LIMIT $2;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows_proxy = await conn.fetch(query, skip, limit)
+            return [_process_person_row(row) for row in rows_proxy if row]
+        except Exception as e:
+            logger.exception(f"Error fetching non-host people: {e}")
+            return []

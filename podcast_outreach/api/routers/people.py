@@ -44,15 +44,48 @@ async def create_person_api(person_data: PersonCreate, user: dict = Depends(get_
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.get("/", response_model=List[PersonInDB], summary="List All People")
-async def list_people_api(skip: int = 0, limit: int = 100, user: dict = Depends(get_current_user)):
+async def list_people_api(
+    skip: int = 0, 
+    limit: int = 100, 
+    role: Optional[str] = None,
+    exclude_role: Optional[str] = None,
+    user: dict = Depends(get_current_user)
+):
     """
     Lists all person records with pagination. Staff or Admin access required.
+    Optional filters:
+    - role: Filter by specific role (e.g., "host", "client", "admin", "staff")
+    - exclude_role: Exclude a specific role (e.g., "host")
     """
     try:
-        people_from_db = await people_queries.get_all_people_from_db(skip=skip, limit=limit)
+        if role or exclude_role:
+            people_from_db = await people_queries.get_people_by_role_from_db(
+                role=role, exclude_role=exclude_role, skip=skip, limit=limit
+            )
+        else:
+            people_from_db = await people_queries.get_all_people_from_db(skip=skip, limit=limit)
         return [PersonInDB(**p) for p in people_from_db]
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.exception(f"Error in list_people_api: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.get("/non-hosts", response_model=List[PersonInDB], summary="List Non-Host People")
+async def list_non_host_people_api(
+    skip: int = 0, 
+    limit: int = 100, 
+    user: dict = Depends(get_current_user)
+):
+    """
+    Lists all person records excluding hosts (returns clients, admins, staff, etc.).
+    Staff or Admin access required.
+    """
+    try:
+        people_from_db = await people_queries.get_non_host_people_from_db(skip=skip, limit=limit)
+        return [PersonInDB(**p) for p in people_from_db]
+    except Exception as e:
+        logger.exception(f"Error in list_non_host_people_api: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @router.get("/{person_id}", response_model=PersonInDB, summary="Get Specific Person by ID")
