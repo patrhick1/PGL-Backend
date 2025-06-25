@@ -22,14 +22,6 @@ def get_allowed_origins():
             if frontend_origin not in origins:
                 origins.append(frontend_origin)
     
-    # Always include the known frontend URLs
-    known_frontends = [
-        "https://podcastguestlaunch.replit.app",
-        "https://podcastguestlaunch.replit.app/"  # With trailing slash
-    ]
-    for frontend in known_frontends:
-        if frontend not in origins:
-            origins.append(frontend)
     
     # In production, you might want to remove localhost
     if os.getenv("IS_PRODUCTION", "false").lower() == "true":
