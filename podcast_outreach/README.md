@@ -155,7 +155,6 @@ podcast_outreach/
 ─────────────────────────────────────────────────────────────
 📁 CLI & Scheduled Scripts (One-time jobs, recurring tasks)
 ├── scripts/
-│ ├── forward_instantly.py # Forwards Instantly emails to master Gmail
 │ ├── generate_reports.py # Generates AI usage and campaign status reports
 │ ├── instantly_leads_db.py # Legacy Instantly leads backup script (to be refactored/removed)
 │ ├── migrate_clients.py # One-time script to migrate client/campaign data

@@ -61,8 +61,6 @@ dist/
 tmp/
 temp/
 
-# Ignore prompts folder
-prompts/
 
 # Ignore tests folder
 tests/
