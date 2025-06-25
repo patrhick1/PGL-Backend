@@ -175,17 +175,12 @@ app.add_middleware(
 
 # --- Session Middleware Configuration ---
 
-# For development, if your Vite frontend runs on 5173:
-origins = [
-    "http://localhost:5173", # Vite dev server (check your actual port)
-    # Add your production frontend URL here, e.g., "https://your-frontend-domain.com"
-]
-# If you have FRONTEND_ORIGIN in your config.py and it's correctly set:
-if FRONTEND_ORIGIN:
-    origins.append(FRONTEND_ORIGIN)
-else: # Fallback for local dev if FRONTEND_ORIGIN is not set for some reason
-    if "http://localhost:5173" not in origins:
-         origins.append("http://localhost:5173")
+# Import the CORS configuration helper
+from podcast_outreach.config_cors import get_allowed_origins
+
+# Get allowed origins from the configuration
+origins = get_allowed_origins()
+logger.info(f"CORS origins configured: {origins}")
 
 # Add middleware in correct order - middleware executes in REVERSE order of addition
 # SessionMiddleware was added first (right after app creation)

@@ -83,8 +83,9 @@ git push origin master
 3. Connect your GitHub repository
 4. Configure:
    - **Name**: pgl-podcast-backend
-   - **Root Directory**: podcast_outreach
+   - **Root Directory**: (leave blank - Docker files are in root)
    - **Environment**: Docker
+   - **Docker Command**: /app/startup.sh
    - **Instance Type**: Start with Starter, upgrade as needed
 
 ### 3. Add Environment Variables
@@ -136,3 +137,5 @@ curl https://your-app.onrender.com/api-status
 - The `google-service-account-minified.json` file is temporary - delete after use
 - Render provides automatic HTTPS
 - Your app will be available at: https://[your-service-name].onrender.com
+- Docker files (Dockerfile, docker-compose.yml) are in the root directory, not in podcast_outreach/
+- The startup.sh script remains in podcast_outreach/ and is copied during Docker build
