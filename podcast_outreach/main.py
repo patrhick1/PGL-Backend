@@ -169,8 +169,9 @@ app.add_middleware(
     max_age=ONE_HOUR_IN_SECONDS,  # Session expires after 1 hour
     session_cookie="pgl_session_id",
     path="/",
-    same_site="lax",
-    https_only=IS_PRODUCTION  # Use https_only instead of secure
+    same_site="none" if IS_PRODUCTION else "lax",  # 'none' for production cross-origin, 'lax' for local dev
+    https_only=IS_PRODUCTION,  # Only require HTTPS in production
+    domain=None  # Let the browser handle the domain
 )
 
 # --- Session Middleware Configuration ---
