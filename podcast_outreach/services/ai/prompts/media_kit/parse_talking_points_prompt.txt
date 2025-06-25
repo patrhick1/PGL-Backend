@@ -1,0 +1,19 @@
+# Prompt for parsing talking points from Google Doc content
+
+Objective: Read the provided text, which contains a list of talking points or campaign angles. Identify each distinct talking point and extract its core components: topic, outcome, and description.
+
+Instructions:
+1.  Each talking point should be treated as a separate item.
+2.  For each talking point, identify:
+    *   **topic**: The main subject or title of the talking point. This should be concise.
+    *   **outcome**: (Optional) If mentioned, what is the key takeaway, benefit, or result for the audience related to this topic? If not explicitly stated, this can be omitted or inferred if clear.
+    *   **description**: A more detailed explanation or elaboration of the talking point. This should provide context and substance.
+3.  The input text might have various formats (bullet points, numbered lists, paragraphs per point). Adapt to identify distinct points.
+4.  If the text seems to be a single block describing one overarching theme, try to break it into 2-5 sub-topics if logically possible, otherwise, treat the whole as one talking point with a comprehensive description.
+
+Input Text:
+```text
+{user_query}
+```
+
+Output a list of talking points in the specified JSON format (see {format_instructions}). Focus on capturing the essence of each point accurately. 

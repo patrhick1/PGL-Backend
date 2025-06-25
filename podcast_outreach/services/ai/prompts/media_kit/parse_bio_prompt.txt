@@ -1,0 +1,15 @@
+# Prompt for parsing biography content from a Google Doc
+
+Objective: Read the provided biography text and extract three versions of the bio: a full version, a summary version, and a short version. 
+
+Instructions:
+1.  **Full Bio**: This should be the entire, original biography text provided.
+2.  **Summary Bio**: Create a concise summary of the full bio. It should capture the most important aspects of the person's background, expertise, and achievements. Aim for approximately 2-4 paragraphs or 150-250 words. If the original text is already short, this might be similar to the full bio.
+3.  **Short Bio**: Create a very brief bio, 1-3 sentences, suitable for social media or quick introductions (e.g., a Twitter bio). Aim for under 160 characters if possible, but clarity is more important.
+
+Input Text:
+```text
+{user_query}
+```
+
+Output the extracted information in the specified JSON format (see {format_instructions}). Ensure all original text formatting (like newlines within paragraphs) from the input text is preserved in the "full_bio" field. 
