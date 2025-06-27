@@ -7,6 +7,7 @@ import os
 import random
 import json
 import traceback
+import re
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 import uuid
@@ -378,6 +379,37 @@ IMPORTANT GUIDELINES:
 Generate the angles now:"""
         
         return prompt
+    
+    def _clean_ai_generated_content(self, content: str) -> str:
+        """Clean up AI-generated content to remove preambles and formatting artifacts."""
+        if not content:
+            return content
+            
+        # Remove common AI preambles
+        preamble_patterns = [
+            r"^(Okay, |Sure, |Here are |Here is |I'll create |I'll generate |Let me create |Let me generate ).*?:\s*\n+",
+            r"^.*?(compelling|professional|tailored|based on|following).*?:\s*\n+",
+            r"^.*?here are.*?:\s*\n+",
+            r"^.*?Generated.*?:\s*\n+"
+        ]
+        
+        cleaned_content = content
+        for pattern in preamble_patterns:
+            cleaned_content = re.sub(pattern, "", cleaned_content, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Remove formatting artifacts
+        cleaned_content = cleaned_content.replace("="*47, "")  # Remove separator lines
+        cleaned_content = cleaned_content.replace("="*30, "")  # Remove shorter separator lines
+        cleaned_content = re.sub(r"\n{3,}", "\n\n", cleaned_content)  # Reduce multiple newlines
+        
+        # Remove any remaining metadata lines at the start
+        lines = cleaned_content.split('\n')
+        while lines and (lines[0].strip() == "" or "Generated:" in lines[0] or "Professional Bio" in lines[0]):
+            lines.pop(0)
+        
+        cleaned_content = '\n'.join(lines)
+        
+        return cleaned_content.strip()
 
     async def process_campaign(self, campaign_id: str) -> Dict[str, Any]:
         """
@@ -464,34 +496,26 @@ Generate the angles now:"""
             logger.info(f"Generating Angles for '{campaign_name}' using Gemini...")
             angles_response = await self._call_gemini_langchain(angles_prompt, "generate_angles", delay_seconds=1.5)
             
-            # Format the responses
+            # Format and clean the responses
             bio_text_content = bio_response if bio_response else "Bio generation failed."
             angles_text_content = angles_response if angles_response else "Angles generation failed."
             
-            # Create formatted content with metadata
-            formatted_bio_content = f"""
-{extracted_data['full_name']} - Professional Bio
-Generated: {datetime.now().strftime('%Y-%m-%d')}
+            # Clean up AI-generated preambles and formatting
+            bio_text_content = self._clean_ai_generated_content(bio_text_content)
+            angles_text_content = self._clean_ai_generated_content(angles_text_content)
+            
+            # Create clean formatted content
+            formatted_bio_content = f"""{bio_text_content}
 
-===============================================
-
-{bio_text_content}
-
-===============================================
+---
 
 Website: {extracted_data.get('website', 'Not provided')}
 Email: {extracted_data.get('email', 'Not provided')}
 """
             
-            formatted_angles_content = f"""
-{extracted_data['full_name']} - Podcast Angles
-Generated: {datetime.now().strftime('%Y-%m-%d')}
+            formatted_angles_content = f"""{angles_text_content}
 
-===============================================
-
-{angles_text_content}
-
-===============================================
+---
 
 Additional Context:
 - Target Audience: {extracted_data.get('target_audience', 'Not specified')}
