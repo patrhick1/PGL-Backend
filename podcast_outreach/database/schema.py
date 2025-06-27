@@ -127,7 +127,8 @@ def create_people_table(conn):
         profile_image_url         TEXT,
         profile_banner_url        TEXT,
         notification_settings     JSONB DEFAULT '{}'::jsonb,
-        privacy_settings          JSONB DEFAULT '{}'::jsonb
+        privacy_settings          JSONB DEFAULT '{}'::jsonb,
+        stripe_customer_id        VARCHAR(255) UNIQUE
     );
 
     """
@@ -694,13 +695,142 @@ def create_password_reset_tokens_table(conn):
         ON password_reset_tokens(expires_at);
     """)
 
+def create_payment_methods_table(conn):
+    """Create payment_methods table for storing Stripe payment methods"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS payment_methods (
+        id SERIAL PRIMARY KEY,
+        person_id INTEGER REFERENCES people(person_id) ON DELETE CASCADE,
+        stripe_payment_method_id VARCHAR(255) UNIQUE NOT NULL,
+        type VARCHAR(50) NOT NULL,
+        last4 VARCHAR(4),
+        brand VARCHAR(50),
+        exp_month INTEGER,
+        exp_year INTEGER,
+        is_default BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_methods_person_id ON payment_methods(person_id);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table PAYMENT_METHODS created/ensured.")
+    apply_timestamp_update_trigger(conn, "payment_methods")
+
+def create_subscription_history_table(conn):
+    """Create subscription_history table for tracking subscription changes"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS subscription_history (
+        id SERIAL PRIMARY KEY,
+        client_profile_id INTEGER REFERENCES client_profiles(client_profile_id) ON DELETE CASCADE,
+        stripe_subscription_id VARCHAR(255) NOT NULL,
+        stripe_price_id VARCHAR(255) NOT NULL,
+        stripe_product_id VARCHAR(255),
+        plan_type VARCHAR(50) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        current_period_start TIMESTAMPTZ NOT NULL,
+        current_period_end TIMESTAMPTZ NOT NULL,
+        cancel_at_period_end BOOLEAN DEFAULT FALSE,
+        canceled_at TIMESTAMPTZ,
+        ended_at TIMESTAMPTZ,
+        trial_start TIMESTAMPTZ,
+        trial_end TIMESTAMPTZ,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_subscription_history_client_profile_id ON subscription_history(client_profile_id);
+    CREATE INDEX IF NOT EXISTS idx_subscription_history_stripe_subscription_id ON subscription_history(stripe_subscription_id);
+    CREATE INDEX IF NOT EXISTS idx_subscription_history_status ON subscription_history(status);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table SUBSCRIPTION_HISTORY created/ensured.")
+    apply_timestamp_update_trigger(conn, "subscription_history")
+
+def create_invoices_table(conn):
+    """Create invoices table for storing Stripe invoices"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS invoices (
+        id SERIAL PRIMARY KEY,
+        person_id INTEGER REFERENCES people(person_id) ON DELETE CASCADE,
+        stripe_invoice_id VARCHAR(255) UNIQUE NOT NULL,
+        stripe_subscription_id VARCHAR(255),
+        invoice_number VARCHAR(255),
+        amount_paid INTEGER NOT NULL,
+        amount_due INTEGER NOT NULL,
+        currency VARCHAR(3) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        billing_reason VARCHAR(100),
+        invoice_pdf VARCHAR(500),
+        hosted_invoice_url VARCHAR(500),
+        paid_at TIMESTAMPTZ,
+        due_date TIMESTAMPTZ,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoices_person_id ON invoices(person_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_stripe_subscription_id ON invoices(stripe_subscription_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
+    CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices(created_at);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table INVOICES created/ensured.")
+
+def create_price_products_table(conn):
+    """Create price_products table for storing Stripe product/price information"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS price_products (
+        id SERIAL PRIMARY KEY,
+        stripe_product_id VARCHAR(255) UNIQUE NOT NULL,
+        stripe_price_id VARCHAR(255) UNIQUE NOT NULL,
+        plan_type VARCHAR(50) NOT NULL,
+        billing_period VARCHAR(20) NOT NULL,
+        amount INTEGER NOT NULL,
+        currency VARCHAR(3) NOT NULL,
+        active BOOLEAN DEFAULT TRUE,
+        features JSONB DEFAULT '{}',
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_price_products_active ON price_products(active);
+    CREATE INDEX IF NOT EXISTS idx_price_products_plan_type ON price_products(plan_type);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table PRICE_PRODUCTS created/ensured.")
+    apply_timestamp_update_trigger(conn, "price_products")
+
+def create_webhook_events_table(conn):
+    """Create webhook_events table for Stripe webhook idempotency"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS webhook_events (
+        id SERIAL PRIMARY KEY,
+        stripe_event_id VARCHAR(255) UNIQUE NOT NULL,
+        event_type VARCHAR(100) NOT NULL,
+        processed BOOLEAN DEFAULT FALSE,
+        error_message TEXT,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        processed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_stripe_event_id ON webhook_events(stripe_event_id);
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_processed ON webhook_events(processed);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table WEBHOOK_EVENTS created/ensured."))
+
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
     # or essentially reverse of creation order. CASCADE should make the order less critical, but explicit order can help.
     table_names_in_drop_order = [
-        "AI_USAGE_LOGS", # New table, drop first if it references others
-        "STATUS_HISTORY",       # FK to PLACEMENTS
+        "WEBHOOK_EVENTS",     # No FKs, drop first
+        "INVOICES",           # FK to PEOPLE
+        "SUBSCRIPTION_HISTORY", # FK to CLIENT_PROFILES
+        "PAYMENT_METHODS",    # FK to PEOPLE
+        "PRICE_PRODUCTS",     # No FKs
+        "AI_USAGE_LOGS",      # New table, drop first if it references others
+        "STATUS_HISTORY",     # FK to PLACEMENTS
         "PITCHES",            # FKs to CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         "PITCH_GENERATIONS",  # FKs to CAMPAIGNS, MEDIA, PITCH_TEMPLATES
         "PLACEMENTS",         # FKs to CAMPAIGNS, MEDIA
@@ -711,6 +841,7 @@ def drop_all_tables(conn):
         "REVIEW_TASKS",       # FKs to CAMPAIGNS, PEOPLE
         "CAMPAIGNS",          # FK to PEOPLE
         "MEDIA",              # FK to COMPANIES
+        "CLIENT_PROFILES",    # FK to PEOPLE
         "PEOPLE",             # FK to COMPANIES
         "COMPANIES"           # Base table - should be last or rely entirely on CASCADE from dependents
     ]
@@ -785,6 +916,12 @@ def create_all_tables():
         create_media_kits_table(conn) # ADDED: Depends on CAMPAIGNS, PEOPLE
         create_campaign_media_discoveries(conn) # WORKFLOW OPTIMIZATION: Depends on CAMPAIGNS, MEDIA
         create_password_reset_tokens_table(conn)
+        # Create Stripe-related tables
+        create_payment_methods_table(conn)
+        create_subscription_history_table(conn)
+        create_invoices_table(conn)
+        create_price_products_table(conn)
+        create_webhook_events_table(conn)
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:

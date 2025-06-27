@@ -184,52 +184,9 @@ Please respond with exactly 20 keywords separated by commas, no numbering or add
             return ["expert", "speaker", "thought-leader", "professional", "industry-expert"] * 4  # Fallback keywords
 
     def construct_mock_interview_from_questionnaire(self, questionnaire_data: Dict[str, Any]) -> str:
-        """Construct a basic mock interview structure from questionnaire data."""
-        try:
-            # Extract basic information from nested structure
-            contact_info = questionnaire_data.get("contactInfo", {})
-            full_name = contact_info.get("fullName", "Guest") if isinstance(contact_info, dict) else "Guest"
-            
-            # Get expertise from professional bio section
-            professional_bio = questionnaire_data.get("professionalBio", {})
-            expertise = "their field"
-            if isinstance(professional_bio, dict):
-                expertise_topics = professional_bio.get("expertiseTopics", "")
-                if expertise_topics:
-                    if isinstance(expertise_topics, list):
-                        expertise = ", ".join(expertise_topics)
-                    elif isinstance(expertise_topics, str):
-                        expertise = expertise_topics
-            
-            # Create a simple mock interview structure
-            mock_interview = f"""
-Host: Welcome to the show! I'm here with {full_name}. Can you tell us a bit about yourself?
-
-{full_name}: [Introduction based on professional background]
-
-Host: That's fascinating! What drew you to {expertise}?
-
-{full_name}: [Story about getting into their field]
-
-Host: What are some of the biggest challenges you see in {expertise} today?
-
-{full_name}: [Insights about industry challenges]
-
-Host: What advice would you give to someone just starting out?
-
-{full_name}: [Actionable advice for beginners]
-
-Host: Where can our listeners learn more about you and your work?
-
-{full_name}: [Contact information and call to action]
-"""
-            
-            logger.info(f"Created simple mock interview structure for questionnaire")
-            return mock_interview.strip()
-            
-        except Exception as e:
-            logger.error(f"Error creating mock interview: {e}")
-            return "Mock interview content will be generated during media kit creation."
+        """Note: Mock interviews are no longer used for bio generation. This function is deprecated."""
+        logger.warning("construct_mock_interview_from_questionnaire is deprecated. Bio generation now uses questionnaire data directly.")
+        return "Bio and angles will be generated directly from questionnaire data."
 
     async def process_campaign_questionnaire_submission(
         self, campaign_id: uuid.UUID, questionnaire_data: Dict[str, Any]
@@ -242,15 +199,11 @@ Host: Where can our listeners learn more about you and your work?
             logger.info(f"Generating keywords from questionnaire using LLM for campaign {campaign_id}")
             generated_keywords = await self._generate_keywords_from_questionnaire_llm(questionnaire_data)
             
-            # Create mock interview structure
-            logger.info(f"Creating mock interview structure for campaign {campaign_id}")
-            mock_interview_transcript = self.construct_mock_interview_from_questionnaire(questionnaire_data)
-            
-            # Update campaign with questionnaire data, LLM-generated keywords, and mock interview
+            # Update campaign with questionnaire data and LLM-generated keywords
+            # Note: We no longer generate mock interviews as bio generation uses questionnaire data directly
             update_data = {
                 "questionnaire_responses": questionnaire_data,
-                "questionnaire_keywords": generated_keywords,
-                "mock_interview_trancript": mock_interview_transcript
+                "questionnaire_keywords": generated_keywords
             }
             
             # Update the campaign - FIXED: use correct method name
@@ -267,7 +220,6 @@ Host: Where can our listeners learn more about you and your work?
                     "success": True,
                     "campaign_id": str(campaign_id),
                     "keywords_count": len(generated_keywords),
-                    "has_mock_interview": bool(mock_interview_transcript),
                     "status": "questionnaire_completed"
                 }
             else:
@@ -427,12 +379,8 @@ async def process_campaign_questionnaire_submission(
 # Standalone function that matches the expected interface for other modules
 def construct_mock_interview_from_questionnaire(questionnaire_data: Dict[str, Any]) -> str:
     """
-    Standalone function wrapper for constructing mock interviews from questionnaire data.
-    This function can be imported by other modules that need this functionality.
+    DEPRECATED: Mock interviews are no longer used. Bio generation now uses questionnaire data directly.
+    This function is kept for backward compatibility but returns a deprecation notice.
     """
-    try:
-        processor = QuestionnaireProcessor()
-        return processor.construct_mock_interview_from_questionnaire(questionnaire_data)
-    except Exception as e:
-        logger.error(f"Error in standalone construct_mock_interview_from_questionnaire: {e}")
-        return "Mock interview content will be generated during media kit creation."
+    logger.warning("construct_mock_interview_from_questionnaire is deprecated. Bio generation now uses questionnaire data directly.")
+    return "Bio and angles will be generated directly from questionnaire data."

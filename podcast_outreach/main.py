@@ -48,11 +48,13 @@ from fastapi.middleware.cors import CORSMiddleware # <--- ADD THIS
 from starlette.middleware.sessions import SessionMiddleware # Import SessionMiddleware
 
 # Import the new API routers
-from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates,storage as storage_router, episodes as episodes_router, scheduler as scheduler_router
+from podcast_outreach.api.routers import campaigns, matches, media, pitches, tasks, auth, people,webhooks, ai_usage, review_tasks, placements, users, dashboard, client, media_kits, pitch_templates,storage as storage_router, episodes as episodes_router, scheduler as scheduler_router, billing
 # Add the new public_lead_magnet router import
 from podcast_outreach.api.routers import public_lead_magnet
 # Add notifications router for real-time updates
 from podcast_outreach.api.routers import notifications
+# Add OAuth router for social authentication
+from podcast_outreach.api.routers import oauth
 
 setup_logging()
 logger = get_logger(__name__)
@@ -255,6 +257,8 @@ app.include_router(episodes_router.router)
 app.include_router(scheduler_router.router)
 app.include_router(public_lead_magnet.router)
 app.include_router(notifications.router)
+app.include_router(billing.router)
+app.include_router(oauth.router)
 
 
 @app.get("/login")

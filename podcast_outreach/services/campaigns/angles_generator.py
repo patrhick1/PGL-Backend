@@ -92,25 +92,7 @@ class AnglesProcessorPG:
         ---
         Now, craft the 3 bios (Full, Summary, Short) following the guidelines provided, and then give me at least 10 topics the client can speak on, with the outcome for each and a description for each, based on the method outlined in the examples provided.
         """
-        self.keyword_prompt_text = """
-        You are an SEO expert specializing in podcast guest selection. Given a potential guest's bio and the angles they could cover, generate a list of relevant keywords that the target audience might use to find a podcast featuring that guest.
-        Instructions:
-        Input: I will provide information about my client, including their bio and the potential angles they could discuss on a podcast.
-        Keyword Format: Generate keywords as comma-separated values.
-        Keyword Length: Each keyword should be a maximum of 2-3 words.
-        Keyword Limit: Generate a maximum of 25 keywords.
-        Keyword Relevance: Ensure keywords are highly relevant to the client's bio and potential podcast discussion angles.
-        Keyword Diversity: Avoid generating keywords that are too similar to each other.
-        Goal: The generated keywords should accurately reflect the client's expertise and potential podcast content, maximizing the chances of the target audience discovering the podcast episode featuring the client.
-
-        Client Bio:
-        {bio_content}
-
-        Client Angles:
-        {angles_content}
-
-        Keywords:
-        """
+        # Keyword prompt template is now integrated directly into the process_campaign method
 
         self.stats = {
             "campaigns_processed": 0,
@@ -231,6 +213,172 @@ class AnglesProcessorPG:
             return content[:max_length - 500] # Truncate to be safe
 
 
+    def _extract_questionnaire_data(self, questionnaire_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract and organize questionnaire data into a structured format."""
+        
+        # Extract contact info
+        contact_info = questionnaire_data.get("contactInfo", {})
+        full_name = contact_info.get("fullName", "")
+        email = contact_info.get("email", "")
+        website = contact_info.get("website", "")
+        social_links = contact_info.get("socialLinks", {})
+        
+        # Extract professional bio
+        professional_bio = questionnaire_data.get("professionalBio", {})
+        about_work = professional_bio.get("aboutWork", "")
+        expertise_topics = professional_bio.get("expertiseTopics", [])
+        achievements = professional_bio.get("achievements", "")
+        unique_perspectives = professional_bio.get("uniquePerspectives", "")
+        
+        # Extract suggested topics
+        suggested_topics = questionnaire_data.get("suggestedTopics", {})
+        topics = suggested_topics.get("topics", [])
+        key_stories = suggested_topics.get("keyStoriesOrMessages", "")
+        
+        # Extract sample questions
+        sample_questions = questionnaire_data.get("sampleQuestions", {})
+        frequently_asked = sample_questions.get("frequentlyAsked", "")
+        love_to_be_asked = sample_questions.get("loveToBeAsked", "")
+        
+        # Extract social proof
+        social_proof = questionnaire_data.get("socialProof", {})
+        testimonials = social_proof.get("testimonials", "")
+        notable_stats = social_proof.get("notableStats", "")
+        
+        # Extract media experience
+        media_experience = questionnaire_data.get("mediaExperience", {})
+        previous_features = media_experience.get("previousFeatures", "")
+        notable_media = media_experience.get("notableMedia", "")
+        
+        # Extract audience insights
+        audience_insights = questionnaire_data.get("audienceInsights", {})
+        target_audience = audience_insights.get("targetAudience", "")
+        audience_challenges = audience_insights.get("audienceChallenges", "")
+        
+        return {
+            "full_name": full_name,
+            "email": email,
+            "website": website,
+            "social_links": social_links,
+            "about_work": about_work,
+            "expertise_topics": expertise_topics,
+            "achievements": achievements,
+            "unique_perspectives": unique_perspectives,
+            "topics": topics,
+            "key_stories": key_stories,
+            "frequently_asked": frequently_asked,
+            "love_to_be_asked": love_to_be_asked,
+            "testimonials": testimonials,
+            "notable_stats": notable_stats,
+            "previous_features": previous_features,
+            "notable_media": notable_media,
+            "target_audience": target_audience,
+            "audience_challenges": audience_challenges
+        }
+    
+    def _create_bio_generation_prompt(self, data: Dict[str, Any]) -> str:
+        """Create a comprehensive prompt for bio generation using actual data."""
+        
+        prompt = f"""You are an expert PR consultant specializing in podcast guest placement. 
+Create compelling bios for {data['full_name']} based on the following real information:
+
+ABOUT THEIR WORK:
+{data['about_work']}
+
+AREAS OF EXPERTISE:
+{', '.join(data['expertise_topics']) if isinstance(data['expertise_topics'], list) else data['expertise_topics']}
+
+KEY ACHIEVEMENTS:
+{data['achievements']}
+
+UNIQUE PERSPECTIVES:
+{data['unique_perspectives']}
+
+TARGET AUDIENCE:
+{data['target_audience']}
+
+NOTABLE STATISTICS/METRICS:
+{data['notable_stats']}
+
+PREVIOUS MEDIA FEATURES:
+{data['previous_features']}
+
+Create three versions of their bio:
+
+1. **FULL BIO** (2-3 paragraphs):
+- Start with a powerful hook about who they are and their expertise
+- Include their professional journey and key achievements
+- Highlight what makes them unique in their field
+- End with their current focus and mission
+- Make it compelling and story-driven
+
+2. **SUMMARY BIO** (2 paragraphs):
+- Concise version highlighting their expertise and authority
+- Include 1-2 key achievements or credentials
+- Focus on what value they bring to audiences
+
+3. **SHORT BIO** (Under 280 characters):
+- Twitter-friendly version
+- Include their main expertise and one standout credential
+- Must be punchy and memorable
+
+IMPORTANT GUIDELINES:
+- Write in third person
+- Use specific details and achievements from the provided information
+- NO PLACEHOLDERS or generic statements
+- Make each bio compelling and podcast-host friendly
+- Focus on what makes them an interesting guest
+- Include quantifiable results where available
+
+Generate the bios now:"""
+        
+        return prompt
+    
+    def _create_angles_generation_prompt(self, data: Dict[str, Any]) -> str:
+        """Create a comprehensive prompt for angles generation."""
+        
+        prompt = f"""You are an expert PR consultant specializing in podcast guest placement.
+Create compelling podcast angles for {data['full_name']} based on their expertise and experience.
+
+THEIR EXPERTISE:
+{', '.join(data['expertise_topics']) if isinstance(data['expertise_topics'], list) else data['expertise_topics']}
+
+KEY STORIES AND MESSAGES:
+{data['key_stories']}
+
+UNIQUE PERSPECTIVES:
+{data['unique_perspectives']}
+
+AUDIENCE CHALLENGES THEY ADDRESS:
+{data['audience_challenges']}
+
+QUESTIONS THEY LOVE TO ANSWER:
+{data['love_to_be_asked']}
+
+Generate 10-12 compelling podcast angles. Each angle should include:
+
+**Topic**: The specific subject they can discuss (be specific, not generic)
+**Outcome**: What listeners will learn or gain (be concrete and valuable)
+**Description**: 2-3 sentences explaining their unique take and why they're the perfect guest for this topic
+
+FORMAT EACH ANGLE EXACTLY LIKE THIS:
+Topic: [Specific, compelling topic title]
+Outcome: [Concrete listener benefit/learning]
+Description: [2-3 sentences with their unique perspective and credentials]
+
+IMPORTANT GUIDELINES:
+- Make each angle specific and newsworthy
+- Focus on current trends and timely topics in their field
+- Include controversial or counterintuitive perspectives where appropriate
+- Ensure outcomes are tangible and valuable to listeners
+- Reference specific experiences or data points from their background
+- Make angles diverse - covering different aspects of their expertise
+- NO GENERIC TOPICS - be specific and compelling
+
+Generate the angles now:"""
+        
+        return prompt
+
     async def process_campaign(self, campaign_id: str) -> Dict[str, Any]:
         """
         Main processing function for a single campaign.
@@ -250,20 +398,24 @@ class AnglesProcessorPG:
             campaign_name = campaign_pg.get("campaign_name", "Untitled Campaign")
             logger.info(f"Processing campaign: '{campaign_name}' (ID: {campaign_id})")
 
-            mock_interview_input = campaign_pg.get("mock_interview_trancript", "")
-            if not mock_interview_input or (isinstance(mock_interview_input, str) and not mock_interview_input.strip()):
-                logger.warning(f"Mock interview transcript is missing or empty for campaign {campaign_id}. Cannot proceed.")
+            # Check if we have questionnaire data
+            questionnaire_data = campaign_pg.get("questionnaire_responses")
+            if not questionnaire_data:
+                logger.warning(f"No questionnaire data found for campaign {campaign_id}. Cannot proceed.")
                 self.stats["failed_generations"] += 1
-                return {"status": "skipped", "reason": "Mock interview transcript missing or empty."}
+                return {"status": "skipped", "reason": "No questionnaire data available."}
             
-            # Fetch content from GDocs if links are provided, or use direct text
-            # Mock Interview
-            if mock_interview_input.startswith("https://docs.google.com/document/d/"):
-                mock_interview_content = await self._get_gdoc_content_async(mock_interview_input, f"{campaign_name} - Mock Interview")
-            else:
-                mock_interview_content = mock_interview_input # Assume direct text
-
-            # Other supplementary content (these are optional)
+            # Extract structured data from questionnaire
+            extracted_data = self._extract_questionnaire_data(questionnaire_data)
+            
+            if not extracted_data.get("full_name"):
+                logger.error(f"No name found in questionnaire data for campaign {campaign_id}")
+                self.stats["failed_generations"] += 1
+                return {"status": "error", "reason": "Missing client name in questionnaire data"}
+            
+            logger.info(f"Generating bio and angles for {extracted_data['full_name']} (Campaign: {campaign_id})")
+            
+            # Also fetch any supplementary content if available
             social_posts_input = campaign_pg.get("compiled_social_posts", "")
             social_posts_content = ""
             if social_posts_input:
@@ -275,68 +427,82 @@ class AnglesProcessorPG:
             podcast_transcripts_content = await self._get_gdoc_content_async(campaign_pg.get("podcast_transcript_link"), f"{campaign_name} - Podcast Transcripts")
             articles_content = await self._get_gdoc_content_async(campaign_pg.get("compiled_articles_link"), f"{campaign_name} - Articles")
 
-            # Summarize if necessary (especially the mock interview)
-            # Adjust max_length based on typical Gemini context window and prompt overhead
-            summarized_mock_interview = await self._summarize_content_if_needed(mock_interview_content, f"{campaign_name} - Mock Interview", max_length=70000)
+            # Summarize supplementary content if necessary
             summarized_social = await self._summarize_content_if_needed(social_posts_content, f"{campaign_name} - Social Posts", max_length=30000)
             summarized_podcasts = await self._summarize_content_if_needed(podcast_transcripts_content, f"{campaign_name} - Podcast Transcripts", max_length=50000)
             summarized_articles = await self._summarize_content_if_needed(articles_content, f"{campaign_name} - Articles", max_length=50000)
 
-            # 2. Generate Bio and Angles using Gemini
-            # Construct the main prompt for Gemini
-            # The bio_angles_prompt_template_text itself doesn't have a placeholder for campaign_name
-            # so we include it in the wrapper prompt for context.            
-            full_prompt_for_gemini = f"""
-            Campaign Name: {campaign_name}
-
-            Key Information from Mock Interview:
-            {summarized_mock_interview}
-
-            Supplementary Information from Social Media Posts:
-            {summarized_social if summarized_social else "Not available."}
-
-            Supplementary Information from Podcast Transcripts:
-            {summarized_podcasts if summarized_podcasts else "Not available."}
-
-            Supplementary Information from Articles:
-            {summarized_articles if summarized_articles else "Not available."}
-
-            ---
-            TASK:
-            {self.bio_angles_prompt_template_text}
-            """
+            # 2. Generate Bio using actual questionnaire data
+            bio_prompt = self._create_bio_generation_prompt(extracted_data)
             
-            logger.info(f"Generating Bio & Angles for '{campaign_name}' using Gemini...")
-            raw_gemini_output = await self._call_gemini_langchain(full_prompt_for_gemini, "generate_bio_angles", delay_seconds=1.5)
+            # Add supplementary content to the prompt if available
+            if summarized_social or summarized_podcasts or summarized_articles:
+                bio_prompt += "\n\nADDITIONAL CONTEXT FROM THEIR CONTENT:\n"
+                if summarized_social:
+                    bio_prompt += f"\nSocial Media Posts:\n{summarized_social[:2000]}..."
+                if summarized_podcasts:
+                    bio_prompt += f"\nPodcast Appearances:\n{summarized_podcasts[:2000]}..."
+                if summarized_articles:
+                    bio_prompt += f"\nArticles:\n{summarized_articles[:2000]}..."
+            
+            logger.info(f"Generating Bio for '{campaign_name}' using Gemini...")
+            bio_response = await self._call_gemini_langchain(bio_prompt, "generate_bio", delay_seconds=1.5)
 
-            # 3. Structure the output (e.g., using OpenAI or a more robust Gemini prompt for JSON)
-            logger.info(f"Structuring Gemini output for '{campaign_name}'...")
-            structured_data = await self.openai_service.transform_text_to_structured_data(
-                prompt="Parse the following text into a JSON object with two main keys: 'Bio' (string) and 'Angles' (string, containing all angles formatted nicely).", # Adjust prompt as needed
-                raw_text=raw_gemini_output,
-                data_type="Structured", # Corrected: data_type to match openai_service.py condition
-                workflow="structure_bio_angles", # workflow for AI tracker
-                related_campaign_id=uuid.UUID(campaign_id) # Pass campaign_id for tracking
-            )
+            # 3. Generate Angles using actual questionnaire data
+            angles_prompt = self._create_angles_generation_prompt(extracted_data)
+            
+            # Add supplementary content to the prompt if available
+            if summarized_social or summarized_podcasts or summarized_articles:
+                angles_prompt += "\n\nADDITIONAL CONTEXT FROM THEIR CONTENT:\n"
+                if summarized_social:
+                    angles_prompt += f"\nSocial Media Posts:\n{summarized_social[:2000]}..."
+                if summarized_podcasts:
+                    angles_prompt += f"\nPodcast Appearances:\n{summarized_podcasts[:2000]}..."
+                if summarized_articles:
+                    angles_prompt += f"\nArticles:\n{summarized_articles[:2000]}..."
+            
+            logger.info(f"Generating Angles for '{campaign_name}' using Gemini...")
+            angles_response = await self._call_gemini_langchain(angles_prompt, "generate_angles", delay_seconds=1.5)
+            
+            # Format the responses
+            bio_text_content = bio_response if bio_response else "Bio generation failed."
+            angles_text_content = angles_response if angles_response else "Angles generation failed."
+            
+            # Create formatted content with metadata
+            formatted_bio_content = f"""
+{extracted_data['full_name']} - Professional Bio
+Generated: {datetime.now().strftime('%Y-%m-%d')}
 
-            if not structured_data or "Bio" not in structured_data or "Angles" not in structured_data:
-                logger.error(f"Failed to structure Bio/Angles output for {campaign_name}. OpenAI output: {structured_data}")
-                self.stats["failed_generations"] += 1
-                # Store raw output if structuring fails, for manual review
-                await campaign_queries.update_campaign(uuid.UUID(campaign_id), {
-                    "campaign_bio": f"Structuring failed. Raw output: {raw_gemini_output[:2000]}...",
-                    "campaign_angles": "Structuring failed."
-                })
-                return {"status": "error", "reason": "Failed to structure AI output."}
+===============================================
 
-            bio_text_content = structured_data.get("Bio", "Bio generation failed.")
-            angles_text_content = structured_data.get("Angles", "Angles generation failed.")
+{bio_text_content}
+
+===============================================
+
+Website: {extracted_data.get('website', 'Not provided')}
+Email: {extracted_data.get('email', 'Not provided')}
+"""
+            
+            formatted_angles_content = f"""
+{extracted_data['full_name']} - Podcast Angles
+Generated: {datetime.now().strftime('%Y-%m-%d')}
+
+===============================================
+
+{angles_text_content}
+
+===============================================
+
+Additional Context:
+- Target Audience: {extracted_data.get('target_audience', 'Not specified')}
+- Key Expertise: {', '.join(extracted_data['expertise_topics']) if isinstance(extracted_data['expertise_topics'], list) else extracted_data['expertise_topics']}
+"""
 
             # 4. Create Google Docs for Bio and Angles
             logger.info(f"Creating Google Docs for '{campaign_name}'...")
             await asyncio.sleep(1.0) # Small delay
-            bio_gdoc_title = f"{campaign_name} - Campaign Bio"
-            bio_gdoc_link = await self._run_in_executor(self.google_docs_service.create_document, bio_gdoc_title, bio_text_content)
+            bio_gdoc_title = f"{extracted_data['full_name']} - Professional Bio"
+            bio_gdoc_link = await self._run_in_executor(self.google_docs_service.create_document, bio_gdoc_title, formatted_bio_content)
             if bio_gdoc_link:
                     bio_gdoc_id = extract_document_id(bio_gdoc_link)
                     await self._run_in_executor(self.google_docs_service.share_document, bio_gdoc_id) # Share it
@@ -346,8 +512,8 @@ class AnglesProcessorPG:
                 # Handle GDoc creation failure - perhaps proceed without link or log error
 
             await asyncio.sleep(1.5) # Small delay
-            angles_gdoc_title = f"{campaign_name} - Campaign Angles"
-            angles_gdoc_link = await self._run_in_executor(self.google_docs_service.create_document, angles_gdoc_title, angles_text_content)
+            angles_gdoc_title = f"{extracted_data['full_name']} - Podcast Angles"
+            angles_gdoc_link = await self._run_in_executor(self.google_docs_service.create_document, angles_gdoc_title, formatted_angles_content)
             if angles_gdoc_link:
                 angles_gdoc_id = extract_document_id(angles_gdoc_link)
                 await self._run_in_executor(self.google_docs_service.share_document, angles_gdoc_id) # Share it
@@ -355,14 +521,27 @@ class AnglesProcessorPG:
             else:
                 logger.error(f"Failed to create Angles GDoc for {campaign_name}")
 
-            # 5. Generate Keywords
+            # 5. Generate Keywords based on actual content
             logger.info(f"Generating keywords for '{campaign_name}'...")
-            # Using the embedded keyword prompt
-            keyword_generation_prompt = self.keyword_prompt_text.format(
-                campaign_name=campaign_name,
-                bio_content=bio_text_content[:2000], # Use a portion to avoid overly long prompts
-                angles_content=angles_text_content[:3000]
-            )
+            # Using the embedded keyword prompt with actual bio and angles content
+            keyword_generation_prompt = f"""You are an expert PR consultant specializing in podcast guest selection.
+Based on the following client bio and angles, generate exactly 20 relevant keywords that represent their expertise, topics, and areas of knowledge.
+
+These keywords should:
+- Be specific to their actual expertise (not generic)
+- Include industry terms, topics they can speak about on a podcast
+- Represent their unique value proposition
+- Be useful for podcast hosts to understand their niche
+- Include both broad and specific terms
+- Be 2-4 words each
+
+Client Bio:
+{bio_text_content[:2000]}
+
+Client Angles:
+{angles_text_content[:3000]}
+
+Please respond with exactly 20 keywords separated by commas, no numbering or additional text:"""
             generated_keywords = await self._call_gemini_langchain(keyword_generation_prompt, "generate_keywords", delay_seconds=1.0)
             # Clean up keywords: remove "Keywords:", newlines, excessive spacing.
             cleaned_keywords = generated_keywords.replace("Keywords:", "").strip()
