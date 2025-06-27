@@ -267,6 +267,73 @@ Ensure no other text, conversation, or markdown (like asterisks) is included bey
                 "long_bio": "Professional bio coming soon.",
                 "short_bio": "Expert guest."
             }
+    
+    def _parse_gdoc_bio_sections(self, gdoc_content: str) -> Dict[str, str]:
+        """Parse GDoc bio content to extract Full, Summary, and Short bio sections."""
+        try:
+            # Initialize sections
+            bio_sections = {
+                "full_bio": "",
+                "summary_bio": "",
+                "short_bio": ""
+            }
+            
+            # Extract FULL BIO (between **1. FULL BIO** and **2. SUMMARY BIO**)
+            full_bio_match = re.search(
+                r'\*\*1\.\s*FULL BIO[^:]*:\*\*\s*\n+(.*?)(?=\*\*2\.\s*SUMMARY BIO)', 
+                gdoc_content, 
+                re.DOTALL | re.IGNORECASE
+            )
+            if full_bio_match:
+                bio_sections["full_bio"] = full_bio_match.group(1).strip()
+            
+            # Extract SUMMARY BIO (between **2. SUMMARY BIO** and **3. SHORT BIO**)
+            summary_bio_match = re.search(
+                r'\*\*2\.\s*SUMMARY BIO[^:]*:\*\*\s*\n+(.*?)(?=\*\*3\.\s*SHORT BIO)', 
+                gdoc_content, 
+                re.DOTALL | re.IGNORECASE
+            )
+            if summary_bio_match:
+                bio_sections["summary_bio"] = summary_bio_match.group(1).strip()
+            
+            # Extract SHORT BIO (after **3. SHORT BIO** until separator or end)
+            short_bio_match = re.search(
+                r'\*\*3\.\s*SHORT BIO[^:]*:\*\*\s*\n+(.*?)(?=={3,}|---|Website:|Email:|$)', 
+                gdoc_content, 
+                re.DOTALL | re.IGNORECASE
+            )
+            if short_bio_match:
+                bio_sections["short_bio"] = short_bio_match.group(1).strip()
+            
+            # Clean up extracted content - preserve paragraph breaks but clean extra whitespace
+            for key in bio_sections:
+                if bio_sections[key]:
+                    # Preserve paragraph breaks (double newlines) but clean up excessive spacing
+                    bio_sections[key] = re.sub(r'\n{3,}', '\n\n', bio_sections[key])  # Max 2 newlines
+                    bio_sections[key] = bio_sections[key].strip()
+            
+            # If no sections found, check if the content already has the clean format
+            if not any(bio_sections.values()):
+                # Remove any metadata lines and separators
+                content = gdoc_content
+                content = re.sub(r'^.*?Generated:.*?\n', '', content, flags=re.MULTILINE)
+                content = re.sub(r'={3,}', '', content)
+                content = re.sub(r'(---|Website:|Email:).*$', '', content, flags=re.DOTALL)
+                content = content.strip()
+                
+                # If it starts with a name, it might be the cleaned bio already
+                if content and not content.startswith('**'):
+                    bio_sections["full_bio"] = content
+            
+            return bio_sections
+            
+        except Exception as e:
+            logger.error(f"Error parsing GDoc bio sections: {e}")
+            return {
+                "full_bio": gdoc_content,
+                "summary_bio": "",
+                "short_bio": ""
+            }
 
     async def _generate_talking_points(self, questionnaire_content: str, campaign_id: uuid.UUID) -> List[Dict[str, str]]:
         """Generate suggested talking points and topics using LLM."""
@@ -676,6 +743,40 @@ Provide *only* the final, professional social proof section content below, with 
         except Exception as e:
             logger.error(f"Error generating short bio from long for campaign {campaign_id}: {e}")
             return long_bio[:250] + "..." # Fallback
+    
+    async def _generate_summary_bio_from_long(self, long_bio: str, campaign_id: uuid.UUID) -> str:
+        """Generate a summary bio (2 paragraphs) from a long bio using LLM."""
+        if not long_bio.strip():
+            return "A professional with expertise in their field."
+        try:
+            prompt = f"""
+            Based on the following full professional bio, create a SUMMARY BIO (exactly 2 paragraphs) that highlights their expertise and authority.
+            Focus on their main accomplishments and what value they bring to audiences.
+
+            FULL BIO:
+            {long_bio}
+
+            Please respond with just the 2-paragraph SUMMARY BIO, no additional text, and no asterisks or markdown.
+            """
+            response = await self.gemini_service.create_message(
+                prompt,
+                workflow="media_kit_summary_bio_from_long",
+                related_campaign_id=campaign_id
+            )
+            if response:
+                summary_bio = response.strip().strip('"\'')
+                logger.info(f"Generated summary bio from long bio for campaign {campaign_id}")
+                return summary_bio
+            else:
+                logger.warning(f"Empty response when generating summary bio for campaign {campaign_id}")
+                # Fallback: use first two paragraphs of long bio
+                paragraphs = long_bio.split('\n\n')
+                if len(paragraphs) >= 2:
+                    return '\n\n'.join(paragraphs[:2])
+                return long_bio
+        except Exception as e:
+            logger.error(f"Error generating summary bio from long for campaign {campaign_id}: {e}")
+            return "A professional with expertise in their field."
 
     async def create_or_update_media_kit(
         self,
@@ -793,13 +894,25 @@ Provide *only* the final, professional social proof section content below, with 
             
             # Bio sections: Prioritize GDoc bio, then LLM, then fallback
             if gdoc_bio_content_str:
-                # Simple split for now, assuming GDoc has sections clearly marked or is just the full bio.
-                # TODO: Implement more robust parsing of GDoc bio for Full, Summary, Short sections if needed.
+                # Parse GDoc bio content to extract individual bio sections
+                parsed_sections = self._parse_gdoc_bio_sections(gdoc_bio_content_str)
+                
+                # Map parsed sections to expected format
                 bio_sections = {
-                    "long_bio": gdoc_bio_content_str, 
-                    "short_bio": await self._generate_short_bio_from_long(gdoc_bio_content_str, campaign_id) # Helper to create short from long
+                    "long_bio": parsed_sections.get("full_bio", ""), 
+                    "summary_bio": parsed_sections.get("summary_bio", ""),
+                    "short_bio": parsed_sections.get("short_bio", "")
                 }
-                logger.info(f"Using GDoc bio for campaign {campaign_id}")
+                
+                # Generate missing sections if needed
+                if bio_sections["long_bio"] and not bio_sections["short_bio"]:
+                    bio_sections["short_bio"] = await self._generate_short_bio_from_long(bio_sections["long_bio"], campaign_id)
+                
+                if bio_sections["long_bio"] and not bio_sections["summary_bio"]:
+                    # Summary bio is typically between full and short, so generate if missing
+                    bio_sections["summary_bio"] = await self._generate_summary_bio_from_long(bio_sections["long_bio"], campaign_id)
+                
+                logger.info(f"Using parsed GDoc bio sections for campaign {campaign_id}")
             else:
                 logger.info(f"GDoc bio not available or failed to fetch, generating bio with LLM for campaign {campaign_id}")
                 bio_sections = await self._generate_comprehensive_bio(questionnaire_content, campaign_id)
@@ -874,9 +987,9 @@ Provide *only* the final, professional social proof section content below, with 
             
             "introduction": introduction, 
             
-            "full_bio_content": bio_sections["long_bio"],
-            "summary_bio_content": bio_sections.get("short_bio"),
-            "short_bio_content": bio_sections.get("short_bio"),
+            "full_bio_content": bio_sections.get("long_bio", ""),
+            "summary_bio_content": bio_sections.get("summary_bio", bio_sections.get("short_bio", "")),  # Use summary if available, else short
+            "short_bio_content": bio_sections.get("short_bio", ""),
             "bio_source": "gdoc" if gdoc_bio_content_str else "llm_questionnaire",
             
             "keywords": keywords,
