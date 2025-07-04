@@ -36,13 +36,13 @@ def check_memory_usage() -> bool:
     memory_info = get_memory_info()
     
     # Check process memory
-    if memory_info["process_percent"] > 80:
+    if memory_info["process_percent"] > 60:
         logger.error(
             f"HIGH MEMORY USAGE: Process using {memory_info['process_percent']:.1f}% "
             f"({memory_info['process_rss_mb']:.1f} MB)"
         )
         return False
-    elif memory_info["process_percent"] > 60:
+    elif memory_info["process_percent"] > 40:
         logger.warning(
             f"Elevated memory usage: Process using {memory_info['process_percent']:.1f}% "
             f"({memory_info['process_rss_mb']:.1f} MB)"
@@ -59,12 +59,12 @@ def check_memory_usage() -> bool:
     return True
 
 
-def memory_guard(threshold_percent: float = 80.0):
+def memory_guard(threshold_percent: float = 60.0):
     """
     Decorator to prevent operations when memory is high.
     
     Args:
-        threshold_percent: Memory usage percentage threshold (default: 80%)
+        threshold_percent: Memory usage percentage threshold (default: 60%)
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)

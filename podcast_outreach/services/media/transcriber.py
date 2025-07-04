@@ -36,6 +36,9 @@ from podcast_outreach.utils.memory_monitor import check_memory_usage, memory_gua
 
 logger = logging.getLogger(__name__)
 
+# --- Global Concurrency Control ---
+GLOBAL_TRANSCRIPTION_SEMAPHORE = asyncio.Semaphore(int(os.getenv("GLOBAL_TRANSCRIPTION_LIMIT", "3")))
+
 # --- Global FFmpeg/FFprobe Configuration ---
 if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
     AudioSegment.converter = FFMPEG_PATH
@@ -103,33 +106,44 @@ class MediaTranscriber:
         return await asyncio.to_thread(self._download_audio_sync, url)
 
     def _download_audio_sync(self, url: str) -> Optional[str]:
-        """Synchronous download using requests library - sometimes works better than aiohttp."""
+        """Synchronous download using requests library with proper cleanup."""
         parsed_url = urlparse(url)
         file_extension = os.path.splitext(parsed_url.path)[1] or ".mp3"
         
-        # We'll create a temp file but NOT use context manager here since we want to return the path
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_extension)
         tmp_path = tmp_file.name
         tmp_file.close()
         
-        # Use a session to handle cookies and redirects properly
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
-
+        
+        download_successful = False
+        
         try:
-            # Start with a HEAD request to check if the URL is accessible
+            # Check file size BEFORE download
             head_resp = session.head(url, allow_redirects=True, timeout=30)
             logger.info(f"HEAD request status: {head_resp.status_code}, final URL: {head_resp.url}")
             
-            # Now make the actual download request
+            # Check Content-Length if available
+            content_length = head_resp.headers.get('content-length')
+            if content_length:
+                file_size_mb = int(content_length) / (1024 * 1024)
+                MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
+                
+                if file_size_mb > MAX_FILE_SIZE_MB:
+                    raise ValueError(f"File too large: {file_size_mb:.1f} MB (max: {MAX_FILE_SIZE_MB} MB)")
+                
+                logger.info(f"File size from HEAD: {file_size_mb:.1f} MB")
+            
+            # Download the file
             response = session.get(url, allow_redirects=True, timeout=600, stream=True)
             response.raise_for_status()
             
             logger.info(f"Download response status: {response.status_code}, content-type: {response.headers.get('content-type', 'unknown')}")
             
-            # Download the file in chunks
+            # Download in chunks
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             
@@ -138,19 +152,18 @@ class MediaTranscriber:
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        if total_size > 0 and downloaded % (5 * 1024 * 1024) == 0:  # Log every 5MB instead of every 1MB
+                        if total_size > 0 and downloaded % (5 * 1024 * 1024) == 0:  # Log every 5MB
                             progress = (downloaded / total_size) * 100
                             logger.debug(f"Download progress: {progress:.1f}% ({downloaded}/{total_size} bytes)")
             
             # Validate downloaded file
             if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 1024:
-                logger.error(f"Downloaded file is too small or doesn't exist: {tmp_path}")
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                return None
-                
+                raise ValueError(f"Downloaded file is too small or doesn't exist: {tmp_path}")
+            
             file_size = os.path.getsize(tmp_path)
             logger.info(f"Successfully downloaded audio from {url} to {tmp_path} (size: {file_size} bytes)")
+            
+            download_successful = True
             return tmp_path
             
         except requests.exceptions.HTTPError as e:
@@ -158,25 +171,25 @@ class MediaTranscriber:
             if hasattr(e, 'response'):
                 if e.response.status_code == 404:
                     logger.error(f"404 Not Found - Audio file does not exist at URL: {url}")
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                    # Raise special exception for 404 errors that shouldn't be retried
                     raise AudioNotFoundError(f"Audio not found (404): {url}")
                 elif e.response.status_code == 403:
-                    logger.error("403 Forbidden - this may indicate:")
-                    logger.error("1. The audio URL requires specific referrer headers")
-                    logger.error("2. The hosting service blocks programmatic access")
-                    logger.error("3. The URL may be geo-restricted or time-limited")
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                    logger.error("403 Forbidden - access denied")
             return None
+            
         except Exception as e:
             logger.error(f"Error downloading audio from {url}: {e}")
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
             return None
+            
         finally:
             session.close()
+            
+            # CRITICAL FIX: Always clean up temp file if download wasn't successful
+            if not download_successful and tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                    logger.debug(f"Cleaned up failed download temp file: {tmp_path}")
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to clean up temp file {tmp_path}: {cleanup_error}")
 
     async def _refresh_episode_audio_url(self, episode_id: int) -> Optional[str]:
         """
@@ -370,7 +383,7 @@ class MediaTranscriber:
             logger.error(f"Error processing chunk {chunk_index+1}: {e}", exc_info=True)
             return chunk_index, f"ERROR in chunk {chunk_index+1}: {str(e)}"
 
-    @memory_guard(threshold_percent=80.0)  # Use 80% threshold instead of 70% for long audio
+    @memory_guard(threshold_percent=60.0)  # Use 60% threshold for better cloud stability
     async def _process_long_audio(self, file_path: str, episode_name: Optional[str] = None) -> str:
         logger.info(f"Processing long audio file: {file_path}")
         
@@ -444,59 +457,61 @@ Provide a comprehensive but concise summary (400-600 words) that captures the ep
             return f"Episode: {episode_title}\n\nBasic content from transcript: {transcript[:800]}..."
 
     async def transcribe_audio(self, audio_path: str, episode_id: int, episode_title: Optional[str] = None) -> Tuple[str, Optional[str], Optional[List[float]]]:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found at: {audio_path}")
-        
-        # Check file size before processing
-        file_size = os.path.getsize(audio_path)
-        if file_size < 1024:  # Less than 1KB
-            raise ValueError(f"Audio file too small ({file_size} bytes), likely corrupted: {audio_path}")
-        
-        # Skip extremely large files (> 500MB)
-        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
-        if file_size > MAX_FILE_SIZE:
-            raise ValueError(f"Audio file too large ({file_size / (1024*1024):.1f} MB), skipping to avoid timeout: {audio_path}")
-
-        transcript, summary, embedding = "", None, None
-        should_cleanup = False  # Flag to determine if we should clean up the input file
-        
-        try:
-            # Check if this is a temp file we should clean up (if it's in temp directory)
-            temp_dir = tempfile.gettempdir()
-            if audio_path.startswith(temp_dir):
-                should_cleanup = True
-                logger.debug(f"Audio file {audio_path} is in temp directory, will clean up after processing")
+        # Use global semaphore to limit total concurrent transcriptions
+        async with GLOBAL_TRANSCRIPTION_SEMAPHORE:
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file not found at: {audio_path}")
             
-            audio = await asyncio.to_thread(AudioSegment.from_file, audio_path)
-            duration_minutes = len(audio) / (60 * 1000)
+            # Check file size before processing
+            file_size = os.path.getsize(audio_path)
+            if file_size < 1024:  # Less than 1KB
+                raise ValueError(f"Audio file too small ({file_size} bytes), likely corrupted: {audio_path}")
             
-            if duration_minutes > self.MAX_SINGLE_CHUNK_DURATION_MINUTES:
-                transcript = await self._process_long_audio(audio_path, episode_name=episode_title)
-            else:
-                audio_content = await self._process_audio_file_for_gemini(audio_path)
-                transcript = await self._transcribe_gemini_api_call(audio_content, episode_title)
+            # Skip extremely large files (> 500MB)
+            MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+            if file_size > MAX_FILE_SIZE:
+                raise ValueError(f"Audio file too large ({file_size / (1024*1024):.1f} MB), skipping to avoid timeout: {audio_path}")
 
-            if transcript and "ERROR in chunk" not in transcript:
-                # Create enhanced summary with context
-                summary = await self.summarize_transcript(
-                    transcript=transcript,
-                    episode_title=episode_title or "Untitled Episode",
-                    podcast_name="",  # Could be passed as parameter if needed
-                    episode_summary=""  # Could include original Podscan summary if available
-                )
-                # Use only title + AI summary for embeddings (no transcript truncation)
-                embedding_text = f"Title: {episode_title or 'Untitled Episode'}\nSummary: {summary}"
-                embedding = await self._openai_service.get_embedding(text=embedding_text, workflow="episode_embedding", related_ids={"episode_id": episode_id})
-        except Exception as e:
-            logger.error(f"Error during transcription process for {audio_path}: {e}", exc_info=True)
-            raise
-        finally:
-            # Clean up the audio file if it's a temp file
-            if should_cleanup and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                    logger.debug(f"Cleaned up temp audio file: {audio_path}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up temp audio file {audio_path}: {e}")
-        
-        return transcript, summary, embedding
+            transcript, summary, embedding = "", None, None
+            should_cleanup = False  # Flag to determine if we should clean up the input file
+            
+            try:
+                # Check if this is a temp file we should clean up (if it's in temp directory)
+                temp_dir = tempfile.gettempdir()
+                if audio_path.startswith(temp_dir):
+                    should_cleanup = True
+                    logger.debug(f"Audio file {audio_path} is in temp directory, will clean up after processing")
+            
+                audio = await asyncio.to_thread(AudioSegment.from_file, audio_path)
+                duration_minutes = len(audio) / (60 * 1000)
+                
+                if duration_minutes > self.MAX_SINGLE_CHUNK_DURATION_MINUTES:
+                    transcript = await self._process_long_audio(audio_path, episode_name=episode_title)
+                else:
+                    audio_content = await self._process_audio_file_for_gemini(audio_path)
+                    transcript = await self._transcribe_gemini_api_call(audio_content, episode_title)
+
+                if transcript and "ERROR in chunk" not in transcript:
+                    # Create enhanced summary with context
+                    summary = await self.summarize_transcript(
+                        transcript=transcript,
+                        episode_title=episode_title or "Untitled Episode",
+                        podcast_name="",  # Could be passed as parameter if needed
+                        episode_summary=""  # Could include original Podscan summary if available
+                    )
+                    # Use only title + AI summary for embeddings (no transcript truncation)
+                    embedding_text = f"Title: {episode_title or 'Untitled Episode'}\nSummary: {summary}"
+                    embedding = await self._openai_service.get_embedding(text=embedding_text, workflow="episode_embedding", related_ids={"episode_id": episode_id})
+            except Exception as e:
+                logger.error(f"Error during transcription process for {audio_path}: {e}", exc_info=True)
+                raise
+            finally:
+                # Clean up the audio file if it's a temp file
+                if should_cleanup and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                        logger.debug(f"Cleaned up temp audio file: {audio_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to clean up temp audio file {audio_path}: {e}")
+            
+            return transcript, summary, embedding

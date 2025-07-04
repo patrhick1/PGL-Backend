@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from podcast_outreach.database.queries import episodes as episode_queries
 from podcast_outreach.services.media.transcriber import MediaTranscriber, AudioNotFoundError
 from podcast_outreach.logging_config import get_logger
+from podcast_outreach.utils.memory_monitor import get_memory_info
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,24 @@ class BatchTranscriptionService:
         logger.info("BatchTranscriptionService initialized")
         # Start cache cleanup task
         self._start_cache_cleanup()
+    
+    def get_safe_batch_size(self) -> int:
+        """
+        Get memory-aware batch size based on current memory usage.
+        Returns smaller batch sizes when memory is high.
+        """
+        memory_info = get_memory_info()
+        process_percent = memory_info["process_percent"]
+        
+        if process_percent > 50:
+            logger.warning(f"High memory usage ({process_percent:.1f}%), limiting batch size to 1")
+            return 1
+        elif process_percent > 30:
+            logger.info(f"Moderate memory usage ({process_percent:.1f}%), limiting batch size to 2")
+            return min(2, self.MAX_BATCH_SIZE)
+        else:
+            logger.debug(f"Normal memory usage ({process_percent:.1f}%), using full batch size")
+            return self.MAX_BATCH_SIZE
     
     async def create_transcription_batch(
         self,
@@ -115,7 +134,7 @@ class BatchTranscriptionService:
     
     async def _create_smart_batches(self, episodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Create smart batches based on episode duration and other factors.
+        Create smart batches based on episode duration, memory usage, and other factors.
         """
         batches = []
         current_batch = {
@@ -130,6 +149,9 @@ class BatchTranscriptionService:
             key=lambda e: e.get('duration_sec', 0) or 0
         )
         
+        # Get memory-aware batch size
+        safe_batch_size = self.get_safe_batch_size()
+        
         for episode in sorted_episodes:
             duration = episode.get('duration_sec', 0) or 0
             
@@ -138,9 +160,9 @@ class BatchTranscriptionService:
                 logger.warning(f"Episode {episode['episode_id']} too long ({duration/60:.1f} min), skipping")
                 continue
             
-            # Check if adding this episode would exceed batch limits
+            # Check if adding this episode would exceed batch limits (using memory-aware batch size)
             if (current_batch['episodes'] and 
-                (len(current_batch['episodes']) >= self.MAX_BATCH_SIZE or
+                (len(current_batch['episodes']) >= safe_batch_size or
                  current_batch['total_duration'] + duration > self.MAX_BATCH_DURATION_MINUTES * 60)):
                 # Save current batch and start a new one
                 batches.append(current_batch)
@@ -149,6 +171,8 @@ class BatchTranscriptionService:
                     "total_duration": 0,
                     "position": len(batches)
                 }
+                # Re-check memory for new batch
+                safe_batch_size = self.get_safe_batch_size()
             
             current_batch['episodes'].append(episode)
             current_batch['total_duration'] += duration
@@ -157,7 +181,7 @@ class BatchTranscriptionService:
         if current_batch['episodes']:
             batches.append(current_batch)
         
-        logger.info(f"Created {len(batches)} smart batches from {len(episodes)} episodes")
+        logger.info(f"Created {len(batches)} smart batches from {len(episodes)} episodes (memory-aware batch size: {safe_batch_size})")
         return batches
     
     async def process_batch(self, batch_id: str) -> Dict[str, Any]:
