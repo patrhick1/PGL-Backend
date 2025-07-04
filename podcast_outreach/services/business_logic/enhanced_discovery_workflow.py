@@ -65,7 +65,9 @@ class EnhancedDiscoveryWorkflow:
         self,
         campaign_id: uuid.UUID,
         media_id: int,
-        discovery_keyword: str
+        discovery_keyword: str,
+        is_client: bool = False,
+        person_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a single discovery through the enhanced workflow.
@@ -129,7 +131,17 @@ class EnhancedDiscoveryWorkflow:
             # Step 5: Create match if vetting score is high enough
             if discovery["vetting_status"] == "completed" and discovery["vetting_score"] >= 50:
                 if not discovery["match_created"]:
-                    match_result = await self._create_match_and_review_task(discovery)
+                    # Check client limits if this is a client discovery
+                    if is_client and person_id:
+                        from podcast_outreach.database.queries.client_profiles import check_can_create_matches
+                        can_create, reason = await check_can_create_matches(person_id, 1)
+                        if not can_create:
+                            result["steps_completed"].append("match_limit_reached")
+                            result["errors"].append(reason)
+                            result["match_limit_reached"] = True
+                            return result
+                    
+                    match_result = await self._create_match_and_review_task(discovery, is_client=is_client, person_id=person_id)
                     result["steps_completed"].extend(match_result["steps_completed"])
                     if match_result["status"] == "success":
                         result["match_id"] = match_result.get("match_id")
@@ -191,7 +203,7 @@ class EnhancedDiscoveryWorkflow:
                 result["steps_completed"].append("social_enrichment_completed")
             
             # Step 2: Enhanced batch transcription
-            episodes = await episode_queries.get_episodes_for_media(media_id, limit=10)
+            episodes = await episode_queries.get_episodes_for_media_paginated(media_id, offset=0, limit=10)
             
             # Filter episodes needing transcription and check URL status
             episodes_to_transcribe = []
@@ -253,9 +265,10 @@ class EnhancedDiscoveryWorkflow:
             # Step 4: Calculate quality score
             transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id)
             if transcribed_count >= 3:
-                quality_score = await self.enrichment_orchestrator.quality_service.calculate_score(media_id)
-                if quality_score:
-                    await media_queries.update_media_quality_score(media_id, quality_score)
+                # Get media data for quality score calculation
+                media_data = await media_queries.get_media_by_id_from_db(media_id)
+                if media_data:
+                    await self.enrichment_orchestrator._update_quality_score_for_media(media_data)
                     result["steps_completed"].append("quality_score_calculated")
             
             # Mark enrichment as completed
@@ -436,9 +449,10 @@ class EnhancedDiscoveryWorkflow:
         
         return result
     
-    async def _create_match_and_review_task(self, discovery: Dict[str, Any]) -> Dict[str, Any]:
+    async def _create_match_and_review_task(self, discovery: Dict[str, Any], is_client: bool = False, person_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Create match suggestion and review task for high-scoring discoveries.
+        For client discoveries, tracks the match and increments match count.
         """
         result = {
             "status": "success",
@@ -456,7 +470,8 @@ class EnhancedDiscoveryWorkflow:
                 "matched_keywords": [discovery["discovery_keyword"]],
                 "ai_reasoning": discovery["vetting_reasoning"],
                 "vetting_score": discovery["vetting_score"],
-                "vetting_reasoning": discovery["vetting_reasoning"]
+                "vetting_reasoning": discovery["vetting_reasoning"],
+                "created_by_client": is_client  # Track if created by client
             }
             
             match = await match_queries.create_match_suggestion_in_db(match_data)
@@ -471,6 +486,15 @@ class EnhancedDiscoveryWorkflow:
             # Update discovery record
             await cmd_queries.mark_match_created(discovery["id"], match_id)
             result["steps_completed"].append("match_created")
+            
+            # Increment client match count if this is a client discovery
+            if is_client and person_id:
+                from podcast_outreach.database.queries.client_profiles import increment_match_count
+                match_counted = await increment_match_count(person_id, 1)
+                if match_counted:
+                    result["steps_completed"].append("match_count_incremented")
+                else:
+                    logger.warning(f"Failed to increment match count for person_id {person_id}")
             
             # Create review task
             review_task_data = {

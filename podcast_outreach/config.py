@@ -95,3 +95,7 @@ ORCHESTRATOR_CONFIG = {
     "max_transcription_flags_per_media": 4, # Max episodes to flag for transcription per media item
     "main_loop_sleep_seconds": 300 # Sleep duration for the main orchestrator loop if run continuously
 }
+
+# Transcription configuration
+MAX_EPISODE_DURATION_SEC = int(os.getenv("MAX_EPISODE_DURATION_SEC", "7200"))  # 2 hours default
+TRANSCRIPTION_MEMORY_THRESHOLD = float(os.getenv("TRANSCRIPTION_MEMORY_THRESHOLD", "80.0"))  # 80% default

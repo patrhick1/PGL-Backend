@@ -13,9 +13,15 @@ from podcast_outreach.database.queries import episodes as episode_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_task_queries
+from podcast_outreach.database.connection import get_db_pool
 from podcast_outreach.services.matches.enhanced_vetting_agent import EnhancedVettingAgent
 from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
 from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
+from podcast_outreach.services.ai.gemini_client import GeminiService
+from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
+from podcast_outreach.services.enrichment.quality_score import QualityService
+from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
+from podcast_outreach.services.enrichment.data_merger import DataMergerService
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +227,39 @@ async def _run_vetting_for_discovery(discovery: Dict[str, Any]) -> Dict[str, Any
 async def _create_match_and_review_task(discovery: Dict[str, Any]) -> Dict[str, Any]:
     """Create match suggestion and review task for approved discovery."""
     try:
+        # Check weekly match limit before creating
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            # Get person_id from campaign
+            person_id = await conn.fetchval(
+                "SELECT person_id FROM campaigns WHERE campaign_id = $1",
+                discovery["campaign_id"]
+            )
+            
+            if not person_id:
+                return {"success": False, "error": "Campaign not found"}
+            
+            # Check and increment match count atomically
+            result = await conn.fetchrow(
+                "SELECT * FROM check_and_increment_weekly_matches($1, $2)",
+                person_id, 1
+            )
+            
+            if not result or not result['allowed']:
+                logger.warning(f"Weekly match limit reached for person {person_id}: {result['message'] if result else 'Unknown error'}")
+                # Mark discovery as limit reached
+                await cmd_queries.update_vetting_results(
+                    discovery["id"],
+                    discovery["vetting_score"],
+                    f"Match limit reached: {result['message'] if result else 'Weekly limit exceeded'}",
+                    discovery.get("vetting_criteria_met", {}),
+                    "limit_reached"
+                )
+                return {
+                    "success": False, 
+                    "error": f"Weekly match limit reached ({result['current_count']}/{result['weekly_limit']})" if result else "Match limit exceeded"
+                }
+        
         # First, find the best matching episode
         best_episode_id = await _find_best_matching_episode(
             discovery["campaign_id"], 
@@ -285,7 +324,14 @@ async def run_enrichment_pipeline() -> bool:
         
         logger.info(f"Processing enrichment for {len(discoveries)} discoveries")
         
-        enrichment_orchestrator = EnrichmentOrchestrator()
+        # Initialize required services for EnrichmentOrchestrator
+        gemini_service = GeminiService()
+        social_discovery_service = SocialDiscoveryService()
+        data_merger = DataMergerService()
+        enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
+        quality_service = QualityService()
+        
+        enrichment_orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
         
         for discovery in discoveries:
             try:

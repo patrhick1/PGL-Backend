@@ -4,11 +4,13 @@ import os
 import time
 import logging
 import asyncio # Added for async operations
+import random  # For jitter in exponential backoff
 # import functools # No longer explicitly needed with asyncio.to_thread if other changes are made
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 import google.generativeai as genai
 import uuid
+from google.api_core import exceptions as google_exceptions
 
 # Import enums for safety settings
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -16,6 +18,11 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 # Import our AI usage tracker from its new location
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker
 from podcast_outreach.logging_config import get_logger # Use new logging config
+
+
+class GeminiSafetyBlockError(Exception):
+    """Raised when Gemini blocks content due to safety reasons"""
+    pass
 
 # Load environment variables
 load_dotenv()
@@ -60,7 +67,7 @@ class GeminiService:
     async def create_message(self, prompt: str, model: str = 'gemini-2.0-flash',
                              workflow: str = "unknown", related_pitch_gen_id: Optional[int] = None,
                              related_campaign_id: Optional[uuid.UUID] = None, related_media_id: Optional[int] = None,
-                             max_retries: int = 3, initial_retry_delay: int = 2) -> str:
+                             max_retries: int = 3, initial_retry_delay: int = 2, timeout: int = 300) -> str:
         retry_count = 0
         retry_delay = initial_retry_delay
         last_exception = None
@@ -84,7 +91,14 @@ class GeminiService:
                 )
                 
                 # Assuming model_instance.generate_content is blocking and needs to_thread
-                response_obj = await asyncio.to_thread(model_instance.generate_content, prompt)
+                # Apply timeout using asyncio.wait_for
+                try:
+                    response_obj = await asyncio.wait_for(
+                        asyncio.to_thread(model_instance.generate_content, prompt),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    raise google_exceptions.DeadlineExceeded(f"Request timed out after {timeout} seconds")
 
                 # Enhanced check for valid content before accessing .text
                 if not response_obj.candidates or \
@@ -104,9 +118,19 @@ class GeminiService:
 
                     error_message = f"Gemini response has no valid content parts. {candidate_info}{prompt_feedback_info}"
                     logger.error(error_message)
-                    # Raise a specific error or re-raise if that's better for retry logic
-                    # For now, let this be caught by the generic Exception and retried
-                    raise ValueError(error_message)
+                    
+                    # Check if this is a safety block (finish_reason 3)
+                    is_safety_block = False
+                    if response_obj.candidates and len(response_obj.candidates) > 0:
+                        candidate = response_obj.candidates[0]
+                        if hasattr(candidate, 'finish_reason') and candidate.finish_reason == 3:
+                            is_safety_block = True
+                    
+                    # Create a custom exception for safety blocks
+                    if is_safety_block:
+                        raise GeminiSafetyBlockError(error_message)
+                    else:
+                        raise ValueError(error_message)
 
                 content_text = response_obj.text # Access .text only after validation
 
@@ -128,6 +152,10 @@ class GeminiService:
                 )
                 return content_text
 
+            except GeminiSafetyBlockError as e:
+                # Don't retry safety blocks - they will consistently fail
+                logger.error(f"Content blocked by Gemini safety filters: {e}")
+                raise
             except Exception as e:
                 last_exception = e
                 
@@ -142,23 +170,37 @@ class GeminiService:
                         if hasattr(candidate, 'finish_reason'):
                              log_suffix += f" FinishReason: {candidate.finish_reason} ({candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else 'Unknown Name'})."
                 
+                # Check if it's a retriable error (503, 504, timeout)
+                is_retriable = False
+                if isinstance(e, google_exceptions.ServiceUnavailable) or \
+                   isinstance(e, google_exceptions.DeadlineExceeded) or \
+                   isinstance(e, google_exceptions.InternalServerError) or \
+                   (hasattr(e, '__cause__') and '503' in str(e)) or \
+                   (hasattr(e, '__cause__') and '504' in str(e)) or \
+                   'overloaded' in str(e).lower():
+                    is_retriable = True
+                
                 retry_count += 1
-                if retry_count <= max_retries:
-                    logger.warning(f"Error in Gemini API call (attempt {retry_count}/{max_retries}): {e}.{log_suffix} "
-                                   f"Retrying in {retry_delay} seconds...")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                if retry_count <= max_retries and is_retriable:
+                    # Exponential backoff with jitter
+                    jitter = random.uniform(0, retry_delay * 0.3)
+                    actual_delay = retry_delay + jitter
+                    
+                    logger.warning(f"Retriable error in Gemini API call (attempt {retry_count}/{max_retries}): {e}.{log_suffix} "
+                                   f"Retrying in {actual_delay:.2f} seconds...")
+                    await asyncio.sleep(actual_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60 seconds
                 else:
-                    logger.error(f"Error in create_message after {max_retries} retries: {e}.{log_suffix}")
+                    logger.error(f"Error in create_message after {retry_count-1} retries: {e}.{log_suffix}")
                     # Ensure the original exception 'e' is chained for full context
-                    raise Exception(f"Failed to generate message using Gemini API after {max_retries} retries. Last error: {str(e)}{log_suffix}") from e
+                    raise Exception(f"Failed to generate message using Gemini API after {retry_count-1} retries. Last error: {str(e)}{log_suffix}") from e
 
 
     async def create_chat_completion(self, system_prompt: str, prompt: str,
                                      workflow: str = "chat_completion",
                                      related_pitch_gen_id: Optional[int] = None,
                                      related_campaign_id: Optional[uuid.UUID] = None, related_media_id: Optional[int] = None,
-                                     max_retries: int = 3, initial_retry_delay: int = 2) -> str:
+                                     max_retries: int = 3, initial_retry_delay: int = 2, timeout: int = 300) -> str:
         # The model used here is 'gemini-2.0-flash-exp' which might have different safety defaults/behaviors
         # than 'gemini-2.5-flash-preview-04-17' used in create_message.
         # The advice to add DEFAULT_SAFETY_SETTINGS to create_message's model_instance is key.
@@ -184,7 +226,8 @@ class GeminiService:
             related_campaign_id=related_campaign_id,
             related_media_id=related_media_id,
             max_retries=max_retries,
-            initial_retry_delay=initial_retry_delay
+            initial_retry_delay=initial_retry_delay,
+            timeout=timeout
         )
 
     async def get_structured_data(self, 

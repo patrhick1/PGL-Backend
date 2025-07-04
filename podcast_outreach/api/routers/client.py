@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone # ENSURED THIS IS PRESENT
 import asyncio # For concurrent API calls
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 
 from podcast_outreach.api.dependencies import get_current_user
 from podcast_outreach.api.schemas import client_profile_schemas as schemas # Ensure this import is correct
@@ -192,6 +192,362 @@ async def client_discover_podcast_previews(campaign_id: uuid.UUID, current_user:
 
     finally:
         media_fetcher.cleanup() # Important if ThreadPoolExecutor is used in MediaFetcher
+
+# --- POST /client/campaigns/{campaign_id}/discover (New Full Discovery) ---
+@router.post("/client/campaigns/{campaign_id}/discover", 
+             response_model=schemas.DiscoveryStartResponse,
+             summary="Start full discovery with enrichment and vetting")
+async def client_discover_podcasts(
+    campaign_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    max_matches: int = Query(50, ge=1, le=100, description="Maximum matches to discover"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Full discovery endpoint for clients with enrichment and vetting.
+    Free clients: limited to 50 matches/week (where vetting_score >= 50)
+    Paid clients: unlimited matches
+    
+    This runs the same discovery pipeline as admin but with client-specific limits.
+    """
+    if current_user.get("role") != "client" or not current_user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
+    
+    person_id = current_user["person_id"]
+    
+    # Verify campaign ownership
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign or campaign.get("person_id") != person_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found or access denied.")
+    
+    # Check if campaign has ideal_podcast_description for vetting
+    if not campaign.get("ideal_podcast_description"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Campaign must have ideal_podcast_description for automated discovery. Please complete your campaign questionnaire."
+        )
+    
+    # Get client profile to check plan type
+    profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Client profile not found.")
+    
+    # Check remaining matches for free users
+    if profile.get('plan_type') == 'free':
+        from podcast_outreach.database.queries.client_profiles import get_remaining_weekly_matches
+        remaining_matches = await get_remaining_weekly_matches(person_id)
+        if remaining_matches is not None and remaining_matches == 0:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="You have reached your weekly limit of 50 matches. Upgrade to a paid plan for unlimited matches."
+            )
+        
+        # Adjust max_matches if it would exceed remaining limit
+        if remaining_matches is not None and max_matches > remaining_matches:
+            max_matches = remaining_matches
+            logger.info(f"Adjusted max_matches to {max_matches} based on remaining weekly limit for person_id {person_id}")
+    
+    # Import config
+    from podcast_outreach.config_modules.discovery_config import get_max_discoveries_for_plan
+    max_discoveries = get_max_discoveries_for_plan(profile.get('plan_type', 'free'))
+    
+    # Run the enhanced discovery pipeline in the background
+    logger.info(f"Starting client discovery for campaign {campaign_id} (person_id: {person_id}, max_matches: {max_matches})")
+    background_tasks.add_task(
+        _run_client_discovery_pipeline,
+        campaign_id,
+        person_id,
+        max_matches,
+        max_discoveries
+    )
+    
+    # Return immediately with tracking information
+    return schemas.DiscoveryStartResponse(
+        message="Discovery process started",
+        campaign_id=campaign_id,
+        estimated_completion_minutes=5,
+        tracking_endpoint=f"/client/campaigns/{campaign_id}/discovery-status",
+        max_matches=max_matches
+    )
+
+# Background task for client discovery
+async def _run_client_discovery_pipeline(
+    campaign_id: uuid.UUID,
+    person_id: int,
+    max_matches: int,
+    max_discoveries: int
+):
+    """
+    Client version of the enhanced discovery pipeline.
+    Includes match limit checking and client-specific notifications.
+    """
+    from podcast_outreach.services.events.notification_service import get_notification_service
+    from podcast_outreach.services.business_logic.enhanced_discovery_workflow import EnhancedDiscoveryWorkflow
+    from podcast_outreach.services.enrichment.discovery import DiscoveryService
+    
+    notification_service = get_notification_service()
+    campaign_id_str = str(campaign_id)
+    
+    try:
+        logger.info(f"Starting client discovery pipeline for campaign {campaign_id} (person_id: {person_id})")
+        
+        # Send pipeline started notification
+        await notification_service.send_client_event(
+            person_id,
+            "client.discovery.started",
+            {
+                "campaign_id": campaign_id_str,
+                "max_matches": max_matches,
+                "estimated_completion": 5
+            }
+        )
+        
+        # Step 1: Run discovery to find podcasts (unlimited discoveries)
+        service = DiscoveryService()
+        discovery_results = await service.discover_for_campaign(
+            str(campaign_id), 
+            max_matches=max_discoveries,  # Discover more than we might match
+            is_client=True,
+            person_id=person_id
+        )
+        
+        logger.info(f"Discovery completed for campaign {campaign_id}: {len(discovery_results)} new media found")
+        
+        # Initialize enhanced workflow
+        enhanced_workflow = EnhancedDiscoveryWorkflow()
+        
+        # Step 2: Process discoveries through enrichment and vetting
+        processed_count = 0
+        matches_created = 0
+        limit_reached = False
+        
+        for media_id, discovery_keyword in discovery_results:
+            try:
+                if media_id:
+                    # Send progress notification
+                    await notification_service.send_client_event(
+                        person_id,
+                        "client.enrichment.progress",
+                        {
+                            "campaign_id": campaign_id_str,
+                            "completed": processed_count,
+                            "total": len(discovery_results),
+                            "matches_created": matches_created,
+                            "in_progress": 1
+                        }
+                    )
+                    
+                    # Run the enhanced pipeline with client tracking
+                    pipeline_result = await enhanced_workflow.process_discovery(
+                        campaign_id=campaign_id,
+                        media_id=media_id,
+                        discovery_keyword=discovery_keyword,
+                        is_client=True,
+                        person_id=person_id
+                    )
+                    
+                    processed_count += 1
+                    
+                    # Check if a match was created
+                    if pipeline_result.get('match_id'):
+                        matches_created += 1
+                    
+                    # Check if limit was reached
+                    if pipeline_result.get('match_limit_reached'):
+                        limit_reached = True
+                        logger.info(f"Match limit reached for person_id {person_id}")
+                        break
+                    
+                    logger.info(f"Client pipeline result for media {media_id}: {pipeline_result['status']}")
+                    
+            except Exception as media_error:
+                logger.error(f"Error processing media {media_id} in client pipeline: {media_error}")
+                processed_count += 1
+                continue
+        
+        # Send completion notification
+        completion_data = {
+            "campaign_id": campaign_id_str,
+            "total_discovered": len(discovery_results),
+            "total_processed": processed_count,
+            "matches_created": matches_created,
+            "limit_reached": limit_reached
+        }
+        
+        if limit_reached:
+            await notification_service.send_client_event(
+                person_id,
+                "client.limit.reached",
+                completion_data
+            )
+        
+        await notification_service.send_client_event(
+            person_id,
+            "client.matches.ready",
+            completion_data
+        )
+        
+        logger.info(f"Client discovery pipeline completed for campaign {campaign_id}: {matches_created} matches created")
+        
+    except Exception as e:
+        logger.error(f"Error in client discovery pipeline for campaign {campaign_id}: {e}")
+        await notification_service.send_client_event(
+            person_id,
+            "client.discovery.failed",
+            {
+                "campaign_id": campaign_id_str,
+                "error": str(e)
+            }
+        )
+
+# --- GET /client/campaigns/{campaign_id}/discovery-status ---
+@router.get("/client/campaigns/{campaign_id}/discovery-status",
+            summary="Track discovery progress for a campaign")
+async def get_client_discovery_status(
+    campaign_id: uuid.UUID,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Track the progress of discoveries for a client's campaign.
+    Shows enrichment, vetting, and match creation status.
+    """
+    if current_user.get("role") != "client" or not current_user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
+    
+    person_id = current_user["person_id"]
+    
+    # Verify campaign ownership
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign or campaign.get("person_id") != person_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found or access denied.")
+    
+    try:
+        from podcast_outreach.database.queries import campaign_media_discoveries as cmd_queries
+        
+        # Get discoveries for this campaign
+        discoveries = await cmd_queries.get_discoveries_for_campaign(
+            campaign_id=campaign_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        # Count totals
+        all_discoveries = await cmd_queries.get_discoveries_for_campaign(campaign_id, limit=1000)
+        in_progress = sum(1 for d in all_discoveries if d["enrichment_status"] == "in_progress" or d["vetting_status"] == "in_progress")
+        completed = sum(1 for d in all_discoveries if d["vetting_status"] == "completed")
+        matches_created = sum(1 for d in all_discoveries if d.get("match_created", False))
+        
+        # Get remaining matches for free users
+        remaining_matches = None
+        if campaign.get('plan_type') == 'free':
+            from podcast_outreach.database.queries.client_profiles import get_remaining_weekly_matches
+            remaining_matches = await get_remaining_weekly_matches(person_id)
+        
+        return {
+            "campaign_id": campaign_id,
+            "discoveries": discoveries,
+            "total_discovered": len(all_discoveries),
+            "in_progress": in_progress,
+            "completed": completed,
+            "matches_created": matches_created,
+            "remaining_weekly_matches": remaining_matches,
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting discovery status for campaign {campaign_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get discovery status: {str(e)}"
+        )
+
+# --- PATCH /client/campaigns/{campaign_id}/auto-discovery ---
+@router.patch("/campaigns/{campaign_id}/auto-discovery",
+              summary="Enable or disable automatic discovery for a campaign")
+async def toggle_auto_discovery(
+    campaign_id: uuid.UUID,
+    enabled: bool = Query(..., description="Enable or disable auto-discovery"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Toggle automatic discovery for a campaign.
+    Auto-discovery will automatically find and vet podcasts when enabled.
+    """
+    if current_user.get("role") != "client" or not current_user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
+    
+    person_id = current_user["person_id"]
+    
+    # Verify campaign ownership
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign or campaign.get("person_id") != person_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found or access denied.")
+    
+    # Update auto-discovery setting
+    await campaign_queries.update_campaign(campaign_id, {
+        'auto_discovery_enabled': enabled,
+        'auto_discovery_status': 'pending' if enabled else 'disabled'
+    })
+    
+    # If enabling, trigger immediate discovery check for this campaign
+    if enabled and campaign.get('ideal_podcast_description'):
+        from podcast_outreach.services.tasks.manager import task_manager
+        import time
+        
+        task_id = f"auto_discovery_toggle_{campaign_id}_{int(time.time())}"
+        task_manager.start_task(task_id, "manual_campaign_auto_discovery")
+        task_manager.run_single_campaign_auto_discovery(task_id, str(campaign_id))
+        
+        message = "Auto-discovery enabled and discovery process started"
+    else:
+        message = f"Auto-discovery {'enabled' if enabled else 'disabled'} for campaign"
+    
+    return {
+        "campaign_id": campaign_id,
+        "auto_discovery_enabled": enabled,
+        "auto_discovery_status": 'pending' if enabled else 'disabled',
+        "message": message
+    }
+
+# --- GET /client/campaigns/{campaign_id}/auto-discovery-status ---
+@router.get("/campaigns/{campaign_id}/auto-discovery-status",
+            summary="Get auto-discovery status for a campaign")
+async def get_auto_discovery_status(
+    campaign_id: uuid.UUID,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get the current auto-discovery status and statistics for a campaign."""
+    if current_user.get("role") != "client" or not current_user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
+    
+    person_id = current_user["person_id"]
+    
+    # Verify campaign ownership
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if not campaign or campaign.get("person_id") != person_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found or access denied.")
+    
+    # Get profile for limits
+    profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+    
+    # Calculate remaining auto-discoveries
+    if profile['plan_type'] == 'free':
+        remaining_this_week = 50 - profile.get('current_weekly_matches', 0)
+    else:
+        remaining_this_week = 200 - profile.get('auto_discovery_matches_this_week', 0)
+    
+    return {
+        "campaign_id": campaign_id,
+        "auto_discovery_enabled": campaign.get('auto_discovery_enabled', False),
+        "auto_discovery_status": campaign.get('auto_discovery_status', 'disabled'),
+        "auto_discovery_last_run": campaign.get('auto_discovery_last_run'),
+        "plan_type": profile['plan_type'],
+        "remaining_auto_discoveries_this_week": remaining_this_week,
+        "weekly_limit": 50 if profile['plan_type'] == 'free' else 200
+    }
 
 # --- POST /client/request-match-review (already provided, ensure it's here) ---
 @router.post("/request-match-review", status_code=status.HTTP_201_CREATED)

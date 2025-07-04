@@ -57,7 +57,6 @@ class PitchSenderService:
  
         data = {
             "campaign": instantly_campaign_id,
-            "skip_if_in_workspace": True,
             "skip_if_in_campaign": True,
             "email": recipient_email,
             "first_name": host_name,

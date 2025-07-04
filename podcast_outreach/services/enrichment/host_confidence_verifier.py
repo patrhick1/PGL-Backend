@@ -307,6 +307,12 @@ class HostConfidenceVerifier:
                 'host_names_last_verified': datetime.now(timezone.utc)
             }
             
+            # Log the data types for debugging
+            logger.debug(f"Updating host verification data for media {media_id}:")
+            logger.debug(f"  host_names ({type(host_names_list).__name__}): {host_names_list}")
+            logger.debug(f"  discovery_sources ({type(discovery_sources).__name__}): {discovery_sources}")
+            logger.debug(f"  confidence_scores ({type(confidence_scores).__name__}): {confidence_scores}")
+            
             # Update media record
             await media_queries.update_media_enrichment_data(media_id, update_data)
             

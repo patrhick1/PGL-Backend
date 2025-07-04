@@ -15,6 +15,7 @@ from pathlib import Path
 import base64
 from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 from podcast_outreach.logging_config import get_logger
+import shutil  # For cleaning up temp directories
 
 logger = get_logger(__name__)
 
@@ -105,6 +106,7 @@ class PodcastTranscriberService:
         Returns:
             Optional[str]: Path to the downloaded audio file, or None if failed
         """
+        temp_dir = None
         try:
             # Create temporary directory for audio files
             temp_dir = tempfile.mkdtemp(prefix="podcast_audio_")
@@ -146,13 +148,21 @@ class PodcastTranscriberService:
             
             if audio_file and os.path.exists(audio_file):
                 logger.info(f"Successfully downloaded audio from {url}")
+                # Note: We're returning the file path but NOT cleaning up temp_dir yet
+                # The caller is responsible for cleanup after processing
                 return audio_file
             else:
                 logger.error(f"Failed to download audio from {url}")
+                # Clean up temp dir if download failed
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
                 
         except Exception as e:
             logger.error(f"Error extracting audio from {url}: {e}")
+            # Clean up temp dir on error
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
             return None
     
     async def transcribe_audio_file(self, audio_file_path: str, campaign_id: Optional[uuid.UUID] = None) -> Optional[str]:
@@ -358,17 +368,29 @@ class PodcastTranscriberService:
                         results.append(result)
                         continue
                     
-                    # Transcribe audio
-                    transcript = await self.transcribe_audio_file(audio_file, campaign_id)
-                    if not transcript:
-                        result.update({
-                            "status": "failed",
-                            "error": "Failed to transcribe audio",
-                            "transcript": None,
-                            "analysis": None
-                        })
-                        results.append(result)
-                        continue
+                    try:
+                        # Transcribe audio
+                        transcript = await self.transcribe_audio_file(audio_file, campaign_id)
+                        if not transcript:
+                            result.update({
+                                "status": "failed",
+                                "error": "Failed to transcribe audio",
+                                "transcript": None,
+                                "analysis": None
+                            })
+                            results.append(result)
+                            continue
+                    finally:
+                        # Clean up audio file and its parent temp directory
+                        if audio_file and os.path.exists(audio_file):
+                            try:
+                                # Get parent directory (temp dir created by extract_audio_from_url)
+                                temp_dir = os.path.dirname(audio_file)
+                                if temp_dir and os.path.exists(temp_dir) and temp_dir.startswith(tempfile.gettempdir()):
+                                    shutil.rmtree(temp_dir, ignore_errors=True)
+                                    logger.debug(f"Cleaned up temp directory: {temp_dir}")
+                            except Exception as e:
+                                logger.error(f"Failed to clean up temp files for {url}: {e}")
                     
                     # Analyze transcript
                     analysis = await self.analyze_transcript_for_insights(transcript, campaign_id)

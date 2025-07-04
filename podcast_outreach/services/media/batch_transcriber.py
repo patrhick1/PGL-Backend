@@ -31,7 +31,7 @@ class BatchTranscriptionService:
     """
     
     # Batch configuration
-    MAX_BATCH_SIZE = 10
+    MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "5"))  # Reduced from 10 to 5
     MAX_BATCH_DURATION_MINUTES = 180  # 3 hours total
     MAX_EPISODE_DURATION_MINUTES = 60  # Individual episode limit
     
@@ -49,7 +49,10 @@ class BatchTranscriptionService:
         self.transcriber = MediaTranscriber()
         self._active_batches: Dict[str, Dict[str, Any]] = {}
         self._failed_url_cache: Dict[str, Dict[str, Any]] = {}  # url -> {failure_count, last_attempt, error}
+        self._cache_cleanup_task = None
         logger.info("BatchTranscriptionService initialized")
+        # Start cache cleanup task
+        self._start_cache_cleanup()
     
     async def create_transcription_batch(
         self,
@@ -367,17 +370,34 @@ class BatchTranscriptionService:
                 if not audio_file:
                     raise Exception("Failed to download audio file")
                 
-                # Transcribe
-                transcript = await self.transcriber.transcribe_audio_file(audio_file, campaign_id)
+                try:
+                    # Get episode details for transcription
+                    episode = await episode_queries.get_episode_by_id(episode_id)
+                    episode_title = episode.get('title') if episode else None
+                    
+                    # Transcribe - the transcribe_audio method will handle cleanup
+                    transcript, summary, embedding = await self.transcriber.transcribe_audio(
+                        audio_file, 
+                        episode_id,
+                        episode_title
+                    )
+                    
+                    # Return just the transcript for backward compatibility
+                    transcript_text = transcript if transcript else None
+                    
+                finally:
+                    # Extra safety: ensure cleanup even if transcribe_audio didn't do it
+                    if os.path.exists(audio_file):
+                        try:
+                            os.remove(audio_file)
+                            logger.debug(f"Cleaned up audio file in batch transcriber: {audio_file}")
+                        except Exception as e:
+                            logger.error(f"Failed to clean up audio file {audio_file}: {e}")
                 
-                # Clean up temporary file
-                if os.path.exists(audio_file):
-                    os.remove(audio_file)
-                
-                if transcript:
+                if transcript_text:
                     # Success - remove from failure cache if present
                     await self._remove_from_failure_cache(audio_url)
-                    return transcript
+                    return transcript_text
                 
             except AudioNotFoundError:
                 # Don't retry 404 errors
@@ -560,3 +580,47 @@ class BatchTranscriptionService:
         
         if to_remove:
             logger.info(f"Cleaned up {len(to_remove)} old batches")
+    
+    def _start_cache_cleanup(self):
+        """Start the periodic cache cleanup task."""
+        if self._cache_cleanup_task is None:
+            self._cache_cleanup_task = asyncio.create_task(self._periodic_cache_cleanup())
+            logger.info("Started cache cleanup task")
+    
+    async def _periodic_cache_cleanup(self):
+        """Periodically clean up in-memory caches to prevent memory leaks."""
+        while True:
+            try:
+                # Clean old batches (older than 24 hours)
+                batch_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+                old_batches = [k for k, v in self._active_batches.items() 
+                              if v.get('created_at', datetime.now(timezone.utc)) < batch_cutoff]
+                for batch_id in old_batches:
+                    del self._active_batches[batch_id]
+                if old_batches:
+                    logger.info(f"Cleaned up {len(old_batches)} old batches from memory")
+                
+                # Clean old failed URLs (older than 7 days)
+                url_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                old_urls = [k for k, v in self._failed_url_cache.items()
+                           if v.get('last_attempt', datetime.now(timezone.utc)) < url_cutoff]
+                for url in old_urls:
+                    del self._failed_url_cache[url]
+                if old_urls:
+                    logger.info(f"Cleaned up {len(old_urls)} old failed URLs from cache")
+                
+                # Log current cache sizes
+                logger.debug(f"Cache sizes - Active batches: {len(self._active_batches)}, Failed URLs: {len(self._failed_url_cache)}")
+                
+                # Run every hour
+                await asyncio.sleep(3600)
+                
+            except Exception as e:
+                logger.error(f"Error in cache cleanup task: {e}", exc_info=True)
+                # Continue running even if there's an error
+                await asyncio.sleep(3600)
+    
+    def __del__(self):
+        """Cleanup when service is destroyed."""
+        if self._cache_cleanup_task and not self._cache_cleanup_task.done():
+            self._cache_cleanup_task.cancel()

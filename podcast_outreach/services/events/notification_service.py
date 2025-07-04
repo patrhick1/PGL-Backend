@@ -336,6 +336,55 @@ class NotificationService:
         )
         
         await self.websocket_manager.send_to_campaign_subscribers(campaign_id, notification)
+    
+    async def send_client_event(self, person_id: int, event_type: str, data: Dict[str, Any]):
+        """
+        Send a generic event to a specific client.
+        
+        Args:
+            person_id: The person ID to send the event to
+            event_type: The type of event (e.g., "client.discovery.started")
+            data: Event data to include
+        """
+        # Convert person_id to string for consistency with user_id
+        user_id = str(person_id)
+        
+        # Extract title and message based on event type
+        title = "Discovery Update"
+        message = "Processing your request"
+        priority = "normal"
+        
+        if event_type == "client.discovery.started":
+            title = "Discovery Started"
+            message = f"Finding podcasts for your campaign"
+        elif event_type == "client.enrichment.progress":
+            title = "Enrichment Progress"
+            message = f"Processed {data.get('completed', 0)} of {data.get('total', 0)} podcasts"
+        elif event_type == "client.matches.ready":
+            title = "Matches Ready"
+            message = f"{data.get('matches_created', 0)} new matches are ready for review"
+            priority = "high"
+        elif event_type == "client.limit.reached":
+            title = "Match Limit Reached"
+            message = "You've reached your weekly match limit. Upgrade for unlimited matches!"
+            priority = "high"
+        elif event_type == "client.discovery.failed":
+            title = "Discovery Failed"
+            message = f"An error occurred: {data.get('error', 'Unknown error')}"
+            priority = "urgent"
+        
+        notification = NotificationData(
+            id=str(uuid.uuid4()),
+            type=event_type,
+            title=title,
+            message=message,
+            data=data,
+            timestamp=datetime.utcnow(),
+            campaign_id=data.get("campaign_id"),
+            priority=priority
+        )
+        
+        await self.websocket_manager.send_to_user(user_id, notification)
 
 # Global notification service instance
 _notification_service: Optional[NotificationService] = None

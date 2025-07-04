@@ -67,3 +67,11 @@ class ClientDiscoveryStatusSchema(BaseModel):
 class ClientRequestMatchReviewSchema(BaseModel):
     campaign_id: uuid.UUID
     media_ids: List[int] = Field(..., min_items=1)
+
+# For client discovery response
+class DiscoveryStartResponse(BaseModel):
+    message: str
+    campaign_id: uuid.UUID
+    estimated_completion_minutes: int
+    tracking_endpoint: str
+    max_matches: int

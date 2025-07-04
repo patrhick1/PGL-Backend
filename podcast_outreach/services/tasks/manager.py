@@ -399,26 +399,6 @@ class TaskManager:
             logger.warning("No event loop running for ai_description_completion")
             return self._executor.submit(asyncio.run, _cleanup_wrapper())
     
-    def run_workflow_health_check(self, task_id: str):
-        """Run workflow health check to detect and fix common issues"""
-        async def _cleanup_wrapper():
-            try:
-                from podcast_outreach.services.tasks.health_checker import WorkflowHealthChecker
-                health_checker = WorkflowHealthChecker()
-                result = await health_checker.run_health_check()
-                logger.info(f"Health check completed: {result['issues_found']} issues found, {result['issues_fixed']} fixed")
-                return result
-            finally:
-                self.cleanup_task(task_id)
-        
-        try:
-            loop = asyncio.get_event_loop()
-            task = loop.create_task(_cleanup_wrapper())
-            return task
-        except RuntimeError:
-            logger.warning("No event loop running for workflow_health_check")
-            return self._executor.submit(asyncio.run, _cleanup_wrapper())
-    
     def start_task(self, task_id: str, action: str) -> None:
         with self._lock:
             self.tasks[task_id] = {
@@ -474,6 +454,68 @@ class TaskManager:
                 }
                 for task_id, info in self.tasks.items()
             }
+    
+    def run_automated_discovery(self, task_id: str):
+        """Run automated campaign discovery check"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
+                service = AutomatedDiscoveryService()
+                results = await service.check_and_run_discoveries()
+                logger.info(f"Automated discovery completed: {results}")
+                return results
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for automated_discovery")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def reset_auto_discovery_counts(self, task_id: str):
+        """Reset weekly auto-discovery counts for paid users"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
+                service = AutomatedDiscoveryService()
+                count = await service.reset_weekly_auto_discovery_counts()
+                logger.info(f"Reset auto-discovery counts for {count} users")
+                return count
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for reset_auto_discovery_counts")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def run_single_campaign_auto_discovery(self, task_id: str, campaign_id: str):
+        """Run auto-discovery for a single campaign immediately"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
+                import uuid
+                service = AutomatedDiscoveryService()
+                campaign_uuid = uuid.UUID(campaign_id)
+                results = await service.process_single_campaign(campaign_uuid)
+                logger.info(f"Single campaign auto-discovery completed for {campaign_id}: {results}")
+                return results
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for single_campaign_auto_discovery")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
     
     async def cleanup(self) -> None:
         logger.info("Cleaning up all tasks during application shutdown.")

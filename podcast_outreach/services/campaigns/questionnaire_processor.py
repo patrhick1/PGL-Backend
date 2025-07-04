@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.services.ai.gemini_client import GeminiService
 from podcast_outreach.services.campaigns.questionnaire_social_processor import QuestionnaireSocialProcessor
+from podcast_outreach.services.campaigns.angles_generator import AnglesProcessorPG
 import json # For storing as JSONB
 import re
 from datetime import datetime, timezone
@@ -199,11 +200,14 @@ Please respond with exactly 20 keywords separated by commas, no numbering or add
             logger.info(f"Generating keywords from questionnaire using LLM for campaign {campaign_id}")
             generated_keywords = await self._generate_keywords_from_questionnaire_llm(questionnaire_data)
             
-            # Update campaign with questionnaire data and LLM-generated keywords
-            # Note: We no longer generate mock interviews as bio generation uses questionnaire data directly
+            # Generate mock interview transcript
+            mock_interview_transcript = await self._generate_mock_interview_transcript(questionnaire_data)
+            
+            # Update campaign with questionnaire data, mock interview, and LLM-generated keywords
             update_data = {
                 "questionnaire_responses": questionnaire_data,
-                "questionnaire_keywords": generated_keywords
+                "questionnaire_keywords": generated_keywords,
+                "mock_interview_transcript": mock_interview_transcript
             }
             
             # Update the campaign - FIXED: use correct method name
@@ -212,6 +216,22 @@ Please respond with exactly 20 keywords separated by commas, no numbering or add
             if updated_campaign:
                 logger.info(f"Successfully processed questionnaire for campaign {campaign_id}")
                 logger.info(f"Generated {len(generated_keywords)} keywords and mock interview transcript")
+                
+                # Trigger bio and angles generation now that we have a mock interview transcript
+                angles_processor = AnglesProcessorPG()
+                try:
+                    logger.info(f"Triggering bio/angles generation for campaign {campaign_id} after questionnaire submission")
+                    bio_result = await angles_processor.process_campaign(str(campaign_id))
+                    bio_status = bio_result.get("status", "error")
+                    if bio_status == "success":
+                        logger.info(f"Successfully generated bio/angles for campaign {campaign_id}")
+                    else:
+                        logger.warning(f"Bio generation returned status: {bio_status} for campaign {campaign_id}")
+                except Exception as bio_error:
+                    logger.error(f"Error generating bio/angles for campaign {campaign_id}: {bio_error}")
+                    # Don't fail the questionnaire processing if bio generation fails
+                finally:
+                    angles_processor.cleanup()
                 
                 # Note: Background task processing can be triggered manually via the API
                 # /tasks/run/process_campaign_content?campaign_id={campaign_id}
@@ -235,6 +255,49 @@ Please respond with exactly 20 keywords separated by commas, no numbering or add
                 "success": False,
                 "error": f"Error processing questionnaire: {str(e)}"
             }
+
+    async def _generate_mock_interview_transcript(self, questionnaire_data: Dict[str, Any]) -> str:
+        """Generate a mock interview transcript from questionnaire data"""
+        try:
+            # Extract key information for transcript generation
+            contact_info = questionnaire_data.get("contactInfo", {})
+            full_name = contact_info.get("fullName", "Guest")
+            
+            professional_bio = questionnaire_data.get("professionalBio", {})
+            about_work = professional_bio.get("aboutWork", "")
+            
+            stories = questionnaire_data.get("stories", [])
+            achievements = questionnaire_data.get("achievements", [])
+            
+            # Create a structured prompt for transcript generation
+            prompt = f"""Generate a natural podcast interview transcript based on this questionnaire data:
+
+Guest Name: {full_name}
+Professional Background: {about_work}
+
+Stories Shared: {len(stories)}
+Key Achievements: {len(achievements)}
+
+Create a realistic 5-7 minute interview transcript that naturally incorporates the guest's information.
+Include both interviewer questions and guest responses.
+Make it conversational and engaging."""
+
+            response = await self.gemini_service.create_message(
+                prompt=prompt,
+                model="gemini-2.0-flash",
+                workflow="questionnaire_mock_interview"
+            )
+            
+            if response:
+                return response.strip()
+            else:
+                # Fallback to basic transcript
+                return f"Interview transcript with {full_name} discussing their expertise and achievements."
+                
+        except Exception as e:
+            logger.error(f"Error generating mock interview transcript: {e}")
+            # Return a minimal transcript so processing can continue
+            return "Mock interview transcript could not be generated from questionnaire data."
 
     async def process_questionnaire_with_social_enrichment(
         self, 
@@ -346,6 +409,38 @@ Please respond with exactly 20 keywords separated by commas, no numbering or add
             
             if success:
                 logger.info(f"Successfully updated campaign {campaign_id} with enriched data")
+                
+                # Trigger bio and angles generation if mock interview transcript exists
+                if existing_campaign.get('mock_interview_transcript'):
+                    angles_processor = AnglesProcessorPG()
+                    try:
+                        logger.info(f"Triggering bio/angles generation for campaign {campaign_id} after questionnaire submission")
+                        bio_result = await angles_processor.process_campaign(campaign_id)
+                        bio_status = bio_result.get("status", "error")
+                        if bio_status == "success":
+                            logger.info(f"Successfully generated bio/angles for campaign {campaign_id}")
+                        else:
+                            logger.warning(f"Bio generation returned status: {bio_status} for campaign {campaign_id}")
+                    except Exception as bio_error:
+                        logger.error(f"Error generating bio/angles for campaign {campaign_id}: {bio_error}")
+                        # Don't fail the questionnaire processing if bio generation fails
+                    finally:
+                        angles_processor.cleanup()
+                
+                # Trigger auto-discovery if enabled for this campaign
+                if ideal_podcast_description and existing_campaign.get('auto_discovery_enabled', True):
+                    try:
+                        from podcast_outreach.services.tasks.manager import task_manager
+                        import time
+                        
+                        task_id = f"auto_discovery_ready_{campaign_id}_{int(time.time())}"
+                        task_manager.start_task(task_id, "campaign_ready_auto_discovery")
+                        task_manager.run_single_campaign_auto_discovery(task_id, campaign_id)
+                        
+                        logger.info(f"Triggered auto-discovery for campaign {campaign_id} after questionnaire completion")
+                    except Exception as e:
+                        logger.error(f"Failed to trigger auto-discovery for campaign {campaign_id}: {e}")
+                        # Don't fail the questionnaire processing if auto-discovery fails
             else:
                 logger.error(f"Failed to update campaign {campaign_id} with enriched data")
                 

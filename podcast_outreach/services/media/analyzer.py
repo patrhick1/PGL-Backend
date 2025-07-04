@@ -9,7 +9,7 @@ import json # For debugging structured output
 
 # Project imports
 from podcast_outreach.logging_config import get_logger
-from podcast_outreach.services.ai.gemini_client import GeminiService
+from podcast_outreach.services.ai.gemini_client import GeminiService, GeminiSafetyBlockError
 from podcast_outreach.services.ai.tracker import tracker as ai_tracker
 from podcast_outreach.database.queries import episodes as episode_queries
 from podcast_outreach.database.models.llm_outputs import EpisodeAnalysisOutput
@@ -301,6 +301,28 @@ class MediaAnalyzerService:
             }
             
             logger.info(f"Podcast-level analysis complete for media {media_id}")
+            
+        except GeminiSafetyBlockError as e:
+            # Handle safety blocks specially - create a generic safe description
+            result["status"] = "safety_blocked"
+            result["message"] = f"Podcast content was blocked by safety filters for media {media_id}. Using fallback description."
+            
+            # Create a safe, generic AI description
+            safe_description = (
+                f"This podcast '{podcast_name}' features discussions on various topics. "
+                f"Due to content safety considerations, a detailed analysis could not be generated. "
+                f"Please listen to the episodes directly to learn more about the podcast's content and style."
+            )
+            
+            # Still update the database with the safe description
+            from podcast_outreach.database.queries import media as media_queries
+            await media_queries.update_media_ai_description(media_id, safe_description)
+            
+            # Log the safety block for monitoring
+            logger.warning(f"Safety block for media {media_id}: {e}")
+            
+            # Could track safety blocks in a separate table in the future
+            # For now, the safe description in the database indicates it was blocked
             
         except Exception as e:
             result["message"] = f"An error occurred during podcast analysis for media {media_id}: {str(e)}"

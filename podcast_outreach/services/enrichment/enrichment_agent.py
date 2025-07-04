@@ -84,6 +84,39 @@ class EnrichmentAgent:
         else: names = [text]
         cleaned_names = [name for name in names if name and len(name) > 1] # Basic filter for very short/empty names
         return cleaned_names if cleaned_names else None
+    
+    async def _discover_podcast_name_from_rss(self, rss_url: str) -> Optional[str]:
+        """Attempt to discover podcast name from RSS feed"""
+        try:
+            import aiohttp
+            from bs4 import BeautifulSoup
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(rss_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status != 200:
+                        return None
+                    
+                    content = await response.text()
+                    soup = BeautifulSoup(content, 'xml')
+                    
+                    # Try various title fields in RSS
+                    title_fields = ['title', 'itunes:title']
+                    for field in title_fields:
+                        title_elem = soup.find(field)
+                        if title_elem and title_elem.get_text():
+                            title = title_elem.get_text().strip()
+                            if title and title.lower() not in ['', 'none', 'null']:
+                                return title
+                    
+                    return None
+                    
+        except Exception as e:
+            logger.debug(f"Error discovering podcast name from RSS {rss_url}: {e}")
+            return None
 
     async def _discover_initial_info_with_gemini_and_tavily(
         self, 
@@ -92,6 +125,15 @@ class EnrichmentAgent:
         podcast_name = initial_data.get('name') or initial_data.get('title') or 'Unknown Podcast'
         podcast_description = initial_data.get('description', '')
         podcast_api_id = initial_data.get('api_id', initial_data.get('media_id', 'Unknown ID'))
+        
+        # If podcast name is unknown, try to discover it
+        if podcast_name == 'Unknown Podcast' and initial_data.get('rss_url'):
+            logger.info(f"Podcast name is unknown, attempting to discover from RSS URL: {initial_data.get('rss_url')}")
+            discovered_name = await self._discover_podcast_name_from_rss(initial_data.get('rss_url'))
+            if discovered_name:
+                podcast_name = discovered_name
+                logger.info(f"Discovered podcast name: {podcast_name}")
+        
         logger.info(f"Starting Gemini+Tavily discovery for {podcast_api_id} ({podcast_name})")
 
         discovery_targets = [
@@ -271,6 +313,14 @@ class EnrichmentAgent:
         # *** NEW: Process hosts immediately after discovery ***
         if gemini_output and gemini_output.host_names:
             await self._create_or_link_hosts(media_id, gemini_output.host_names)
+        
+        # Update podcast name if discovered
+        if gemini_output and gemini_output.podcast_name and podcast_name == 'Unknown Podcast':
+            podcast_name = gemini_output.podcast_name
+            # Update the initial_data so it gets saved later
+            initial_media_data['name'] = podcast_name
+            initial_media_data['title'] = podcast_name
+            logger.info(f"Updated podcast name from 'Unknown Podcast' to '{podcast_name}' for media_id: {media_id}")
         
         urls_to_scrape: Dict[str, Set[str]] = {
             'twitter': set(), 'linkedin_company': set(), 'instagram': set(),

@@ -7,6 +7,7 @@ import asyncio
 from pydantic import HttpUrl
 
 from podcast_outreach.services.media.podcast_fetcher import MediaFetcher
+from podcast_outreach.database.connection import get_background_task_pool
 # Removed task_manager as we will run the orchestrator directly
 # from podcast_outreach.services.tasks.manager import task_manager
 
@@ -38,7 +39,7 @@ class DiscoveryService:
     def __init__(self) -> None:
         self.fetcher = MediaFetcher() # MediaFetcher initializes EpisodeHandlerService
 
-    async def discover_for_campaign(self, campaign_id: str, max_matches: Optional[int] = None) -> List[tuple[int, str]]:
+    async def discover_for_campaign(self, campaign_id: str, max_matches: Optional[int] = None, is_client: bool = False, person_id: Optional[int] = None) -> List[tuple[int, str]]:
         """
         Run discovery flow for a campaign. This is the main entry point.
         1. Fetches/upserts media and creates initial match suggestions.

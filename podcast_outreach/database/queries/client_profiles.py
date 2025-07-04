@@ -18,8 +18,8 @@ async def create_client_profile(person_id: int, profile_data: Dict[str, Any]) ->
     query = """
     INSERT INTO client_profiles (
         person_id, plan_type, daily_discovery_allowance, weekly_discovery_allowance,
-        subscription_provider_id, subscription_status, subscription_ends_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        weekly_match_allowance, subscription_provider_id, subscription_status, subscription_ends_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ON CONFLICT (person_id) DO NOTHING -- Or DO UPDATE if you want to update if exists
     RETURNING *;
     """
@@ -30,11 +30,14 @@ async def create_client_profile(person_id: int, profile_data: Dict[str, Any]) ->
             plan_type = profile_data.get('plan_type', 'free')
             daily_allowance = profile_data.get('daily_discovery_allowance')
             weekly_allowance = profile_data.get('weekly_discovery_allowance')
+            weekly_match_allowance = profile_data.get('weekly_match_allowance')
 
             if daily_allowance is None:
                 daily_allowance = PAID_PLAN_DAILY_DISCOVERY_LIMIT if plan_type != 'free' else FREE_PLAN_DAILY_DISCOVERY_LIMIT
             if weekly_allowance is None:
                 weekly_allowance = PAID_PLAN_WEEKLY_DISCOVERY_LIMIT if plan_type != 'free' else FREE_PLAN_WEEKLY_DISCOVERY_LIMIT
+            if weekly_match_allowance is None:
+                weekly_match_allowance = 50  # Default value as per schema
 
             row = await conn.fetchrow(
                 query,
@@ -42,6 +45,7 @@ async def create_client_profile(person_id: int, profile_data: Dict[str, Any]) ->
                 plan_type,
                 daily_allowance,
                 weekly_allowance,
+                weekly_match_allowance,
                 profile_data.get('subscription_provider_id'),
                 profile_data.get('subscription_status'),
                 profile_data.get('subscription_ends_at')
@@ -163,3 +167,129 @@ async def increment_discovery_counts(person_id: int, discoveries_made: int = 1) 
         except Exception as e:
             logger.exception(f"Error incrementing discovery counts for person_id {person_id}: {e}")
             return False
+
+# ========== NEW MATCH TRACKING FUNCTIONS ==========
+
+async def reset_match_counts_if_needed(person_id: int) -> Optional[Dict[str, Any]]:
+    """Resets weekly match counts if the reset period has passed."""
+    profile = await get_client_profile_by_person_id(person_id)
+    if not profile:
+        return None
+
+    # Check if we have the new match tracking fields
+    if 'last_weekly_match_reset' not in profile:
+        logger.warning(f"Match tracking fields not found for person_id {person_id}. Run migration 001.")
+        return profile
+
+    today = datetime.now(timezone.utc)
+    updates = {}
+
+    # Weekly reset (Monday at midnight UTC)
+    last_reset = profile['last_weekly_match_reset']
+    if last_reset:
+        # Convert to timezone-aware if needed
+        if last_reset.tzinfo is None:
+            last_reset = last_reset.replace(tzinfo=timezone.utc)
+        
+        # Calculate start of current week (Monday)
+        days_since_monday = today.weekday()
+        start_of_current_week = today.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days_since_monday)
+        
+        if last_reset < start_of_current_week:
+            updates['current_weekly_matches'] = 0
+            updates['last_weekly_match_reset'] = start_of_current_week
+            logger.info(f"Resetting weekly match count for person_id {person_id}.")
+
+    if updates:
+        return await update_client_profile(person_id, updates)
+    return profile
+
+
+async def increment_match_count(person_id: int, matches_created: int = 1) -> bool:
+    """
+    Increments match count for a client. Returns False if limits would be exceeded.
+    Used when creating matches with vetting_score >= threshold.
+    """
+    profile = await reset_match_counts_if_needed(person_id)
+    if not profile:
+        logger.error(f"Cannot increment match count: Profile not found for person_id {person_id}")
+        return False
+
+    # Check if we have the new match tracking fields
+    if 'weekly_match_allowance' not in profile:
+        logger.warning(f"Match allowance field not found for person_id {person_id}. Run migration 001.")
+        return True  # Allow the operation to continue
+
+    # Check limits (only for free plans)
+    if profile['plan_type'] == 'free' and profile['weekly_match_allowance'] is not None:
+        current_matches = profile.get('current_weekly_matches', 0)
+        if current_matches + matches_created > profile['weekly_match_allowance']:
+            logger.warning(f"Weekly match limit would be exceeded for person_id {person_id}. Current: {current_matches}, Limit: {profile['weekly_match_allowance']}")
+            return False
+
+    # Increment count
+    update_query = """
+    UPDATE client_profiles
+    SET current_weekly_matches = COALESCE(current_weekly_matches, 0) + $1,
+        updated_at = NOW()
+    WHERE person_id = $2
+    RETURNING client_profile_id;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            updated = await conn.fetchval(update_query, matches_created, person_id)
+            if updated:
+                logger.info(f"Incremented match count by {matches_created} for person_id {person_id}.")
+                return True
+            return False
+        except Exception as e:
+            logger.exception(f"Error incrementing match count for person_id {person_id}: {e}")
+            return False
+
+
+async def get_remaining_weekly_matches(person_id: int) -> Optional[int]:
+    """
+    Get the number of remaining weekly matches for a client.
+    Returns None if unlimited (paid plans).
+    """
+    profile = await reset_match_counts_if_needed(person_id)
+    if not profile:
+        return 0
+
+    if profile['plan_type'] != 'free' or profile.get('weekly_match_allowance') is None:
+        return None  # Unlimited for paid plans
+
+    current_matches = profile.get('current_weekly_matches', 0)
+    allowance = profile.get('weekly_match_allowance', 50)  # Default to 50 if not set
+    remaining = max(0, allowance - current_matches)
+    
+    return remaining
+
+
+async def check_can_create_matches(person_id: int, matches_to_create: int) -> tuple[bool, str]:
+    """
+    Check if a client can create the specified number of matches.
+    Returns (can_create, reason_if_not)
+    """
+    profile = await reset_match_counts_if_needed(person_id)
+    if not profile:
+        return False, "Client profile not found"
+
+    # Paid plans have no limits
+    if profile['plan_type'] != 'free':
+        return True, ""
+
+    # Check if we have match tracking fields
+    if 'weekly_match_allowance' not in profile:
+        logger.warning(f"Match allowance field not found for person_id {person_id}")
+        return True, ""  # Allow if fields don't exist yet
+
+    current_matches = profile.get('current_weekly_matches', 0)
+    allowance = profile.get('weekly_match_allowance', 50)
+    
+    if current_matches + matches_to_create > allowance:
+        remaining = max(0, allowance - current_matches)
+        return False, f"Would exceed weekly match limit. You have {remaining} matches remaining this week."
+    
+    return True, ""

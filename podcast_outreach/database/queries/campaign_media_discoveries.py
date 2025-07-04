@@ -640,6 +640,7 @@ async def update_vetting_results_enhanced(
         topic_match_analysis = $5,
         vetting_criteria_scores = $6::jsonb,
         client_expertise_matched = $7,
+        vetting_error = NULL,
         vetted_at = NOW(),
         updated_at = NOW()
     WHERE id = $8

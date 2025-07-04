@@ -66,6 +66,13 @@ class WorkflowHealthChecker:
         results["issues_fixed"] += vetting_result["fixed"]
         results["details"].append(vetting_result)
         
+        # 5. Reset stuck enrichment errors
+        enrichment_errors_result = await self._reset_enrichment_errors()
+        results["checks_run"].append("enrichment_errors")
+        results["issues_found"] += enrichment_errors_result["found"]
+        results["issues_fixed"] += enrichment_errors_result["fixed"]
+        results["details"].append(enrichment_errors_result)
+        
         logger.info(f"Health check complete: {results['issues_found']} issues found, {results['issues_fixed']} fixed")
         return results
     
@@ -257,6 +264,70 @@ class WorkflowHealthChecker:
                 logger.error(f"Error resetting vetting for discovery {row['id']}: {e}")
                 result["details"].append({
                     "discovery_id": row['id'],
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        return result
+    
+    async def _reset_enrichment_errors(self) -> Dict[str, Any]:
+        """Reset discoveries with enrichment errors for retry."""
+        query = """
+        SELECT cmd.id, cmd.media_id, cmd.enrichment_error, m.name
+        FROM campaign_media_discoveries cmd
+        JOIN media m ON cmd.media_id = m.media_id
+        WHERE cmd.enrichment_status = 'failed'
+        AND cmd.enrichment_error IS NOT NULL
+        AND cmd.updated_at < NOW() - INTERVAL '30 minutes'
+        AND (
+            cmd.enrichment_error LIKE '%get_episodes_for_media%'
+            OR cmd.enrichment_error LIKE '%AttributeError%'
+            OR cmd.enrichment_error LIKE '%no attribute%'
+            OR cmd.enrichment_error LIKE '%EnrichmentOrchestrator%'
+            OR cmd.enrichment_error LIKE '%calculate_score%'
+            OR cmd.enrichment_error LIKE '%QualityService%'
+        )
+        LIMIT 50;
+        """
+        
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query)
+        
+        result = {
+            "check": "enrichment_errors",
+            "found": len(rows),
+            "fixed": 0,
+            "details": []
+        }
+        
+        for row in rows:
+            try:
+                # Reset to pending for retry
+                update_query = """
+                UPDATE campaign_media_discoveries
+                SET enrichment_status = 'pending',
+                    enrichment_error = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                """
+                async with pool.acquire() as conn:
+                    await conn.execute(update_query, row['id'])
+                
+                result["fixed"] += 1
+                result["details"].append({
+                    "discovery_id": row['id'],
+                    "media_id": row['media_id'],
+                    "media_name": row['name'],
+                    "previous_error": row['enrichment_error'][:100] + "..." if len(row['enrichment_error']) > 100 else row['enrichment_error'],
+                    "status": "reset_for_retry"
+                })
+                logger.info(f"Reset enrichment error for discovery {row['id']} (media: {row['name']})")
+            except Exception as e:
+                logger.error(f"Error resetting enrichment for discovery {row['id']}: {e}")
+                result["details"].append({
+                    "discovery_id": row['id'],
+                    "media_id": row['media_id'],
                     "status": "error",
                     "error": str(e)
                 })

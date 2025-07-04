@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime # For parsing RSS dates
 # Project-specific services and modules (UPDATED IMPORTS)
 from podcast_outreach.database.queries import media as media_queries # Use modular query
 from podcast_outreach.database.queries import episodes as episode_queries # Use modular query
-from podcast_outreach.database.connection import get_db_pool, close_db_pool # Use modular connection
+from podcast_outreach.database.connection import get_db_pool, close_db_pool, get_background_task_pool # Use modular connection
 from podcast_outreach.integrations.podscan import PodscanAPIClient # Use new integration path
 from podcast_outreach.utils.exceptions import APIClientError # Use new utils path
 from podcast_outreach.utils.data_processor import parse_date as fallback_parse_date # Use new utils path

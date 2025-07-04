@@ -148,6 +148,13 @@ def create_client_profiles_table(conn):
         current_weekly_discoveries INTEGER DEFAULT 0 NOT NULL,
         last_daily_reset          DATE DEFAULT CURRENT_DATE,
         last_weekly_reset         DATE DEFAULT CURRENT_DATE, -- Could be Monday of the week
+        -- NEW: Match tracking fields
+        weekly_match_allowance    INTEGER DEFAULT 50 NOT NULL, -- Matches allowed per week (where vetting_score > 50)
+        current_weekly_matches    INTEGER DEFAULT 0 NOT NULL,  -- Current week's match count
+        last_weekly_match_reset   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- When match count was last reset
+        -- AUTO-DISCOVERY TRACKING
+        auto_discovery_matches_this_week INTEGER DEFAULT 0, -- For paid users: track weekly auto-discoveries
+        last_auto_discovery_reset TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- When auto-discovery count was reset
         subscription_provider_id  VARCHAR(255), -- e.g., Stripe subscription ID
         subscription_status       VARCHAR(50),  -- e.g., 'active', 'canceled', 'past_due'
         subscription_ends_at      TIMESTAMPTZ,
@@ -309,10 +316,31 @@ def create_campaigns_table(conn):
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         instantly_campaign_id TEXT,
         questionnaire_responses JSONB,
-        ideal_podcast_description TEXT  -- *** NEW FIELD ***
+        ideal_podcast_description TEXT,  -- *** NEW FIELD ***
+        -- *** AUTO-DISCOVERY FIELDS ***
+        auto_discovery_enabled BOOLEAN DEFAULT TRUE,
+        auto_discovery_last_run TIMESTAMPTZ,
+        auto_discovery_status VARCHAR(50) DEFAULT 'pending',
+        -- *** RELIABILITY FIELDS FROM MIGRATION ***
+        auto_discovery_last_heartbeat TIMESTAMPTZ,
+        auto_discovery_progress JSONB DEFAULT '{}',
+        auto_discovery_error TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_campaigns_person_id ON CAMPAIGNS (person_id);
     CREATE INDEX IF NOT EXISTS idx_campaigns_embedding_hnsw ON CAMPAIGNS USING hnsw (embedding vector_cosine_ops);
+    -- AUTO-DISCOVERY INDEXES
+    CREATE INDEX IF NOT EXISTS idx_campaigns_auto_discovery 
+        ON campaigns(auto_discovery_enabled, auto_discovery_status) 
+        WHERE auto_discovery_enabled = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_campaigns_ready_for_discovery 
+        ON campaigns(ideal_podcast_description, auto_discovery_enabled) 
+        WHERE ideal_podcast_description IS NOT NULL 
+        AND ideal_podcast_description != ''
+        AND auto_discovery_enabled = TRUE;
+    -- RELIABILITY INDEX
+    CREATE INDEX IF NOT EXISTS idx_campaigns_auto_discovery_status_heartbeat 
+        ON campaigns(auto_discovery_status, auto_discovery_last_heartbeat) 
+        WHERE auto_discovery_status = 'running';
     """
     execute_sql(conn, sql_statement)
     print("Table CAMPAIGNS created/ensured.")
@@ -381,11 +409,20 @@ def create_match_suggestions(conn):
         vetting_score NUMERIC,
         vetting_reasoning TEXT,
         vetting_checklist JSONB,
-        last_vetted_at TIMESTAMPTZ
+        last_vetted_at TIMESTAMPTZ,
+        -- *** NEW CLIENT TRACKING FIELD ***
+        created_by_client BOOLEAN DEFAULT FALSE  -- Track if match was created by client discovery
     );
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_campaign_id ON match_suggestions (campaign_id);
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_media_id ON match_suggestions (media_id);
     CREATE INDEX IF NOT EXISTS idx_match_suggestions_best_episode_id ON match_suggestions (best_matching_episode_id);
+    -- NEW: Client match tracking indexes
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_created_by_client 
+        ON match_suggestions(created_by_client) 
+        WHERE created_by_client = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_match_suggestions_client_created_at 
+        ON match_suggestions(created_at, created_by_client) 
+        WHERE created_by_client = TRUE;
     """
     execute_sql(conn, sql_statement)
     print("Table MATCH_SUGGESTIONS created/ensured.")
@@ -447,11 +484,16 @@ def create_placements_table(conn): # Renamed from BOOKINGS
         go_live_date DATE,
         episode_link TEXT,
         notes TEXT,
+        email_thread JSONB DEFAULT '[]'::jsonb,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_placements_campaign_id ON placements (campaign_id);
     CREATE INDEX IF NOT EXISTS idx_placements_media_id ON placements (media_id);
-    CREATE INDEX IF NOT EXISTS idx_placements_pitch_id ON placements (pitch_id); -- <<< ADD THIS INDEX
+    CREATE INDEX IF NOT EXISTS idx_placements_pitch_id ON placements (pitch_id);
+    CREATE INDEX IF NOT EXISTS idx_placements_email_thread ON placements USING gin (email_thread);
+    COMMENT ON COLUMN placements.email_thread IS 
+    'Stores the full email conversation thread as JSONB array. Each element contains: 
+    timestamp, direction (sent/received), from, to, subject, body_text, body_html, message_id, instantly_data';
     """
     execute_sql(conn, sql_statement)
     print("Table PLACEMENTS created/ensured.")
@@ -817,24 +859,75 @@ def create_webhook_events_table(conn):
     CREATE INDEX IF NOT EXISTS idx_webhook_events_processed ON webhook_events(processed);
     """
     execute_sql(conn, sql_statement)
-    print("Table WEBHOOK_EVENTS created/ensured."))
+    print("Table WEBHOOK_EVENTS created/ensured.")
+
+def create_chatbot_conversations_table(conn):
+    """Create chatbot_conversations table for storing chatbot conversation sessions"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS chatbot_conversations (
+        conversation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        campaign_id UUID REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+        person_id INTEGER REFERENCES people(person_id) ON DELETE CASCADE,
+        status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'abandoned')),
+        conversation_phase VARCHAR(50) DEFAULT 'introduction',
+        messages JSONB DEFAULT '[]'::jsonb,
+        extracted_data JSONB DEFAULT '{}'::jsonb,
+        conversation_metadata JSONB DEFAULT '{}'::jsonb,
+        progress INTEGER DEFAULT 0,
+        started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        last_activity_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conversations_campaign_id ON chatbot_conversations(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conversations_person_id ON chatbot_conversations(person_id);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conversations_status ON chatbot_conversations(status);
+    CREATE INDEX IF NOT EXISTS idx_chatbot_conversations_last_activity ON chatbot_conversations(last_activity_at);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table CHATBOT_CONVERSATIONS created/ensured.")
+    apply_timestamp_update_trigger(conn, "chatbot_conversations")
+
+def create_conversation_insights_table(conn):
+    """Create conversation_insights table for storing extracted insights from chatbot conversations"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS conversation_insights (
+        insight_id SERIAL PRIMARY KEY,
+        conversation_id UUID REFERENCES chatbot_conversations(conversation_id) ON DELETE CASCADE,
+        insight_type VARCHAR(100), -- 'keyword', 'story', 'angle', 'achievement'
+        content JSONB NOT NULL,
+        confidence_score NUMERIC(3,2),
+        extracted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_insights_conversation_id ON conversation_insights(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_insights_type ON conversation_insights(insight_type);
+    CREATE INDEX IF NOT EXISTS idx_conversation_insights_confidence ON conversation_insights(confidence_score);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table CONVERSATION_INSIGHTS created/ensured.")
 
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
     # or essentially reverse of creation order. CASCADE should make the order less critical, but explicit order can help.
     table_names_in_drop_order = [
+        "CONVERSATION_INSIGHTS", # FK to CHATBOT_CONVERSATIONS
+        "CHATBOT_CONVERSATIONS", # FKs to CAMPAIGNS, PEOPLE
         "WEBHOOK_EVENTS",     # No FKs, drop first
         "INVOICES",           # FK to PEOPLE
         "SUBSCRIPTION_HISTORY", # FK to CLIENT_PROFILES
         "PAYMENT_METHODS",    # FK to PEOPLE
         "PRICE_PRODUCTS",     # No FKs
+        "PASSWORD_RESET_TOKENS", # FK to PEOPLE
+        "CAMPAIGN_MEDIA_DISCOVERIES", # FKs to CAMPAIGNS, MEDIA, MATCH_SUGGESTIONS
         "AI_USAGE_LOGS",      # New table, drop first if it references others
         "STATUS_HISTORY",     # FK to PLACEMENTS
         "PITCHES",            # FKs to CAMPAIGNS, MEDIA, PITCH_GENERATIONS, PLACEMENTS
         "PITCH_GENERATIONS",  # FKs to CAMPAIGNS, MEDIA, PITCH_TEMPLATES
         "PLACEMENTS",         # FKs to CAMPAIGNS, MEDIA
         "MEDIA_KITS",         # ADDED to drop order
+        "MATCH_SUGGESTIONS",  # FKs to CAMPAIGNS, MEDIA
         "PITCH_TEMPLATES",
         "EPISODES",           # FK to MEDIA
         "MEDIA_PEOPLE",       # FKs to MEDIA, PEOPLE
@@ -922,6 +1015,9 @@ def create_all_tables():
         create_invoices_table(conn)
         create_price_products_table(conn)
         create_webhook_events_table(conn)
+        # Create chatbot-related tables
+        create_chatbot_conversations_table(conn) # Depends on CAMPAIGNS, PEOPLE
+        create_conversation_insights_table(conn) # Depends on CHATBOT_CONVERSATIONS
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:

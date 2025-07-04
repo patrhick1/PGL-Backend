@@ -120,6 +120,23 @@ class TaskScheduler:
             interval_seconds=30 * 60  # 30 minutes
         ))
         
+        # Automated campaign discovery - every 30 minutes
+        self.register_task(ScheduledTask(
+            name="automated_campaign_discovery",
+            task_function=self._run_automated_discovery,
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=30 * 60  # 30 minutes
+        ))
+        
+        # Weekly reset of auto-discovery counts - Mondays at 00:00
+        self.register_task(ScheduledTask(
+            name="reset_auto_discovery_counts",
+            task_function=self._reset_auto_discovery_counts,
+            schedule_type=ScheduleType.WEEKLY,
+            day_of_week=0,  # Monday
+            time_of_day="00:00"
+        ))
+        
         logger.info(f"Registered {len(self.scheduled_tasks)} default background tasks")
     
     async def start(self):
@@ -298,6 +315,18 @@ class TaskScheduler:
         task_id = f"scheduled_health_check_{int(datetime.now().timestamp())}"
         self.task_manager.start_task(task_id, "scheduled_workflow_health_check")
         self.task_manager.run_workflow_health_check(task_id)
+    
+    async def _run_automated_discovery(self):
+        """Run automated campaign discovery check"""
+        task_id = f"scheduled_auto_discovery_{int(datetime.now().timestamp())}"
+        self.task_manager.start_task(task_id, "scheduled_automated_discovery")
+        self.task_manager.run_automated_discovery(task_id)
+    
+    async def _reset_auto_discovery_counts(self):
+        """Reset weekly auto-discovery counts for paid users"""
+        task_id = f"scheduled_reset_counts_{int(datetime.now().timestamp())}"
+        self.task_manager.start_task(task_id, "scheduled_reset_auto_discovery_counts")
+        self.task_manager.reset_auto_discovery_counts(task_id)
     
     def get_task_status(self) -> Dict[str, Any]:
         """Get status of all scheduled tasks"""

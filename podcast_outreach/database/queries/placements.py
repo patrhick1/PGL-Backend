@@ -2,7 +2,7 @@
 import logging
 from typing import Any, Dict, Optional, List, Tuple
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from podcast_outreach.logging_config import get_logger
 from podcast_outreach.database.connection import get_db_pool
@@ -13,20 +13,22 @@ async def create_placement_in_db(placement_data: Dict[str, Any]) -> Optional[Dic
     query = """
     INSERT INTO placements (
         campaign_id, media_id, current_status, status_ts, meeting_date,
-        call_date, outreach_topic, recording_date, go_live_date, episode_link, notes, pitch_id
+        call_date, outreach_topic, recording_date, go_live_date, episode_link, 
+        notes, pitch_id, email_thread
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
     ) RETURNING *;
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
+            import json
             row = await conn.fetchrow(
                 query,
                 placement_data['campaign_id'],
                 placement_data['media_id'],
                 placement_data.get('current_status', 'pending'),
-                placement_data.get('status_ts', datetime.utcnow()),
+                placement_data.get('status_ts', datetime.now(timezone.utc)),
                 placement_data.get('meeting_date'),
                 placement_data.get('call_date'),
                 placement_data.get('outreach_topic'),
@@ -34,7 +36,8 @@ async def create_placement_in_db(placement_data: Dict[str, Any]) -> Optional[Dic
                 placement_data.get('go_live_date'),
                 placement_data.get('episode_link'),
                 placement_data.get('notes'),
-                placement_data.get('pitch_id') # New field
+                placement_data.get('pitch_id'),
+                json.dumps(placement_data.get('email_thread', [])) if placement_data.get('email_thread') else '[]'
             )
             logger.info(f"Placement created: {row.get('placement_id')}")
             return dict(row) if row else None
@@ -73,7 +76,7 @@ async def update_placement_in_db(placement_id: int, update_data: Dict[str, Any])
     # Always update status_ts if current_status is being updated
     if 'current_status' in update_data and 'status_ts' not in update_data:
         set_clauses.append(f"status_ts = ${idx}")
-        values.append(datetime.utcnow())
+        values.append(datetime.now(timezone.utc))
         idx +=1
 
     set_clause_str = ", ".join(set_clauses)
@@ -278,3 +281,6 @@ async def get_placements_paginated( # Modified to accept person_id_for_campaign_
         except Exception as e:
             logger.exception(f"Error fetching paginated placements: {e}")
             return [], 0
+# Alias for backward compatibility
+create_placement = create_placement_in_db
+update_placement = update_placement_in_db

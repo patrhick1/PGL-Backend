@@ -6,13 +6,15 @@ from datetime import datetime, date
 import uuid # For UUID types if needed for related entities
 
 from podcast_outreach.logging_config import get_logger
-from podcast_outreach.database.connection import get_db_pool
+from podcast_outreach.database.connection import get_db_pool, get_background_task_pool
+import asyncpg
 
 logger = get_logger(__name__)
 
-async def get_media_by_id_from_db(media_id: int) -> Optional[Dict[str, Any]]:
+async def get_media_by_id_from_db(media_id: int, pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM media WHERE media_id = $1;"
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, media_id)
@@ -24,9 +26,10 @@ async def get_media_by_id_from_db(media_id: int) -> Optional[Dict[str, Any]]:
             logger.exception(f"Error fetching media {media_id}: {e}")
             raise
 
-async def get_media_by_rss_url_from_db(rss_url: str) -> Optional[Dict[str, Any]]:
+async def get_media_by_rss_url_from_db(rss_url: str, pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM media WHERE rss_url = $1;"
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, rss_url)
@@ -65,7 +68,7 @@ async def delete_media_from_db(media_id: int) -> bool:
             logger.exception(f"Error deleting media {media_id} from DB: {e}")
             raise
 
-async def upsert_media_in_db(media_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def upsert_media_in_db(media_data: Dict[str, Any], pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     """
     Atomically creates a new media record or updates an existing one based on the `api_id`.
     This version uses a standard, non-dynamic ON CONFLICT statement for robustness.
@@ -128,7 +131,8 @@ async def upsert_media_in_db(media_data: Dict[str, Any]) -> Optional[Dict[str, A
     RETURNING *;
     """
     
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             # Important: Ensure the number of values in the `values` list
@@ -197,7 +201,7 @@ async def get_media_to_sync_episodes(interval_hours: int = 24) -> List[Dict[str,
     query = """
     SELECT media_id, name, rss_url, api_id, source_api
     FROM media
-    WHERE last_fetched_at IS NULL OR last_fetched_at < NOW() - INTERVAL '$1 hours'
+    WHERE last_fetched_at IS NULL OR last_fetched_at < NOW() - make_interval(hours => $1)
     ORDER BY last_fetched_at ASC NULLS FIRST
     LIMIT 50; -- Limit to a reasonable batch size
     """
@@ -349,11 +353,29 @@ async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, A
                 # Clear the URL field
                 cleaned_fields[field] = None
 
+    # Known JSONB fields in the media table that need JSON serialization
+    jsonb_fields = {
+        'host_names_discovery_sources', 
+        'host_names_discovery_confidence',
+        'notification_settings',
+        'privacy_settings',
+        'social_media_stats',
+        'enrichment_metadata'
+    }
+    
     set_clauses = []
     values = []
     idx = 1
     for key, val in cleaned_fields.items():
         if key in ["media_id", "created_at", "updated_at", "last_enriched_timestamp"]: continue
+        
+        # For JSONB fields, asyncpg needs JSON strings, not Python objects
+        if key in jsonb_fields and val is not None:
+            if isinstance(val, (list, dict)):
+                import json
+                val = json.dumps(val)
+            # If it's already a string (pre-serialized JSON), leave it as is
+        
         set_clauses.append(f"{key} = ${idx}")
         values.append(val)
         idx += 1
@@ -392,6 +414,11 @@ async def update_media_enrichment_data(media_id: int, update_fields: Dict[str, A
                 
             return dict(row) if row else None
         except Exception as e:
+            # Enhanced error logging to debug data type issues
+            if "expected str, got list" in str(e) or "invalid input for query argument" in str(e):
+                logger.error(f"Data type error updating media {media_id}. Query: {query}")
+                logger.error(f"Values passed: {[f'${i+1}: {v} (type: {type(v).__name__})' for i, v in enumerate(values)]}")
+                logger.error(f"Update fields: {list(cleaned_fields.keys())}")
             logger.exception(f"Error updating media {media_id} enrichment data: {e}")
             raise
 
@@ -629,7 +656,7 @@ async def link_person_to_media(media_id: int, person_id: int, role: str) -> bool
             logger.error(f"Error linking person {person_id} to media {media_id}: {e}", exc_info=True)
             return False
 
-async def check_campaign_media_discovery_exists(campaign_id: uuid.UUID, media_id: int) -> bool:
+async def check_campaign_media_discovery_exists(campaign_id: uuid.UUID, media_id: int, pool: Optional[asyncpg.Pool] = None) -> bool:
     """
     Check if a campaign-media discovery record already exists.
     """
@@ -639,7 +666,8 @@ async def check_campaign_media_discovery_exists(campaign_id: uuid.UUID, media_id
         WHERE campaign_id = $1 AND media_id = $2
     );
     """
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             result = await conn.fetchval(query, campaign_id, media_id)
@@ -648,7 +676,7 @@ async def check_campaign_media_discovery_exists(campaign_id: uuid.UUID, media_id
             logger.debug(f"Could not check campaign media discovery (table may not exist): {e}")
             return False
 
-async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, keyword: str) -> bool:
+async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, keyword: str, pool: Optional[asyncpg.Pool] = None) -> bool:
     """
     Track that a media was discovered for a campaign during discovery phase.
     This will be used later to create match suggestions after enrichment.
@@ -663,7 +691,8 @@ async def track_campaign_media_discovery(campaign_id: uuid.UUID, media_id: int, 
         discovered_at = NOW()
     RETURNING (xmax = 0) AS inserted;
     """
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             result = await conn.fetchrow(query, campaign_id, media_id, keyword)

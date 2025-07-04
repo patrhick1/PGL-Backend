@@ -5,9 +5,38 @@ import json
 from datetime import date, datetime, timezone # Ensure timezone is imported
 
 from podcast_outreach.logging_config import get_logger
-from podcast_outreach.database.connection import get_db_pool
+from podcast_outreach.database.connection import get_db_pool, get_background_task_pool
+import asyncpg
 
 logger = get_logger(__name__)
+
+def _process_campaign_row(row: dict, campaign_id: Optional[uuid.UUID] = None) -> dict:
+    """Helper function to process campaign row data, handling JSONB deserialization."""
+    processed_row = dict(row)
+    
+    # Handle JSONB fields deserialization
+    jsonb_fields = ['questionnaire_responses', 'auto_discovery_progress']
+    for field in jsonb_fields:
+        if field in processed_row and isinstance(processed_row[field], str):
+            try:
+                processed_row[field] = json.loads(processed_row[field])
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse {field} for campaign {campaign_id or 'unknown'}: {e}. Leaving as string or None.")
+    
+    # Handle embedding conversion
+    if processed_row.get('embedding') and isinstance(processed_row['embedding'], str):
+        try:
+            import numpy as np
+            # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
+            processed_row['embedding'] = np.array(eval(processed_row['embedding']))
+        except:
+            try:
+                processed_row['embedding'] = np.array(json.loads(processed_row['embedding']))
+            except:
+                logger.warning(f"Could not parse embedding for campaign {campaign_id or 'unknown'}")
+                processed_row['embedding'] = None
+    
+    return processed_row
 
 async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     query = """
@@ -72,9 +101,10 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
             logger.exception(f"Error creating campaign (ID: {campaign_data.get('campaign_id')}) in DB: {e}")
             raise
 
-async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+async def get_campaign_by_id(campaign_id: uuid.UUID, pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM campaigns WHERE campaign_id = $1;"
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, campaign_id)
@@ -82,46 +112,25 @@ async def get_campaign_by_id(campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]
                 logger.warning(f"Campaign not found: {campaign_id}")
                 return None
             
-            # Process the row to convert JSON string to dict if necessary
-            processed_row = dict(row)
-            if "questionnaire_responses" in processed_row and isinstance(processed_row["questionnaire_responses"], str):
-                try:
-                    processed_row["questionnaire_responses"] = json.loads(processed_row["questionnaire_responses"])
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse questionnaire_responses for campaign {campaign_id}: {e}. Leaving as string or None.")
-                    # Depending on strictness, you might set it to None or leave as is, or re-raise
-            
-            # Handle embedding conversion
-            if processed_row.get('embedding') and isinstance(processed_row['embedding'], str):
-                try:
-                    import numpy as np
-                    # PostgreSQL returns vectors as strings like '[0.1, 0.2, ...]'
-                    processed_row['embedding'] = np.array(eval(processed_row['embedding']))
-                except:
-                    try:
-                        processed_row['embedding'] = np.array(json.loads(processed_row['embedding']))
-                    except:
-                        logger.warning(f"Could not parse embedding for campaign {campaign_id}")
-                        processed_row['embedding'] = None
-            
-            return processed_row
+            return _process_campaign_row(row, campaign_id)
         except Exception as e:
             logger.exception(f"Error fetching campaign {campaign_id}: {e}")
             raise
 
-async def get_campaigns_by_person_id(person_id: int) -> List[Dict[str, Any]]:
-    """Get all campaigns for a specific person."""
+async def get_campaigns_by_person_id(person_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Get campaigns for a specific person with a safety limit."""
     query = """
     SELECT * FROM campaigns 
     WHERE person_id = $1
-    ORDER BY created_at DESC;
+    ORDER BY created_at DESC
+    LIMIT $2;
     """
     
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, person_id)
-            return [dict(row) for row in rows]
+            rows = await conn.fetch(query, person_id, limit)
+            return [_process_campaign_row(row) for row in rows]
         except Exception as e:
             logger.exception(f"Error fetching campaigns for person {person_id}: {e}")
             return []
@@ -191,7 +200,7 @@ async def get_all_campaigns_from_db(
             # Consider re-raising or returning empty list based on desired error handling
             raise
 
-async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any], pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     if not update_fields:
         logger.warning(f"No update data for campaign {campaign_id}. Fetching current.")
         return await get_campaign_by_id(campaign_id)
@@ -224,15 +233,20 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
             # Convert list of floats to pgvector-compatible string format '[f1,f2,...]'
             val = str(val).replace(" ", "") # Ensure no spaces, pgvector is sensitive
 
-        if key == "questionnaire_responses":
+        # Handle JSONB fields that need serialization
+        jsonb_fields = {'questionnaire_responses', 'auto_discovery_progress'}
+        
+        if key in jsonb_fields:
             if isinstance(val, dict):
                 val = json.dumps(val) # Serialize to JSON string for update
+            elif isinstance(val, list):
+                val = json.dumps(val) # Also handle lists
             elif val is None:
                 pass # Keep as None
             else:
-                logger.warning(f"Updating questionnaire_responses for campaign {campaign_id} with non-dict/non-None value of type {type(val)}. This might cause issues if not a valid JSON string.")
-                # If `val` is already a string, assume it's a valid JSON string.
-                # If it's something else, it might error or be cast by DB.
+                # If it's already a string, assume it's valid JSON
+                if not isinstance(val, str):
+                    logger.warning(f"Updating {key} for campaign {campaign_id} with non-dict/non-list/non-None value of type {type(val)}. This might cause issues if not a valid JSON string.")
 
         set_clauses.append(f"{key} = ${idx}")
         values.append(val)
@@ -245,7 +259,8 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
     query = f"UPDATE campaigns SET {set_clause_str} WHERE campaign_id = ${idx} RETURNING *;"
     values.append(campaign_id)
 
-    pool = await get_db_pool()
+    if pool is None:
+        pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(query, *values)
@@ -253,13 +268,7 @@ async def update_campaign(campaign_id: uuid.UUID, update_fields: Dict[str, Any])
                 logger.warning(f"Campaign {campaign_id} not found after update or update returned no rows.")
                 return None
             
-            processed_row = dict(row)
-            if "questionnaire_responses" in processed_row and isinstance(processed_row["questionnaire_responses"], str):
-                try:
-                    processed_row["questionnaire_responses"] = json.loads(processed_row["questionnaire_responses"])
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse questionnaire_responses for updated campaign {campaign_id}: {e}. Leaving as string or None.")
-            
+            processed_row = _process_campaign_row(row, campaign_id)
             logger.info(f"Campaign updated: {campaign_id} with fields: {list(update_fields.keys())}")
             return processed_row
 
@@ -334,7 +343,7 @@ async def get_campaigns_with_embeddings(limit: int = 200, offset: int = 0, perso
             rows = await conn.fetch(query_sql, *final_query_params)
             total_count_record = await conn.fetchrow(count_sql, *final_count_params)
             total = total_count_record['count'] if total_count_record else 0
-            return [dict(row) for row in rows], total
+            return [_process_campaign_row(row) for row in rows], total
         except Exception as e:
             logger.error(f"Error fetching campaigns with embeddings (person_id: {person_id}): {e}", exc_info=True)
             return [], 0
@@ -350,3 +359,81 @@ async def update_campaign_status(campaign_id: uuid.UUID, status: str, status_mes
     logger.info(f"Attempting to update status for campaign {campaign_id} to '{status}' with message: '{status_message}'. This function is a placeholder.")
     # For now, just fetch and return the campaign as no actual status fields are defined for update here.
     return await get_campaign_by_id(campaign_id)
+
+async def update_campaign_questionnaire_data(campaign_id: str, questionnaire_data: Dict[str, Any],
+                                           mock_interview_transcript: str, questionnaire_keywords: List[str],
+                                           ideal_podcast_description: str) -> bool:
+    """Update campaign with questionnaire/chatbot data"""
+    query = """
+    UPDATE campaigns
+    SET questionnaire_responses = $1,
+        mock_interview_transcript = $2,
+        questionnaire_keywords = $3,
+        ideal_podcast_description = $4,
+        campaign_keywords = COALESCE(campaign_keywords, '{}') || $3
+    WHERE campaign_id = $5
+    RETURNING campaign_id;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Convert questionnaire_data to JSON string
+            questionnaire_json = json.dumps(questionnaire_data) if isinstance(questionnaire_data, dict) else questionnaire_data
+            
+            row = await conn.fetchrow(
+                query, 
+                questionnaire_json,
+                mock_interview_transcript,
+                questionnaire_keywords,
+                ideal_podcast_description,
+                uuid.UUID(campaign_id)
+            )
+            
+            if row:
+                logger.info(f"Updated questionnaire data for campaign {campaign_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.exception(f"Error updating campaign questionnaire data: {e}")
+            raise
+
+async def update_campaign_keywords(campaign_id: str, keywords: List[str]) -> bool:
+    """Update campaign keywords (auto-save from chatbot)"""
+    query = """
+    UPDATE campaigns
+    SET campaign_keywords = COALESCE(campaign_keywords, '{}') || $1
+    WHERE campaign_id = $2
+    RETURNING campaign_id;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            # Remove duplicates while preserving order
+            existing = await conn.fetchval(
+                "SELECT campaign_keywords FROM campaigns WHERE campaign_id = $1",
+                uuid.UUID(campaign_id)
+            )
+            
+            if existing:
+                all_keywords = list(existing) + keywords
+                unique_keywords = list(dict.fromkeys(all_keywords))  # Remove duplicates
+            else:
+                unique_keywords = keywords
+            
+            # Update with unique keywords
+            update_query = """
+            UPDATE campaigns
+            SET campaign_keywords = $1
+            WHERE campaign_id = $2
+            RETURNING campaign_id;
+            """
+            
+            row = await conn.fetchrow(update_query, unique_keywords, uuid.UUID(campaign_id))
+            
+            if row:
+                logger.info(f"Updated keywords for campaign {campaign_id}: {len(unique_keywords)} total")
+                return True
+            return False
+        except Exception as e:
+            logger.exception(f"Error updating campaign keywords: {e}")
+            raise

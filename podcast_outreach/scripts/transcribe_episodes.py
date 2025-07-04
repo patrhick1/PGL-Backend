@@ -89,8 +89,11 @@ async def run_transcription_logic(db_service=None):
             for media_id in media_ids_analyzed:
                 logger.info(f"Running podcast-level analysis for media {media_id}")
                 podcast_analysis_result = await analyzer.analyze_podcast_from_episodes(media_id)
-                if podcast_analysis_result.get("status") == "success":
+                status = podcast_analysis_result.get("status")
+                if status == "success":
                     logger.info(f"Podcast-level analysis successful for media {media_id}")
+                elif status == "safety_blocked":
+                    logger.warning(f"Podcast-level analysis blocked by safety filters for media {media_id}. Using fallback description.")
                 else:
                     logger.warning(f"Podcast-level analysis failed for media {media_id}: {podcast_analysis_result.get('message')}")
         else:
@@ -109,6 +112,20 @@ async def process_single_episode_with_retry(
     episode_id = ep["episode_id"]
     media_id = ep["media_id"]
     local_audio_path = None
+    
+    # Check duration before processing
+    from podcast_outreach.config import MAX_EPISODE_DURATION_SEC
+    duration_sec = ep.get("duration_sec", 0)
+    if duration_sec and duration_sec > MAX_EPISODE_DURATION_SEC:
+        logger.warning(f"Skipping episode {episode_id} - duration {duration_sec}s exceeds max {MAX_EPISODE_DURATION_SEC}s")
+        from podcast_outreach.database.queries.episodes import mark_episode_as_failed
+        await mark_episode_as_failed(
+            episode_id,
+            error_type='failed_temp',
+            error_message=f"Episode too long: {duration_sec}s (max: {MAX_EPISODE_DURATION_SEC}s)",
+            pool=pool_to_use
+        )
+        return False
     
     for attempt in range(max_retries + 1):  # +1 because we want max_retries actual retries
         try:
@@ -247,11 +264,45 @@ async def process_single_episode_with_retry(
             # Success - episode processed successfully
             return True
 
+        except MemoryError as e:
+            # Memory errors should not be retried - mark episode as failed
+            logger.error(f"Memory error processing episode {episode_id}: {e}")
+            from podcast_outreach.database.queries.episodes import mark_episode_as_failed
+            await mark_episode_as_failed(
+                episode_id, 
+                error_type='failed_temp',
+                error_message=f"Memory error: {str(e)}",
+                pool=pool_to_use
+            )
+            return False  # Don't retry memory errors
+        except ValueError as e:
+            # Check if it's a file size error
+            if "Audio file too large" in str(e):
+                logger.warning(f"Episode {episode_id} file is too large: {e}")
+                from podcast_outreach.database.queries.episodes import mark_episode_as_failed
+                await mark_episode_as_failed(
+                    episode_id,
+                    error_type='failed_temp',
+                    error_message=f"File too large: {str(e)}",
+                    pool=pool_to_use
+                )
+                return False  # Don't retry file size errors
+            else:
+                # Re-raise other ValueErrors
+                raise
         except Exception as e:
             if attempt < max_retries:
                 logger.warning(f"Error processing episode {episode_id} (attempt {attempt + 1}): {e}. Will retry.")
             else:
                 logger.exception(f"Error processing episode {episode_id} after {max_retries} retries: {e}")
+                # Mark as failed after all retries exhausted
+                from podcast_outreach.database.queries.episodes import mark_episode_as_failed
+                await mark_episode_as_failed(
+                    episode_id,
+                    error_type='failed_temp',
+                    error_message=f"Failed after {max_retries} retries: {str(e)}",
+                    pool=pool_to_use
+                )
                 return False
         finally:
             if local_audio_path and os.path.exists(local_audio_path):

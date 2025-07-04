@@ -15,7 +15,8 @@ from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import media as media_queries
 from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_tasks_queries
-from podcast_outreach.database.connection import get_db_pool, close_db_pool # For main function
+from podcast_outreach.database.connection import get_db_pool, close_db_pool, get_background_task_pool # For main function
+import asyncpg
 
 from podcast_outreach.services.ai.openai_client import OpenAIService
 from podcast_outreach.integrations.listen_notes import ListenNotesAPIClient
@@ -59,12 +60,13 @@ def _sanitize_numeric_string(value: Any, target_type: type = float) -> Optional[
 class MediaFetcher:
     """Fetch podcasts from external APIs and store them in PostgreSQL."""
 
-    def __init__(self) -> None:
+    def __init__(self, db_pool: Optional[asyncpg.Pool] = None) -> None:
         self.openai_service = OpenAIService()
         self.listennotes_client = ListenNotesAPIClient()
         self.podscan_client = PodscanAPIClient()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         self.episode_handler_service = EpisodeHandlerService() # ENSURED INITIALIZATION
+        self.db_pool = db_pool  # Store the pool for use in queries
         logger.info("MediaFetcher services initialized")
 
     async def _run_in_executor(self, func, *args, **kwargs):
@@ -224,12 +226,12 @@ class MediaFetcher:
         existing_media = None
         if rss_url:
             logger.debug(f"_get_existing_media (source: {source_api}): Attempting fetch by RSS: {rss_url}")
-            existing_media = await media_queries.get_media_by_rss_url_from_db(rss_url)
+            existing_media = await media_queries.get_media_by_rss_url_from_db(rss_url, pool=self.db_pool)
             logger.debug(f"_get_existing_media (source: {source_api}): Result from RSS fetch for '{rss_url}': {'Found (media_id: ' + str(existing_media.get('media_id')) + ')' if existing_media else 'Not Found'}")
         
         if not existing_media and api_id_val and source_api:
             logger.debug(f"_get_existing_media (source: {source_api}): Not found by RSS (or RSS not provided). Attempting fetch by api_id='{api_id_val}'")
-            pool = await get_db_pool() 
+            pool = self.db_pool if self.db_pool else await get_db_pool() 
             async with pool.acquire() as conn:
                 query_existing_api = "SELECT * FROM media WHERE api_id = $1 AND source_api = $2;"
                 try:
@@ -266,7 +268,14 @@ class MediaFetcher:
 
         # Update direct fields from the current API source
         if source_api == "ListenNotes":
-            enriched['name'] = html.unescape(str(initial_data.get('title_original', enriched.get('name', '')))).strip()
+            # Try multiple fields for name with fallback chain
+            name_value = (initial_data.get('title_original') or 
+                         initial_data.get('title') or 
+                         initial_data.get('name') or 
+                         enriched.get('name', ''))
+            enriched['name'] = html.unescape(str(name_value)).strip()
+            # Also set title field for compatibility
+            enriched['title'] = enriched['name']
             enriched['description'] = html.unescape(str(initial_data.get('description_original', enriched.get('description', '')))).strip() or None
             enriched['rss_url'] = initial_data.get('rss') or enriched.get('rss_url')
             enriched['itunes_id'] = str(initial_data.get('itunes_id', enriched.get('itunes_id', ''))).strip() or None
@@ -290,7 +299,14 @@ class MediaFetcher:
                 enriched['category'] = initial_data['genres'][0]
             enriched['api_id'] = str(initial_data.get('id', enriched.get('api_id', ''))).strip() # Ensure current source's API ID is set
         elif source_api == "PodscanFM":
-            enriched['name'] = html.unescape(str(initial_data.get('podcast_name', enriched.get('name', '')))).strip()
+            # Try multiple fields for name with fallback chain
+            name_value = (initial_data.get('podcast_name') or 
+                         initial_data.get('name') or 
+                         initial_data.get('title') or 
+                         enriched.get('name', ''))
+            enriched['name'] = html.unescape(str(name_value)).strip()
+            # Also set title field for compatibility
+            enriched['title'] = enriched['name']
             enriched['description'] = html.unescape(str(initial_data.get('podcast_description', enriched.get('description', '')))).strip() or None
             enriched['rss_url'] = initial_data.get('rss_url') or enriched.get('rss_url')
             enriched['itunes_id'] = str(initial_data.get('podcast_itunes_id', enriched.get('itunes_id', ''))).strip() or None
@@ -456,7 +472,7 @@ class MediaFetcher:
 
         try:
             logger.debug(f"merge_and_upsert_media: Calling upsert_media_in_db for '{media_name_for_log}'.")
-            media = await media_queries.upsert_media_in_db(podcast_data)
+            media = await media_queries.upsert_media_in_db(podcast_data, pool=self.db_pool)
             if media and media.get('media_id'):
                 logger.info(f"merge_and_upsert_media: Media upserted/updated: '{media.get('name')}' (ID: {media['media_id']}) from source {podcast_data.get('source_api')}")
                 
@@ -751,11 +767,11 @@ class MediaFetcher:
                 break
             
             # Check if this campaign-media discovery already exists
-            exists = await media_queries.check_campaign_media_discovery_exists(campaign_uuid, media_id)
+            exists = await media_queries.check_campaign_media_discovery_exists(campaign_uuid, media_id, pool=self.db_pool)
             
             if not exists:
                 # Create new discovery record
-                discovery_created = await media_queries.track_campaign_media_discovery(campaign_uuid, media_id, keyword)
+                discovery_created = await media_queries.track_campaign_media_discovery(campaign_uuid, media_id, keyword, pool=self.db_pool)
                 if discovery_created:
                     new_discoveries_count += 1
                     media_with_new_discoveries.append((media_id, keyword))
@@ -1053,7 +1069,7 @@ class MediaFetcher:
                                 if ln_item_id: processed_api_items_this_admin_call.add(ln_item_id)
                                 # WORKFLOW OPTIMIZATION: Track discovery for later match creation
                                 if campaign_id_for_association: # Only track if admin specified a campaign
-                                    await media_queries.track_campaign_media_discovery(campaign_id_for_association, media_id, keyword)
+                                    await media_queries.track_campaign_media_discovery(campaign_id_for_association, media_id, keyword, pool=self.db_pool)
                         
                         ln_has_more = response.get('has_next', False)
                         ln_offset = response.get('next_offset', ln_offset + LISTENNOTES_PAGE_SIZE) if ln_has_more else ln_offset
@@ -1128,7 +1144,7 @@ class MediaFetcher:
             unique_discovered_media_db_ids = list(set(discovered_media_db_ids))
             logger.info(f"Fetching {len(unique_discovered_media_db_ids)} unique media records from DB for admin response.")
             for m_id in unique_discovered_media_db_ids:
-                media_record = await media_queries.get_media_by_id_from_db(m_id)
+                media_record = await media_queries.get_media_by_id_from_db(m_id, pool=self.db_pool)
                 if media_record:
                     final_media_records.append(media_record)
             

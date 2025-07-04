@@ -9,12 +9,21 @@ FORCED_LOG_LEVEL = "INFO"
 # Get log level from environment variable, fallback to the forced level
 LOG_LEVEL = os.environ.get("LOG_LEVEL", FORCED_LOG_LEVEL).upper()
 
+class UvicornFormatter(logging.Formatter):
+    """Custom formatter that renames uvicorn.error to uvicorn for cleaner logs"""
+    def format(self, record):
+        # Rename uvicorn.error to just uvicorn for cleaner output
+        if record.name == 'uvicorn.error':
+            record.name = 'uvicorn'
+        return super().format(record)
+
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False, # Ensure other loggers (like uvicorn) aren't disabled
     "formatters": {
         "default": {
-            "format": "%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s" # Added module and lineno
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s", # Added module and lineno
+            "()": UvicornFormatter  # Use our custom formatter
         }
     },
     "handlers": {

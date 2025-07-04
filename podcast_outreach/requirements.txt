@@ -67,6 +67,7 @@ passlib==1.7.4
 propcache==0.3.1
 proto-plus==1.26.1
 protobuf==5.29.4
+psutil==5.9.5
 psycopg2-binary==2.9.10
 pyasn1==0.6.1
 pyasn1_modules==0.4.2

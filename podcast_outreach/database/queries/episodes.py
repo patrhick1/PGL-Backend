@@ -5,6 +5,7 @@ import json
 import numpy as np
 from typing import Any, Dict, Optional, List, Set, Tuple
 from datetime import datetime, date
+import asyncpg
  
 from podcast_outreach.database.connection import get_db_pool, get_background_task_pool
  
@@ -659,19 +660,20 @@ async def get_most_recent_episode_for_media(media_id: int) -> Optional[Dict[str,
             return None
 
 
-async def get_episodes_with_embeddings_for_media(media_id: int) -> List[Dict[str, Any]]:
-    """Get all episodes with embeddings for a specific media."""
+async def get_episodes_with_embeddings_for_media(media_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Get episodes with embeddings for a specific media with a safety limit."""
     query = """
     SELECT episode_id, title, publish_date, embedding
     FROM episodes
     WHERE media_id = $1 
     AND embedding IS NOT NULL
-    ORDER BY publish_date DESC;
+    ORDER BY publish_date DESC
+    LIMIT $2;
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, media_id)
+            rows = await conn.fetch(query, media_id, limit)
             results = []
             for row in rows:
                 episode = dict(row)
@@ -703,3 +705,39 @@ async def get_episodes_with_embeddings_for_media(media_id: int) -> List[Dict[str
             logger.error(f"Error fetching episodes with embeddings for media {media_id}: {e}")
             return []
 
+
+async def mark_episode_as_failed(episode_id: int, error_type: str = 'failed_temp', error_message: str = '', pool: Optional[asyncpg.Pool] = None) -> bool:
+    """
+    Mark an episode as failed and update its audio URL status.
+    This is used when transcription fails due to memory or other issues.
+    """
+    if pool is None:
+        pool = await get_db_pool()
+    
+    query = """
+    UPDATE episodes 
+    SET 
+        audio_url_status = $2,
+        audio_url_last_checked = CURRENT_TIMESTAMP,
+        audio_url_failure_count = audio_url_failure_count + 1,
+        audio_url_last_error = $3,
+        transcribe = FALSE  -- Don't try to transcribe again
+    WHERE episode_id = $1
+    RETURNING episode_id;
+    """
+    
+    async with pool.acquire() as conn:
+        try:
+            # Truncate error message to prevent database overflow
+            truncated_error = error_message[:500] if error_message else ''
+            
+            result = await conn.fetchval(query, episode_id, error_type, truncated_error)
+            if result:
+                logger.info(f"Marked episode {episode_id} as {error_type} with error: {truncated_error}")
+                return True
+            else:
+                logger.warning(f"Failed to mark episode {episode_id} as failed - episode not found")
+                return False
+        except Exception as e:
+            logger.error(f"Error marking episode {episode_id} as failed: {e}")
+            return False

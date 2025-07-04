@@ -7,6 +7,7 @@ class GeminiPodcastEnrichment(BaseModel):
     Pydantic model for structured output from Gemini during the initial podcast/host
     information discovery phase (e.g., finding social URLs, host names).
     """
+    podcast_name: Optional[str] = Field(None, description="The official name of the podcast.")
     podcast_twitter_url: Optional[str] = Field(None, description="Official Twitter/X URL for the podcast found by Gemini.")
     podcast_linkedin_url: Optional[str] = Field(None, description="Official LinkedIn URL for the podcast (e.g., company page) found by Gemini.")
     podcast_instagram_url: Optional[str] = Field(None, description="Official Instagram URL for the podcast found by Gemini.")

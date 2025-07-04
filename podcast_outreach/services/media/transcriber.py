@@ -12,11 +12,13 @@ from pathlib import Path
 import pydub
 from pydub import AudioSegment
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, DeadlineExceeded, InternalServerError
 from urllib.parse import urlparse
 import time
 import functools
 import uuid
+import contextlib
+import random
 
 # Custom exception for permanent audio errors
 class AudioNotFoundError(Exception):
@@ -30,6 +32,7 @@ from podcast_outreach.services.matches.match_creation import MatchCreationServic
 from podcast_outreach.services.enrichment.quality_score import QualityService
 from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
 from podcast_outreach.config import ORCHESTRATOR_CONFIG, FFMPEG_PATH, FFPROBE_PATH
+from podcast_outreach.utils.memory_monitor import check_memory_usage, memory_guard, cleanup_memory
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +50,29 @@ else:
     logger.warning(f"ffprobe not found at configured path or path not set. Using system default if available.")
 
 
+@contextlib.contextmanager
+def temp_audio_file(suffix=".mp3"):
+    """Context manager for temporary audio files with guaranteed cleanup."""
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp_path = tmp_file.name
+    tmp_file.close()
+    try:
+        yield tmp_path
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+                logger.debug(f"Cleaned up temp file: {tmp_path}")
+            except Exception as e:
+                logger.error(f"Failed to clean up temp file {tmp_path}: {e}")
+
+
 class MediaTranscriber:
     """Utility class for downloading and transcribing podcast audio using Gemini."""
 
     MAX_RETRIES = 3
     RETRY_DELAY = 5
-    MAX_CHUNK_CONCURRENCY = int(os.getenv("CHUNK_CONCURRENCY", "10"))
+    MAX_CHUNK_CONCURRENCY = int(os.getenv("CHUNK_CONCURRENCY", "3"))  # Reduced from 10 to 3
     MAX_SINGLE_CHUNK_DURATION_MINUTES = 59 # Gemini 1.5 has a 1-hour limit per file
     DEFAULT_CHUNK_MINUTES = 45
     DEFAULT_OVERLAP_SECONDS = 30
@@ -65,7 +85,7 @@ class MediaTranscriber:
             raise ValueError("GEMINI_API_KEY is required.")
         
         self._openai_service = OpenAIService()
-        self._gemini_api_semaphore = asyncio.Semaphore(int(os.getenv("GEMINI_API_CONCURRENCY", "10")))
+        self._gemini_api_semaphore = asyncio.Semaphore(int(os.getenv("GEMINI_API_CONCURRENCY", "3")))  # Reduced from 10 to 3
         self._setup_gemini_api()
         logger.info("MediaTranscriber initialized.")
 
@@ -87,9 +107,11 @@ class MediaTranscriber:
         parsed_url = urlparse(url)
         file_extension = os.path.splitext(parsed_url.path)[1] or ".mp3"
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
-            tmp_path = tmp_file.name
-
+        # We'll create a temp file but NOT use context manager here since we want to return the path
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_extension)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        
         # Use a session to handle cookies and redirects properly
         session = requests.Session()
         session.headers.update({
@@ -102,7 +124,7 @@ class MediaTranscriber:
             logger.info(f"HEAD request status: {head_resp.status_code}, final URL: {head_resp.url}")
             
             # Now make the actual download request
-            response = session.get(url, allow_redirects=True, timeout=300, stream=True)
+            response = session.get(url, allow_redirects=True, timeout=600, stream=True)
             response.raise_for_status()
             
             logger.info(f"Download response status: {response.status_code}, content-type: {response.headers.get('content-type', 'unknown')}")
@@ -182,7 +204,7 @@ class MediaTranscriber:
                 return None
                 
             # Get media record to determine source API
-            media_record = await media_queries.get_media_by_id(media_id, pool)
+            media_record = await media_queries.get_media_by_id_from_db(media_id)
             if not media_record:
                 logger.error(f"Media {media_id} not found in database")
                 return None
@@ -237,6 +259,31 @@ class MediaTranscriber:
         
         extension = path.suffix.lower()
         mime_map = {'.mp3': 'audio/mp3', '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac'}
+        
+        # Check if we need to convert MP4 to MP3
+        if extension == '.mp4':
+            logger.info(f"Converting MP4 to MP3 for Gemini compatibility: {file_path}")
+            try:
+                # Load the MP4 file using pydub
+                audio = AudioSegment.from_file(file_path, format="mp4")
+                
+                # Create a temporary MP3 file
+                with temp_audio_file(suffix=".mp3") as temp_mp3_path:
+                    # Export as MP3
+                    audio.export(temp_mp3_path, format="mp3")
+                    logger.info(f"Successfully converted MP4 to MP3: {temp_mp3_path}")
+                    
+                    # Process the converted MP3 file
+                    with open(temp_mp3_path, 'rb') as f:
+                        audio_data = f.read()
+                    
+                    return {"mime_type": "audio/mp3", "data": base64.b64encode(audio_data).decode('utf-8')}
+                    
+            except Exception as e:
+                logger.error(f"Failed to convert MP4 to MP3: {e}")
+                raise ValueError(f"Failed to process MP4 file: {e}")
+        
+        # For other supported formats, process normally
         mime_type = mime_map.get(extension)
         if not mime_type:
             raise ValueError(f"Unsupported audio format: {extension}")
@@ -253,21 +300,57 @@ class MediaTranscriber:
         chunk_info = f" (chunk {chunk_id})" if chunk_id is not None else ""
         prompt = "Transcribe this podcast with speaker labels and timestamps in [HH:MM:SS] format. If a speaker's name isn't mentioned, label them as 'Host', 'Guest', or 'Speaker 1', 'Speaker 2', etc."
         
+        retry_delay = self.RETRY_DELAY
         for attempt in range(self.MAX_RETRIES):
             try:
                 logger.info(f"Sending transcription request{chunk_info} (attempt {attempt+1}/{self.MAX_RETRIES})...")
                 async with self._gemini_api_semaphore:
-                    response = await self._model.generate_content_async([audio_content, prompt], generation_config={"temperature": 0.1})
+                    # Apply timeout using asyncio.wait_for
+                    try:
+                        response = await asyncio.wait_for(
+                            self._model.generate_content_async(
+                                [audio_content, prompt], 
+                                generation_config={"temperature": 0.1}
+                            ),
+                            timeout=600  # 10 minute timeout for transcription
+                        )
+                    except asyncio.TimeoutError:
+                        raise DeadlineExceeded(f"Transcription timed out after 600 seconds{chunk_info}")
                 logger.info(f"Transcription complete{chunk_info}")
                 return response.text
-            except (ResourceExhausted, ServiceUnavailable) as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    logger.warning(f"API error{chunk_info}: {e}. Retrying in {self.RETRY_DELAY} seconds...")
-                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+            except (ResourceExhausted, ServiceUnavailable, DeadlineExceeded, InternalServerError) as e:
+                # Check if it's a retriable error
+                is_retriable = True
+                if isinstance(e, DeadlineExceeded) and '504' in str(e):
+                    logger.warning(f"Thread cancellation error{chunk_info}: {e}")
+                elif isinstance(e, ServiceUnavailable) and 'overloaded' in str(e).lower():
+                    logger.warning(f"Model overloaded{chunk_info}: {e}")
+                
+                if attempt < self.MAX_RETRIES - 1 and is_retriable:
+                    # Exponential backoff with jitter
+                    jitter = random.uniform(0, retry_delay * 0.3)
+                    actual_delay = retry_delay + jitter
+                    
+                    logger.warning(f"Retriable API error{chunk_info}: {e}. Retrying in {actual_delay:.2f} seconds...")
+                    await asyncio.sleep(actual_delay)
+                    retry_delay = min(retry_delay * 2, 60)  # Cap at 60 seconds
                 else:
                     logger.error(f"Failed to transcribe{chunk_info} after {self.MAX_RETRIES} attempts: {e}")
                     raise
             except Exception as e:
+                # Check if it's a known retriable error pattern
+                error_str = str(e).lower()
+                if ('503' in error_str or '504' in error_str or 'overloaded' in error_str or 
+                    'timeout' in error_str or 'deadline' in error_str):
+                    if attempt < self.MAX_RETRIES - 1:
+                        jitter = random.uniform(0, retry_delay * 0.3)
+                        actual_delay = retry_delay + jitter
+                        
+                        logger.warning(f"Retriable error pattern detected{chunk_info}: {e}. Retrying in {actual_delay:.2f} seconds...")
+                        await asyncio.sleep(actual_delay)
+                        retry_delay = min(retry_delay * 2, 60)
+                        continue
+                
                 logger.error(f"An unexpected error occurred during Gemini API call{chunk_info}: {e}")
                 raise
 
@@ -278,23 +361,23 @@ class MediaTranscriber:
             end_ms = min((chunk_index + 1) * chunk_length_ms, len(audio_segment))
             chunk = audio_segment[start_ms:end_ms]
             
-            with tempfile.NamedTemporaryFile(suffix=file_suffix, delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            try:
+            with temp_audio_file(suffix=file_suffix) as temp_path:
                 await asyncio.to_thread(chunk.export, temp_path, format="mp3")
                 audio_content = await self._process_audio_file_for_gemini(temp_path)
                 chunk_transcript = await self._transcribe_gemini_api_call(audio_content, f"{episode_name} - Part {chunk_index+1}" if episode_name else f"Chunk {chunk_index+1}", chunk_id=chunk_index+1)
                 return chunk_index, chunk_transcript
-            finally:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
         except Exception as e:
             logger.error(f"Error processing chunk {chunk_index+1}: {e}", exc_info=True)
             return chunk_index, f"ERROR in chunk {chunk_index+1}: {str(e)}"
 
+    @memory_guard(threshold_percent=80.0)  # Use 80% threshold instead of 70% for long audio
     async def _process_long_audio(self, file_path: str, episode_name: Optional[str] = None) -> str:
         logger.info(f"Processing long audio file: {file_path}")
+        
+        # Check memory before loading large audio file
+        if not check_memory_usage():
+            raise MemoryError("Memory usage too high to process long audio file")
+        
         audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
         chunk_length_ms = self.DEFAULT_CHUNK_MINUTES * 60 * 1000
         overlap_ms = self.DEFAULT_OVERLAP_SECONDS * 1000
@@ -308,6 +391,11 @@ class MediaTranscriber:
         results = await asyncio.gather(*tasks)
         results.sort(key=lambda x: x[0])
         transcripts = [transcript for _, transcript in results]
+        
+        # Free memory after processing chunks
+        del audio
+        cleanup_memory()
+        
         return "\n\n".join(transcripts)
 
     async def summarize_transcript(self, transcript: str, episode_title: str = "", podcast_name: str = "", episode_summary: str = "") -> str:
@@ -363,9 +451,22 @@ Provide a comprehensive but concise summary (400-600 words) that captures the ep
         file_size = os.path.getsize(audio_path)
         if file_size < 1024:  # Less than 1KB
             raise ValueError(f"Audio file too small ({file_size} bytes), likely corrupted: {audio_path}")
+        
+        # Skip extremely large files (> 500MB)
+        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+        if file_size > MAX_FILE_SIZE:
+            raise ValueError(f"Audio file too large ({file_size / (1024*1024):.1f} MB), skipping to avoid timeout: {audio_path}")
 
         transcript, summary, embedding = "", None, None
+        should_cleanup = False  # Flag to determine if we should clean up the input file
+        
         try:
+            # Check if this is a temp file we should clean up (if it's in temp directory)
+            temp_dir = tempfile.gettempdir()
+            if audio_path.startswith(temp_dir):
+                should_cleanup = True
+                logger.debug(f"Audio file {audio_path} is in temp directory, will clean up after processing")
+            
             audio = await asyncio.to_thread(AudioSegment.from_file, audio_path)
             duration_minutes = len(audio) / (60 * 1000)
             
@@ -389,5 +490,13 @@ Provide a comprehensive but concise summary (400-600 words) that captures the ep
         except Exception as e:
             logger.error(f"Error during transcription process for {audio_path}: {e}", exc_info=True)
             raise
+        finally:
+            # Clean up the audio file if it's a temp file
+            if should_cleanup and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                    logger.debug(f"Cleaned up temp audio file: {audio_path}")
+                except Exception as e:
+                    logger.error(f"Failed to clean up temp audio file {audio_path}: {e}")
         
         return transcript, summary, embedding

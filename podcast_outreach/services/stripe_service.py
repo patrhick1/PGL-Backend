@@ -347,15 +347,15 @@ class StripeService:
         limits = {
             'free': {
                 'daily_discovery_allowance': 10,
-                'weekly_discovery_allowance': 50
+                'weekly_match_allowance': 50
             },
             'paid_basic': {
                 'daily_discovery_allowance': 100,
-                'weekly_discovery_allowance': 500
+                'weekly_match_allowance': 500
             },
             'paid_premium': {
                 'daily_discovery_allowance': 500,
-                'weekly_discovery_allowance': 2500
+                'weekly_match_allowance': 2500
             }
         }
         
