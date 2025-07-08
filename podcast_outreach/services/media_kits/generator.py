@@ -1109,10 +1109,80 @@ Provide *only* the final, professional social proof section content below, with 
             return None
 
     async def get_media_kit_by_campaign_id(self, campaign_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-        return await media_kit_queries.get_media_kit_by_campaign_id_from_db(campaign_id)
+        media_kit = await media_kit_queries.get_media_kit_by_campaign_id_from_db(campaign_id)
+        if media_kit:
+            # Transform person_social_links to proper format if needed
+            person_social_links = media_kit.get("person_social_links", [])
+            if person_social_links and isinstance(person_social_links[0], str):
+                # Convert from old format (list of strings) to new format
+                transformed_links = []
+                for link in person_social_links:
+                    if isinstance(link, str):
+                        # Detect platform from URL
+                        platform = None
+                        if "linkedin.com" in link.lower():
+                            platform = "linkedin"
+                        elif "twitter.com" in link.lower() or "x.com" in link.lower():
+                            platform = "twitter"
+                        elif "instagram.com" in link.lower():
+                            platform = "instagram"
+                        elif "tiktok.com" in link.lower():
+                            platform = "tiktok"
+                        elif "facebook.com" in link.lower():
+                            platform = "facebook"
+                        elif "youtube.com" in link.lower():
+                            platform = "youtube"
+                        
+                        transformed_links.append({
+                            "url": link,
+                            "platform": platform,
+                            "handle": None
+                        })
+                    elif isinstance(link, dict):
+                        # Already in correct format
+                        transformed_links.append(link)
+                
+                media_kit["person_social_links"] = transformed_links
+        
+        return media_kit
 
     async def get_media_kit_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
-        return await media_kit_queries.get_media_kit_by_slug_enriched(slug)
+        media_kit = await media_kit_queries.get_media_kit_by_slug_enriched(slug)
+        if media_kit:
+            # Transform person_social_links to proper format if needed
+            person_social_links = media_kit.get("person_social_links", [])
+            if person_social_links and isinstance(person_social_links[0], str):
+                # Convert from old format (list of strings) to new format
+                transformed_links = []
+                for link in person_social_links:
+                    if isinstance(link, str):
+                        # Detect platform from URL
+                        platform = None
+                        if "linkedin.com" in link.lower():
+                            platform = "linkedin"
+                        elif "twitter.com" in link.lower() or "x.com" in link.lower():
+                            platform = "twitter"
+                        elif "instagram.com" in link.lower():
+                            platform = "instagram"
+                        elif "tiktok.com" in link.lower():
+                            platform = "tiktok"
+                        elif "facebook.com" in link.lower():
+                            platform = "facebook"
+                        elif "youtube.com" in link.lower():
+                            platform = "youtube"
+                        
+                        transformed_links.append({
+                            "url": link,
+                            "platform": platform,
+                            "handle": None
+                        })
+                    elif isinstance(link, dict):
+                        # Already in correct format
+                        transformed_links.append(link)
+                
+                media_kit["person_social_links"] = transformed_links
+        
+        return media_kit
 
     async def update_social_stats_for_media_kit(self, media_kit_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         """Update social media stats for the media kit."""
