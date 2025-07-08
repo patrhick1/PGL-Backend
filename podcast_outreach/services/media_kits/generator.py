@@ -953,7 +953,36 @@ Provide *only* the final, professional social proof section content below, with 
             
             # Format contact information
             contact_details_processed = await self._format_contact_information(questionnaire_responses)
-            person_social_links_data = contact_details_processed.get("person_social_links", [])
+            person_social_links_raw = contact_details_processed.get("person_social_links", [])
+            
+            # Convert social links to proper schema format
+            person_social_links_data = []
+            for link in person_social_links_raw:
+                if isinstance(link, str):
+                    # Detect platform from URL
+                    platform = None
+                    if "linkedin.com" in link.lower():
+                        platform = "linkedin"
+                    elif "twitter.com" in link.lower() or "x.com" in link.lower():
+                        platform = "twitter"
+                    elif "instagram.com" in link.lower():
+                        platform = "instagram"
+                    elif "tiktok.com" in link.lower():
+                        platform = "tiktok"
+                    elif "facebook.com" in link.lower():
+                        platform = "facebook"
+                    elif "youtube.com" in link.lower():
+                        platform = "youtube"
+                    
+                    person_social_links_data.append({
+                        "url": link,
+                        "platform": platform,
+                        "handle": None
+                    })
+                elif isinstance(link, dict):
+                    # Already in correct format
+                    person_social_links_data.append(link)
+            
             booking_contact_data = contact_details_processed.get("booking_contacts", {})
             
             # Include social_media_links from contact_information_dict into the main contact_information if not already handled
@@ -973,7 +1002,7 @@ Provide *only* the final, professional social proof section content below, with 
             sample_questions = []
             media_appearances = []
             testimonials_section = "Experienced podcast guest."
-            person_social_links_data = [] # Fallback
+            person_social_links_data = [] # Fallback - already correct format (empty list)
             booking_contact_data = {} # Fallback
 
         # Build the complete media kit data
