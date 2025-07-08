@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import gc
 
 # Corrected imports to use the new service class and queries
 from podcast_outreach.services.media.transcriber import MediaTranscriber, AudioNotFoundError
@@ -13,11 +14,13 @@ from podcast_outreach.database.connection import init_db_pool, close_db_pool, re
 from podcast_outreach.config import ORCHESTRATOR_CONFIG
 from podcast_outreach.services.enrichment.quality_score import QualityService
 from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
+from podcast_outreach.utils.memory_monitor import cleanup_memory, get_memory_info
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 20
+# Reduce batch size to prevent memory issues
+BATCH_SIZE = int(os.getenv("TRANSCRIPTION_BATCH_SIZE", "1"))  # Default to 1 for safety
 
 async def run_transcription_logic(db_service=None):
     """
@@ -45,11 +48,24 @@ async def run_transcription_logic(db_service=None):
             for ep in to_transcribe:
                 episode_id = ep["episode_id"]
                 media_id = ep["media_id"]
+                # Check memory before processing
+                memory_info = get_memory_info()
+                if memory_info["process_percent"] > 50:
+                    logger.warning(f"High memory usage ({memory_info['process_percent']:.1f}%), cleaning up before processing episode")
+                    gc.collect()
+                    cleanup_memory()
+                    await asyncio.sleep(2)
+                
                 success = await process_single_episode_with_retry(
                     ep, transcriber, analyzer, match_creator, quality_service, pool_to_use
                 )
                 if not success:
                     logger.error(f"Failed to process episode {episode_id} after all retries")
+                
+                # Clean up memory after each episode
+                gc.collect()
+                cleanup_memory()
+                await asyncio.sleep(1)  # Give OS time to reclaim memory
         else:
             logger.info("No episodes require transcription at this time.")
         

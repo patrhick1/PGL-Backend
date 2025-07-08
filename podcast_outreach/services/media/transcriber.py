@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # --- Global Concurrency Control ---
 GLOBAL_TRANSCRIPTION_SEMAPHORE = asyncio.Semaphore(int(os.getenv("GLOBAL_TRANSCRIPTION_LIMIT", "3")))
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1")))
 
 # --- Global FFmpeg/FFprobe Configuration ---
 if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
@@ -103,7 +104,8 @@ class MediaTranscriber:
         Raises:
             AudioNotFoundError: If the audio URL returns 404 (file not found)
         """
-        return await asyncio.to_thread(self._download_audio_sync, url)
+        async with DOWNLOAD_SEMAPHORE:
+            return await asyncio.to_thread(self._download_audio_sync, url)
 
     def _download_audio_sync(self, url: str) -> Optional[str]:
         """Synchronous download using requests library with proper cleanup."""
@@ -383,7 +385,7 @@ class MediaTranscriber:
             logger.error(f"Error processing chunk {chunk_index+1}: {e}", exc_info=True)
             return chunk_index, f"ERROR in chunk {chunk_index+1}: {str(e)}"
 
-    @memory_guard(threshold_percent=60.0)  # Use 60% threshold for better cloud stability
+    @memory_guard(threshold_percent=40.0)  # Use 40% threshold for strict memory control
     async def _process_long_audio(self, file_path: str, episode_name: Optional[str] = None) -> str:
         logger.info(f"Processing long audio file: {file_path}")
         

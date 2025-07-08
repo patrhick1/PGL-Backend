@@ -62,6 +62,13 @@ logger = get_logger(__name__)
 # Conditionally import and register routes from test_runner.py
 ENABLE_LLM_TEST_DASHBOARD = os.getenv("ENABLE_LLM_TEST_DASHBOARD", "false").lower() == "true"
 
+async def _delayed_scheduler_start(scheduler):
+    """Delayed scheduler start to prevent memory spikes on startup."""
+    await asyncio.sleep(60)  # 60 second delay
+    logger.info("Starting task scheduler after startup delay...")
+    scheduler.running = True
+    logger.info("Task scheduler is now active and processing tasks.")
+
 # Define lifespan context manager before app initialization
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -87,8 +94,17 @@ async def lifespan(app: FastAPI):
     
     # Initialize and start task scheduler
     scheduler = initialize_scheduler(task_manager)
-    await scheduler.start()
-    logger.info("Task scheduler started.")
+    
+    # In production, delay scheduler start to prevent memory spikes
+    if IS_PRODUCTION:
+        logger.info("Production mode: Implementing 60-second startup delay to prevent memory spikes")
+        # Start scheduler but don't let it run tasks immediately
+        scheduler.running = False
+        asyncio.create_task(_delayed_scheduler_start(scheduler))
+        logger.info("Task scheduler initialized, will start after delay.")
+    else:
+        await scheduler.start()
+        logger.info("Task scheduler started.")
 
     if ENABLE_LLM_TEST_DASHBOARD:
         logger.info("ENABLE_LLM_TEST_DASHBOARD is true. Attempting to load test runner routes.")
