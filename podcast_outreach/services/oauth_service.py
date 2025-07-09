@@ -19,7 +19,7 @@ from ..database.queries import oauth_queries
 from ..database.queries import campaigns as campaign_queries
 from ..database.queries import client_profiles as client_profile_queries
 from ..api.dependencies import prepare_session_data
-from ..config import FRONTEND_ORIGIN
+from ..config import FRONTEND_ORIGIN, BACKEND_URL
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class OAuthService:
                 "token_url": "https://oauth2.googleapis.com/token",
                 "userinfo_url": "https://www.googleapis.com/oauth2/v2/userinfo",
                 "scopes": ["openid", "email", "profile"],
-                "redirect_uri": f"{os.getenv('BACKEND_URL', 'http://localhost:8000')}/auth/oauth/google/callback"
+                "redirect_uri": f"{BACKEND_URL}/auth/oauth/google/callback"
             }
         }
         
