@@ -476,7 +476,8 @@ class TaskManager:
             return self._executor.submit(asyncio.run, _cleanup_wrapper())
     
     def reset_auto_discovery_counts(self, task_id: str):
-        """Reset weekly auto-discovery counts for paid users"""
+        """DEPRECATED: Reset weekly auto-discovery counts for paid users only. Use reset_all_weekly_counts instead."""
+        logger.warning("reset_auto_discovery_counts is deprecated. Use reset_all_weekly_counts instead.")
         async def _cleanup_wrapper():
             try:
                 from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
@@ -493,6 +494,52 @@ class TaskManager:
             return task
         except RuntimeError:
             logger.warning("No event loop running for reset_auto_discovery_counts")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def reset_all_weekly_counts(self, task_id: str):
+        """Reset weekly counts for ALL users (free and paid)"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
+                service = AutomatedDiscoveryService()
+                results = await service.reset_all_weekly_counts()
+                logger.info(f"Weekly reset completed: {results['total_reset']} users "
+                           f"({results['free_users']} free, {results['paid_users']} paid)")
+                return results
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for reset_all_weekly_counts")
+            return self._executor.submit(asyncio.run, _cleanup_wrapper())
+    
+    def check_weekly_reset_health(self, task_id: str):
+        """Check health of weekly reset system"""
+        async def _cleanup_wrapper():
+            try:
+                from podcast_outreach.services.discovery.automated_discovery_service import AutomatedDiscoveryService
+                service = AutomatedDiscoveryService()
+                health_status = await service.check_weekly_reset_health()
+                
+                if health_status['healthy']:
+                    logger.info("Weekly reset health check passed")
+                else:
+                    logger.error(f"Weekly reset health check FAILED: {health_status}")
+                
+                return health_status
+            finally:
+                self.cleanup_task(task_id)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(_cleanup_wrapper())
+            return task
+        except RuntimeError:
+            logger.warning("No event loop running for check_weekly_reset_health")
             return self._executor.submit(asyncio.run, _cleanup_wrapper())
     
     def run_single_campaign_auto_discovery(self, task_id: str, campaign_id: str):

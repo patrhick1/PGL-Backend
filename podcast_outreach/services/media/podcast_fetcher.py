@@ -13,6 +13,7 @@ from datetime import datetime, timezone as dt_timezone
 # Import modular queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import media as media_queries
+from podcast_outreach.database.queries.media_upsert_fix import upsert_media_with_rss_fallback
 from podcast_outreach.database.queries import match_suggestions as match_queries
 from podcast_outreach.database.queries import review_tasks as review_tasks_queries
 from podcast_outreach.database.connection import get_db_pool, close_db_pool, get_background_task_pool # For main function
@@ -472,7 +473,8 @@ class MediaFetcher:
 
         try:
             logger.debug(f"merge_and_upsert_media: Calling upsert_media_in_db for '{media_name_for_log}'.")
-            media = await media_queries.upsert_media_in_db(podcast_data, pool=self.db_pool)
+            # Use enhanced upsert that handles cross-API source transitions
+            media = await upsert_media_with_rss_fallback(podcast_data, pool=self.db_pool)
             if media and media.get('media_id'):
                 logger.info(f"merge_and_upsert_media: Media upserted/updated: '{media.get('name')}' (ID: {media['media_id']}) from source {podcast_data.get('source_api')}")
                 

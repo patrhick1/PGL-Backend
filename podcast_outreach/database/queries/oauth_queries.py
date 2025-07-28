@@ -2,6 +2,7 @@
 OAuth-specific database queries
 """
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -101,7 +102,7 @@ async def create_oauth_connection(person_id: int, provider: str, provider_user_i
                  refresh_token, token_expires_at, provider_data, last_used_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
             """, person_id, provider, provider_user_id, provider_email, access_token,
-                refresh_token, token_expires_at, provider_data)
+                refresh_token, token_expires_at, json.dumps(provider_data))
             
             logger.info(f"Created OAuth connection for person_id: {person_id}, provider: {provider}")
             return True
@@ -133,7 +134,7 @@ async def create_or_update_oauth_connection(person_id: int, provider: str, provi
                     last_used_at = NOW(),
                     updated_at = NOW()
             """, person_id, provider, provider_user_id, provider_email, access_token,
-                refresh_token, token_expires_at, provider_data)
+                refresh_token, token_expires_at, json.dumps(provider_data))
             
             logger.info(f"Created/updated OAuth connection for person_id: {person_id}, provider: {provider}")
             return True

@@ -128,13 +128,21 @@ class TaskScheduler:
             interval_seconds=30 * 60  # 30 minutes
         ))
         
-        # Weekly reset of auto-discovery counts - Mondays at 00:00
+        # Weekly reset of ALL counts (free and paid users) - Mondays at 00:00
         self.register_task(ScheduledTask(
-            name="reset_auto_discovery_counts",
-            task_function=self._reset_auto_discovery_counts,
+            name="reset_all_weekly_counts",
+            task_function=self._reset_all_weekly_counts,
             schedule_type=ScheduleType.WEEKLY,
             day_of_week=0,  # Monday
             time_of_day="00:00"
+        ))
+        
+        # Daily health check for weekly reset system
+        self.register_task(ScheduledTask(
+            name="weekly_reset_health_check",
+            task_function=self._check_weekly_reset_health,
+            schedule_type=ScheduleType.DAILY,
+            time_of_day="10:00"  # 10 AM UTC daily
         ))
         
         logger.info(f"Registered {len(self.scheduled_tasks)} default background tasks")
@@ -322,11 +330,17 @@ class TaskScheduler:
         self.task_manager.start_task(task_id, "scheduled_automated_discovery")
         self.task_manager.run_automated_discovery(task_id)
     
-    async def _reset_auto_discovery_counts(self):
-        """Reset weekly auto-discovery counts for paid users"""
-        task_id = f"scheduled_reset_counts_{int(datetime.now().timestamp())}"
-        self.task_manager.start_task(task_id, "scheduled_reset_auto_discovery_counts")
-        self.task_manager.reset_auto_discovery_counts(task_id)
+    async def _reset_all_weekly_counts(self):
+        """Reset weekly counts for ALL users (free and paid)"""
+        task_id = f"scheduled_weekly_reset_{int(datetime.now().timestamp())}"
+        self.task_manager.start_task(task_id, "scheduled_weekly_reset")
+        self.task_manager.reset_all_weekly_counts(task_id)
+    
+    async def _check_weekly_reset_health(self):
+        """Check health of weekly reset system"""
+        task_id = f"scheduled_reset_health_{int(datetime.now().timestamp())}"
+        self.task_manager.start_task(task_id, "scheduled_reset_health_check")
+        self.task_manager.check_weekly_reset_health(task_id)
     
     def get_task_status(self) -> Dict[str, Any]:
         """Get status of all scheduled tasks"""

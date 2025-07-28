@@ -553,9 +553,11 @@ class AutomatedDiscoveryService:
     
     async def reset_weekly_auto_discovery_counts(self):
         """
+        DEPRECATED: Use reset_all_weekly_counts() instead.
         Reset weekly auto-discovery counts for paid users.
         Called weekly by scheduler.
         """
+        logger.warning("reset_weekly_auto_discovery_counts is deprecated. Use reset_all_weekly_counts instead.")
         query = """
         UPDATE client_profiles
         SET auto_discovery_matches_this_week = 0,
@@ -571,6 +573,95 @@ class AutomatedDiscoveryService:
             count = len(rows)
             logger.info(f"Reset auto-discovery counts for {count} paid users")
             return count
+    
+    async def reset_all_weekly_counts(self) -> Dict[str, Any]:
+        """
+        Reset weekly counts for ALL users (free and paid).
+        Returns detailed information about what was reset.
+        """
+        query = "SELECT * FROM reset_all_weekly_counts();"
+        
+        pool = await get_background_task_pool()
+        async with pool.acquire() as conn:
+            try:
+                rows = await conn.fetch(query)
+                
+                # Group by user type for logging
+                free_users_reset = [r for r in rows if r['plan_type'] == 'free']
+                paid_users_reset = [r for r in rows if r['plan_type'] != 'free']
+                
+                # Log details
+                logger.info(f"Weekly reset completed: {len(free_users_reset)} free users, {len(paid_users_reset)} paid users")
+                
+                # Log any concerning values
+                for row in rows:
+                    if row['prev_weekly_matches'] > 100:
+                        logger.warning(f"User {row['person_id']} had {row['prev_weekly_matches']} weekly matches before reset")
+                
+                # Send notification about reset
+                if len(rows) > 0:
+                    event_bus = get_event_bus()
+                    await event_bus.publish(Event(
+                        type=EventType.SYSTEM_EVENT,
+                        data={
+                            "event": "weekly_counts_reset",
+                            "total_users_reset": len(rows),
+                            "free_users_reset": len(free_users_reset),
+                            "paid_users_reset": len(paid_users_reset),
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    ))
+                
+                return {
+                    'total_reset': len(rows),
+                    'free_users': len(free_users_reset),
+                    'paid_users': len(paid_users_reset),
+                    'details': [dict(r) for r in rows]
+                }
+            except Exception as e:
+                logger.error(f"Error in weekly count reset: {e}")
+                raise
+    
+    async def check_weekly_reset_health(self) -> Dict[str, Any]:
+        """Check if weekly resets are working properly"""
+        query = """
+        SELECT 
+            COUNT(*) FILTER (WHERE current_weekly_matches > weekly_match_allowance) as over_limit_users,
+            COUNT(*) FILTER (WHERE last_weekly_match_reset < NOW() - INTERVAL '8 days') as stale_reset_users,
+            MIN(last_weekly_match_reset) as oldest_reset,
+            MAX(current_weekly_matches) as highest_match_count,
+            COUNT(*) as total_users
+        FROM client_profiles;
+        """
+        
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            result = await conn.fetchrow(query)
+            
+            health_status = {
+                'healthy': result['over_limit_users'] == 0 and result['stale_reset_users'] == 0,
+                'over_limit_users': result['over_limit_users'],
+                'stale_reset_users': result['stale_reset_users'],
+                'oldest_reset': result['oldest_reset'].isoformat() if result['oldest_reset'] else None,
+                'highest_match_count': result['highest_match_count'],
+                'total_users': result['total_users'],
+                'checked_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            if not health_status['healthy']:
+                logger.error(f"Weekly reset health check failed: {health_status}")
+                
+                # Send alert
+                event_bus = get_event_bus()
+                await event_bus.publish(Event(
+                    type=EventType.SYSTEM_ALERT,
+                    data={
+                        "alert": "weekly_reset_health_check_failed",
+                        "details": health_status
+                    }
+                ))
+                
+            return health_status
     
     async def process_single_campaign(self, campaign_id: uuid.UUID) -> Dict[str, Any]:
         """

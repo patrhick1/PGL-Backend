@@ -8,6 +8,7 @@ import asyncio # For concurrent API calls
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 
 from podcast_outreach.api.dependencies import get_current_user
+from podcast_outreach.api.dependencies_email_verification import get_verified_user
 from podcast_outreach.api.schemas import client_profile_schemas as schemas # Ensure this import is correct
 from podcast_outreach.database.queries import client_profiles as client_profile_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
@@ -78,7 +79,7 @@ async def get_client_discovery_status(current_user: dict = Depends(get_current_u
 
 # --- POST /client/campaigns/{campaign_id}/discover-preview (Refined) ---
 @router.post("/client/campaigns/{campaign_id}/discover-preview", response_model=List[schemas.PodcastPreviewSchema])
-async def client_discover_podcast_previews(campaign_id: uuid.UUID, current_user: dict = Depends(get_current_user)):
+async def client_discover_podcast_previews(campaign_id: uuid.UUID, current_user: dict = Depends(get_verified_user)):
     if current_user.get("role") != "client" or not current_user.get("person_id"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized.")
     

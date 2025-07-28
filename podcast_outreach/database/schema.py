@@ -307,7 +307,7 @@ def create_campaigns_table(conn):
         compiled_social_posts TEXT,
         podcast_transcript_link TEXT,
         compiled_articles_link TEXT,
-        mock_interview_trancript TEXT,
+        mock_interview_transcript TEXT,
         embedding VECTOR(1536),
         start_date DATE,
         end_date DATE,
@@ -621,6 +621,8 @@ def create_media_kits_table(conn): # NEW FUNCTION
         headshot_image_url TEXT,
         logo_image_url TEXT,
         call_to_action_text TEXT,
+        call_to_action_url TEXT,
+        show_contact_form BOOLEAN DEFAULT TRUE,
         contact_information_for_booking TEXT, -- General contact, email, phone, website from contactInfo
         custom_sections JSONB DEFAULT '[]'::jsonb, -- Default to empty JSON array
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,

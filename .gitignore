@@ -75,3 +75,7 @@ processed_instantly_to_attio_ids.txt
 
 # Ignore AI usage logs
 ai_usage_logs.csv
+
+# Ignore migrations and scripts
+podcast_outreach/migrations/
+podcast_outreach/scripts/

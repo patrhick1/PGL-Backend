@@ -87,9 +87,7 @@ CLIENT_SPREADSHEETS_TRACKING_FOLDER_ID=your_folder_id
 # Google Service Account (JSON string - paste as single line)
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"your-project",...}
 
-# Email Configuration
-GMAIL_USER=your_email
-GMAIL_APP_PASSWORD=your_password
+# Email Configurations
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USERNAME=your_email

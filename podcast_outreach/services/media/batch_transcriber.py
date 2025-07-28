@@ -330,12 +330,9 @@ class BatchTranscriptionService:
                 result['reason'] = 'url_in_failure_cache'
                 return result
             
-            # Update batch tracking
-            await episode_queries.update_episode_analysis_data(
-                episode_id,
-                transcription_batch_id=batch_id,
-                transcription_batch_position=position
-            )
+            # Note: Batch tracking fields removed as they're not supported in the current schema
+            # If batch tracking is needed in the future, add appropriate columns to episodes table
+            # and create a dedicated update function
             
             # Attempt transcription with retries
             transcript = await self._transcribe_with_retry(
@@ -346,7 +343,7 @@ class BatchTranscriptionService:
             
             if transcript:
                 # Update episode with transcript
-                await episode_queries.update_episode_transcript(episode_id, transcript)
+                await episode_queries.update_episode_transcription(episode_id, transcript)
                 
                 # Update URL status as available
                 await self._update_episode_url_status(episode_id, 'available')

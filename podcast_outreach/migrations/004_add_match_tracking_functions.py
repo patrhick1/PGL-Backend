@@ -89,7 +89,7 @@ async def migrate_up(conn: asyncpg.Connection):
     END;
     $$ LANGUAGE plpgsql;
     """)
-    print("  ✓ Created check_and_increment_weekly_matches function")
+    print("  [OK] Created check_and_increment_weekly_matches function")
     
     # Create reset_weekly_matches function
     await conn.execute("""
@@ -117,7 +117,7 @@ async def migrate_up(conn: asyncpg.Connection):
     END;
     $$ LANGUAGE plpgsql;
     """)
-    print("  ✓ Created reset_weekly_matches function")
+    print("  [OK] Created reset_weekly_matches function")
     
     # Create get_match_allowance_status function
     await conn.execute("""
@@ -146,7 +146,7 @@ async def migrate_up(conn: asyncpg.Connection):
     END;
     $$ LANGUAGE plpgsql;
     """)
-    print("  ✓ Created get_match_allowance_status function")
+    print("  [OK] Created get_match_allowance_status function")
     
     # Create helper function
     await conn.execute("""
@@ -157,7 +157,7 @@ async def migrate_up(conn: asyncpg.Connection):
     END;
     $$ LANGUAGE plpgsql;
     """)
-    print("  ✓ Created get_person_id_from_campaign function")
+    print("  [OK] Created get_person_id_from_campaign function")
     
     # Fix existing data
     await conn.execute("""
@@ -184,7 +184,7 @@ async def migrate_up(conn: asyncpg.Connection):
     result = await conn.fetchval("""
         SELECT COUNT(*) FROM client_profiles WHERE current_weekly_matches > 0
     """)
-    print(f"  ✓ Updated weekly match counts for {result} profiles")
+    print(f"  [OK] Updated weekly match counts for {result} profiles")
     
     print("[004] Match tracking functions migration completed successfully!")
 

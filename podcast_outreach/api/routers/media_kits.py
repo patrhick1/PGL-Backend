@@ -97,6 +97,20 @@ async def update_campaign_media_kit_settings(
 
     update_payload = settings_data.model_dump(exclude_unset=True)
     
+    # Map custom_intro to introduction field
+    if "custom_intro" in update_payload:
+        update_payload["introduction"] = update_payload.pop("custom_intro")
+    
+    # Validate call_to_action_url if provided
+    if "call_to_action_url" in update_payload:
+        url = update_payload["call_to_action_url"]
+        # Convert Pydantic HttpUrl to string if needed
+        if hasattr(url, '__str__') and not isinstance(url, str):
+            update_payload["call_to_action_url"] = str(url)
+        # Allow empty string to clear the URL
+        elif url == "":
+            update_payload["call_to_action_url"] = None
+    
     if "slug" in update_payload and update_payload["slug"] != existing_kit.get("slug"):
         if await media_kit_queries.check_slug_exists(update_payload["slug"], exclude_media_kit_id=existing_kit["media_kit_id"]):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Slug '{update_payload['slug']}' already exists.")
@@ -107,6 +121,31 @@ async def update_campaign_media_kit_settings(
     return mk_schemas.MediaKitInDB(**updated_kit)
 
 # --- Publicly Accessible Media Kit Endpoint ---
+@router.get("/media-kits/{media_kit_id}", 
+            response_model=mk_schemas.MediaKitInDB, 
+            summary="Get Media Kit by ID",
+            tags=["Media Kits - Direct Access"])
+async def get_media_kit_by_id(
+    media_kit_id: uuid.UUID,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get a media kit by its ID.
+    
+    Authorization:
+    - Clients can only access their own media kits
+    - Staff/Admin can access any media kit
+    """
+    media_kit = await media_kit_queries.get_media_kit_by_id_from_db(media_kit_id)
+    if not media_kit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media kit not found.")
+    
+    # Authorization check
+    if user.get("role") == "client" and media_kit.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to this media kit.")
+    
+    return mk_schemas.MediaKitInDB(**media_kit)
+
 @router.get("/public/media-kit/{slug}", 
             response_model=mk_schemas.MediaKitInDB, # Or a specific PublicMediaKitViewSchema
             summary="Get Public Media Kit by Slug",
@@ -161,3 +200,123 @@ async def add_media_kit_image(
         raise HTTPException(status_code=500, detail="Failed to add image to media kit.")
 
     return updated_kit
+
+@router.put("/media-kits/{media_kit_id}", 
+            response_model=mk_schemas.MediaKitInDB, 
+            summary="Update All Media Kit Fields",
+            tags=["Media Kits - Direct Update"])
+async def update_media_kit_all_fields(
+    media_kit_id: uuid.UUID,
+    update_data: mk_schemas.MediaKitBase,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Update any/all fields of a media kit directly by media_kit_id.
+    This endpoint allows updating all fields including:
+    - Content fields (headline, tagline, introduction, bios, etc.)
+    - Settings (is_public, theme_preference)
+    - Images (headshot_image_url, logo_image_url)
+    - Social links and stats
+    - Custom sections, talking points, achievements, etc.
+    
+    Authorization:
+    - Clients can only update their own media kits
+    - Staff/Admin can update any media kit
+    """
+    # Get the existing media kit first
+    existing_kit = await media_kit_queries.get_media_kit_by_id_from_db(media_kit_id)
+    if not existing_kit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media kit not found.")
+    
+    # Authorization check
+    if user.get("role") == "client" and existing_kit.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to update this media kit.")
+    
+    # Convert the update data to dict, excluding unset values
+    update_payload = update_data.model_dump(exclude_unset=True)
+    
+    # Remove fields that shouldn't be updated directly
+    fields_to_exclude = ["media_kit_id", "campaign_id", "person_id", "created_at", "updated_at"]
+    for field in fields_to_exclude:
+        update_payload.pop(field, None)
+    
+    # If slug is being updated, check for uniqueness
+    if "slug" in update_payload and update_payload["slug"] != existing_kit.get("slug"):
+        if await media_kit_queries.check_slug_exists(update_payload["slug"], exclude_media_kit_id=media_kit_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Slug '{update_payload['slug']}' already exists.")
+    
+    try:
+        # Update the media kit
+        updated_kit = await media_kit_queries.update_media_kit_in_db(media_kit_id, update_payload)
+        if not updated_kit:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update media kit.")
+        
+        logger.info(f"Media kit {media_kit_id} updated with {len(update_payload)} fields by user {user.get('person_id')}")
+        return mk_schemas.MediaKitInDB(**updated_kit)
+    except Exception as e:
+        logger.exception(f"Error updating media kit {media_kit_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+@router.patch("/media-kits/{media_kit_id}", 
+              response_model=mk_schemas.MediaKitInDB, 
+              summary="Partially Update Media Kit Fields",
+              tags=["Media Kits - Direct Update"])
+async def patch_media_kit_fields(
+    media_kit_id: uuid.UUID,
+    update_data: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Partially update specific fields of a media kit.
+    This is a more flexible PATCH endpoint that accepts any valid media kit fields.
+    
+    Authorization:
+    - Clients can only update their own media kits
+    - Staff/Admin can update any media kit
+    """
+    # Get the existing media kit first
+    existing_kit = await media_kit_queries.get_media_kit_by_id_from_db(media_kit_id)
+    if not existing_kit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media kit not found.")
+    
+    # Authorization check
+    if user.get("role") == "client" and existing_kit.get("person_id") != user.get("person_id"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to update this media kit.")
+    
+    # Remove fields that shouldn't be updated directly
+    fields_to_exclude = ["media_kit_id", "campaign_id", "person_id", "created_at", "updated_at"]
+    for field in fields_to_exclude:
+        update_data.pop(field, None)
+    
+    # Validate fields exist in the schema
+    valid_fields = {
+        "title", "slug", "is_public", "theme_preference", "headline", "tagline", 
+        "introduction", "full_bio_content", "summary_bio_content", "short_bio_content",
+        "bio_source", "keywords", "talking_points", "angles_source", "sample_questions",
+        "key_achievements", "previous_appearances", "person_social_links", "social_media_stats",
+        "testimonials_section", "headshot_image_url", "logo_image_url", "call_to_action_text",
+        "call_to_action_url", "show_contact_form", "contact_information_for_booking", "custom_sections"
+    }
+    
+    # Filter out invalid fields
+    filtered_update_data = {k: v for k, v in update_data.items() if k in valid_fields}
+    
+    if not filtered_update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid fields to update.")
+    
+    # If slug is being updated, check for uniqueness
+    if "slug" in filtered_update_data and filtered_update_data["slug"] != existing_kit.get("slug"):
+        if await media_kit_queries.check_slug_exists(filtered_update_data["slug"], exclude_media_kit_id=media_kit_id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Slug '{filtered_update_data['slug']}' already exists.")
+    
+    try:
+        # Update the media kit
+        updated_kit = await media_kit_queries.update_media_kit_in_db(media_kit_id, filtered_update_data)
+        if not updated_kit:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update media kit.")
+        
+        logger.info(f"Media kit {media_kit_id} patched with fields {list(filtered_update_data.keys())} by user {user.get('person_id')}")
+        return mk_schemas.MediaKitInDB(**updated_kit)
+    except Exception as e:
+        logger.exception(f"Error patching media kit {media_kit_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

@@ -9,12 +9,23 @@ FORCED_LOG_LEVEL = "INFO"
 # Get log level from environment variable, fallback to the forced level
 LOG_LEVEL = os.environ.get("LOG_LEVEL", FORCED_LOG_LEVEL).upper()
 
-class UvicornFormatter(logging.Formatter):
-    """Custom formatter that renames uvicorn.error to uvicorn for cleaner logs"""
+class CompactFormatter(logging.Formatter):
+    """Custom formatter for cleaner, more compact logs"""
     def format(self, record):
         # Rename uvicorn.error to just uvicorn for cleaner output
         if record.name == 'uvicorn.error':
             record.name = 'uvicorn'
+        
+        # Shorten long module names for common services
+        name_parts = record.name.split('.')
+        if len(name_parts) > 2 and name_parts[0] == 'podcast_outreach':
+            if name_parts[1] == 'services':
+                # Shorten services.x.y to just x.y
+                record.name = '.'.join(name_parts[2:])
+            elif name_parts[1] == 'integrations':
+                # Shorten integrations.x to just x
+                record.name = name_parts[-1]
+        
         return super().format(record)
 
 LOGGING_CONFIG = {
@@ -22,8 +33,12 @@ LOGGING_CONFIG = {
     "disable_existing_loggers": False, # Ensure other loggers (like uvicorn) aren't disabled
     "formatters": {
         "default": {
-            "format": "%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s", # Added module and lineno
-            "()": UvicornFormatter  # Use our custom formatter
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",  # Simplified format
+            "()": CompactFormatter  # Use our custom formatter
+        },
+        "detailed": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s",
+            "()": CompactFormatter
         }
     },
     "handlers": {
@@ -37,7 +52,7 @@ LOGGING_CONFIG = {
         "level": FORCED_LOG_LEVEL, # Use the forced level
         "handlers": ["console"]
     },
-    # Optional: Make uvicorn logs more verbose too, if they are also missing
+    # Configure specific loggers to reduce noise
     "loggers": {
         "uvicorn": {
             "handlers": ["console"],
@@ -51,7 +66,69 @@ LOGGING_CONFIG = {
         },
         "uvicorn.access": {
             "handlers": ["console"],
-            "level": FORCED_LOG_LEVEL,
+            "level": "WARNING",  # Reduce access log noise
+            "propagate": False
+        },
+        # Reduce noise from service initialization
+        "podcast_outreach.services.ai.gemini_client": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.ai.openai_client": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.integrations": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.enrichment": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.media": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.tasks.manager": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.scheduler": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "podcast_outreach.services.events": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False
+        },
+        "googleapiclient.discovery_cache": {
+            "handlers": ["console"],
+            "level": "ERROR",  # These are particularly noisy
+            "propagate": False
+        },
+        # Keep important logs at INFO level
+        "podcast_outreach.main": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False
+        },
+        "podcast_outreach.api": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False
+        },
+        "podcast_outreach.services.chatbot": {
+            "handlers": ["console"],
+            "level": "INFO",
             "propagate": False
         }
     }

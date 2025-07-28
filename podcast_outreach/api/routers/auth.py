@@ -1,6 +1,6 @@
 # podcast_outreach/api/routers/auth.py
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Request, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request, Form, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Dict, Any, Optional
 import uuid
@@ -21,6 +21,9 @@ from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import client_profiles as client_profile_queries
 from ...services.email_service import email_service
 from ...database.queries import auth_queries
+from ...database.queries import email_verification_queries
+from ...database.queries import onboarding_queries
+from ...config import FRONTEND_ORIGIN
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -155,14 +158,38 @@ async def register_user(registration_data: UserRegistration):
             "campaign_name": f"{created_person['full_name']}'s First Campaign",
             "campaign_type": "targetted media campaign"
         }
-        await campaign_queries.create_campaign_in_db(default_campaign_data)
+        created_campaign = await campaign_queries.create_campaign_in_db(default_campaign_data)
         logger.info(f"Default campaign created for new client {created_person['email']}.")
         
         # Create client profile for new user
         await _ensure_client_profile_exists(created_person['person_id'], created_person['full_name'])
         
+        # Send email verification for non-OAuth signups
+        verification_token = await email_verification_queries.create_verification_token(
+            person_id=created_person['person_id'],
+            client_ip=None,  # TODO: Get from request if needed
+            expiry_hours=24
+        )
+        
+        if verification_token:
+            # Send verification email
+            email_sent = await email_service.send_verification_email(
+                to_email=created_person['email'],
+                token=verification_token,
+                full_name=created_person['full_name']
+            )
+            
+            if email_sent:
+                logger.info(f"Verification email sent to {created_person['email']}")
+            else:
+                logger.warning(f"Failed to send verification email to {created_person['email']}")
+        
         logger.info(f"New client registered: {created_person['email']} (ID: {created_person['person_id']})")
-        return {"message": "User registered successfully. Please log in.", "user_id": created_person["person_id"]}
+        return {
+            "message": "Registration successful! Please check your email to verify your account.",
+            "user_id": created_person["person_id"],
+            "email_sent": bool(verification_token and email_sent)
+        }
 
 async def _ensure_client_profile_exists(person_id: int, full_name: str):
     """
@@ -318,6 +345,236 @@ async def logout_api(request: Request, response: Response):
     logger.info(f"User {username} logged out via /auth/logout.")
     return {"message": "Successfully logged out"}
 
+@router.post("/verify-email", summary="Verify Email with Token")
+async def verify_email_with_token(
+    background_tasks: BackgroundTasks,
+    token: str = Form(..., min_length=32)
+):
+    """Verify user's email address using the token from verification email"""
+    try:
+        # Validate and use the token
+        person_id = await email_verification_queries.validate_and_use_token(token)
+        
+        if not person_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification token"
+            )
+        
+        # Get user info for welcome email
+        person = await people_queries.get_person_by_id_from_db(person_id)
+        if not person:
+            logger.error(f"Person not found after email verification: {person_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="User not found"
+            )
+        
+        # Get user's first campaign for the onboarding email
+        campaigns = await campaign_queries.get_all_campaigns_from_db(person_id=person_id)
+        first_campaign = campaigns[0] if campaigns else None
+        
+        # Send onboarding invitation email in background
+        if first_campaign:
+            # Create onboarding token
+            onboarding_token = await onboarding_queries.create_onboarding_token(
+                person_id=person_id,
+                campaign_id=first_campaign['campaign_id'],
+                created_by='system',
+                client_ip=None,  # Could get from request if needed
+                expiry_days=7
+            )
+            
+            if onboarding_token:
+                background_tasks.add_task(
+                    email_service.send_onboarding_invitation_email,
+                    to_email=person['email'],
+                    full_name=person['full_name'],
+                    token=onboarding_token,
+                    campaign_name=first_campaign['campaign_name'],
+                    created_by='system'
+                )
+                logger.info(f"Onboarding invitation email queued for {person['email']}")
+            else:
+                logger.error(f"Failed to create onboarding token for {person['email']}")
+        
+        logger.info(f"Email verified successfully for {person['email']} (ID: {person_id})")
+        
+        return {
+            "message": "Email verified successfully! Welcome to PGL.",
+            "email_verified": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying email: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while verifying your email"
+        )
+
+@router.post("/resend-verification", status_code=status.HTTP_202_ACCEPTED, summary="Resend Email Verification")
+async def resend_verification_email(
+    request: Request,
+    email: EmailStr = Form(...)
+):
+    """Resend email verification link to user"""
+    try:
+        # Get user by email
+        user = await people_queries.get_person_by_email_from_db(email)
+        
+        if not user:
+            # Don't reveal if email exists
+            return {
+                "message": "If an account exists with this email, a new verification link has been sent."
+            }
+        
+        # Check if already verified
+        verification_status = await email_verification_queries.get_verification_status(user['person_id'])
+        if verification_status.get("email_verified"):
+            return {
+                "message": "Email is already verified.",
+                "email_verified": True
+            }
+        
+        # Invalidate any existing tokens
+        await email_verification_queries.invalidate_all_tokens_for_person(user['person_id'])
+        
+        # Create new verification token
+        client_ip = request.client.host if request.client else None
+        verification_token = await email_verification_queries.create_verification_token(
+            person_id=user['person_id'],
+            client_ip=client_ip,
+            expiry_hours=24
+        )
+        
+        if verification_token:
+            # Send verification email
+            email_sent = await email_service.send_verification_email(
+                to_email=user['email'],
+                token=verification_token,
+                full_name=user['full_name']
+            )
+            
+            if email_sent:
+                logger.info(f"Verification email resent to {email}")
+            else:
+                logger.error(f"Failed to resend verification email to {email}")
+        
+        # Always return success for security
+        return {
+            "message": "If an account exists with this email, a new verification link has been sent."
+        }
+        
+    except Exception as e:
+        logger.error(f"Error resending verification email: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing your request"
+        )
+
+@router.post("/validate-onboarding-token", summary="Validate Onboarding Token")
+async def validate_onboarding_token(
+    request: Request,
+    response: Response,
+    token: str = Form(..., min_length=32),
+    create_session: bool = Form(default=False)
+):
+    """
+    Validate an onboarding token and return user/campaign info.
+    Frontend uses this to verify the token and get necessary data for onboarding.
+    If create_session=true, also creates a session for the user.
+    """
+    try:
+        # Validate the token
+        token_data = await onboarding_queries.validate_onboarding_token(token)
+        
+        if not token_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired onboarding token"
+            )
+        
+        logger.info(f"Onboarding token validated for {token_data['email']}")
+        
+        # Create session if requested
+        if create_session:
+            # Get full user details
+            person = await people_queries.get_person_by_id_from_db(token_data["person_id"])
+            if person:
+                # Create session data
+                session_data = {
+                    "username": person["email"],
+                    "role": person.get("role", "client"),
+                    "person_id": person["person_id"],
+                    "full_name": person.get("full_name")
+                }
+                request.session.update(session_data)
+                logger.info(f"Session created for {person['email']} via onboarding token")
+        
+        return {
+            "valid": True,
+            "person_id": token_data["person_id"],
+            "campaign_id": token_data["campaign_id"],
+            "email": token_data["email"],
+            "full_name": token_data["full_name"],
+            "email_verified": token_data["email_verified"],
+            "session_created": create_session
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating onboarding token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while validating the token"
+        )
+
+@router.post("/complete-onboarding", summary="Mark Onboarding as Completed")
+async def complete_onboarding(
+    token: str = Form(..., min_length=32),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Mark onboarding as completed for the current user.
+    Called when user finishes the onboarding flow.
+    """
+    try:
+        person_id = current_user.get("person_id")
+        
+        if not person_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not authenticated"
+            )
+        
+        # Mark onboarding as completed
+        success = await onboarding_queries.mark_onboarding_completed(person_id, token)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to complete onboarding"
+            )
+        
+        logger.info(f"Onboarding completed for user {current_user.get('username')}")
+        
+        return {
+            "message": "Onboarding completed successfully!",
+            "onboarding_completed": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error completing onboarding: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while completing onboarding"
+        )
+
 @router.get("/me", response_model=Dict[str, Any], summary="Get Current User Info")
 async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Get information about the currently authenticated user including profile and banner images."""
@@ -329,6 +586,12 @@ async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)
     person = await people_queries.get_person_by_id_from_db(person_id)
     if not person:
         raise HTTPException(status_code=404, detail="User profile not found.")
+    
+    # Get email verification status
+    verification_status = await email_verification_queries.get_verification_status(person_id)
+    
+    # Get onboarding status
+    onboarding_status = await onboarding_queries.get_onboarding_status(person_id)
     
     # Combine session data with profile data
     user_info = {
@@ -344,7 +607,11 @@ async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)
         "instagram_profile_url": person.get("instagram_profile_url"),
         "tiktok_profile_url": person.get("tiktok_profile_url"),
         "notification_settings": person.get("notification_settings"),
-        "privacy_settings": person.get("privacy_settings")
+        "privacy_settings": person.get("privacy_settings"),
+        "email_verified": verification_status.get("email_verified"),
+        "email_verified_at": verification_status.get("email_verified_at"),
+        "onboarding_completed": onboarding_status.get("onboarding_completed"),
+        "onboarding_completed_at": onboarding_status.get("onboarding_completed_at")
     }
     
     return user_info

@@ -200,17 +200,188 @@ async def update_person_password_hash(person_id: int, password_hash: str) -> boo
             raise
 
 async def delete_person_from_db(person_id: int) -> bool:
-    query = "DELETE FROM people WHERE person_id = $1;"
+    """
+    Cascade delete a person and all their related records.
+    This is an admin-only function that removes all data associated with a person.
+    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            result = await conn.execute(query, person_id)
-            deleted_count = int(result.split(" ")[1]) if result.startswith("DELETE ") else 0
-            if deleted_count > 0:
-                logger.info(f"Person deleted: {person_id}")
+            # Start a transaction to ensure atomicity
+            async with conn.transaction():
+                # First, get person info for logging
+                person = await conn.fetchrow("SELECT full_name, email FROM people WHERE person_id = $1", person_id)
+                if not person:
+                    logger.warning(f"Person not found for deletion: {person_id}")
+                    return False
+                
+                logger.info(f"Starting deletion process for person {person_id} ({person['full_name']}, {person['email']})")
+                
+                # Delete in order of dependencies (most dependent first)
+                
+                # 1. Handle review_tasks (NO ACTION constraint - need to nullify)
+                result = await conn.execute("UPDATE review_tasks SET assigned_to = NULL WHERE assigned_to = $1", person_id)
+                logger.debug(f"Nullified {result} review_tasks assignments")
+                
+                # 2. Get all campaigns for this person (need to handle campaign-related data)
+                campaign_ids = await conn.fetch("SELECT campaign_id FROM campaigns WHERE person_id = $1", person_id)
+                logger.info(f"Found {len(campaign_ids)} campaigns for person {person_id}")
+                
+                # 3. Delete all campaign-dependent data first
+                if campaign_ids:
+                    campaign_id_list = [str(row['campaign_id']) for row in campaign_ids]
+                    
+                    # Delete conversation insights first (depends on chatbot_conversations)
+                    # Check if table exists first
+                    table_exists = await conn.fetchval("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = 'conversation_insights'
+                        )
+                    """)
+                    
+                    if table_exists:
+                        result = await conn.execute("""
+                            DELETE FROM conversation_insights 
+                            WHERE conversation_id IN (
+                                SELECT conversation_id FROM chatbot_conversations 
+                                WHERE campaign_id = ANY($1::uuid[])
+                            )
+                        """, campaign_id_list)
+                        logger.debug(f"Deleted {result} conversation insights")
+                    
+                    # Delete status_history (depends on placements)
+                    result = await conn.execute("""
+                        DELETE FROM status_history 
+                        WHERE placement_id IN (
+                            SELECT placement_id FROM placements 
+                            WHERE campaign_id = ANY($1::uuid[])
+                        )
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} status history records")
+                    
+                    # Delete AI usage logs
+                    result = await conn.execute("""
+                        DELETE FROM ai_usage_logs 
+                        WHERE related_campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} AI usage logs")
+                    
+                    # Delete pitches (depends on pitch_generations and placements)
+                    result = await conn.execute("""
+                        DELETE FROM pitches 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} pitches")
+                    
+                    # Delete pitch_generations
+                    result = await conn.execute("""
+                        DELETE FROM pitch_generations 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} pitch generations")
+                    
+                    # Delete placements
+                    result = await conn.execute("""
+                        DELETE FROM placements 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} placements")
+                    
+                    # Delete match_suggestions
+                    result = await conn.execute("""
+                        DELETE FROM match_suggestions 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} match suggestions")
+                    
+                    # Delete campaign_media_discoveries
+                    result = await conn.execute("""
+                        DELETE FROM campaign_media_discoveries 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} campaign media discoveries")
+                    
+                    # Delete review_tasks
+                    result = await conn.execute("""
+                        DELETE FROM review_tasks 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} review tasks")
+                    
+                    # Delete chatbot_conversations
+                    result = await conn.execute("""
+                        DELETE FROM chatbot_conversations 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} chatbot conversations")
+                    
+                    # Delete media_kits
+                    result = await conn.execute("""
+                        DELETE FROM media_kits 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} media kits")
+                
+                # 4. Now we can safely delete campaigns
+                result = await conn.execute("DELETE FROM campaigns WHERE person_id = $1", person_id)
+                logger.info(f"Deleted {result} campaigns for person {person_id}")
+                
+                # 5. Handle any remaining person-related data before deleting the person
+                
+                # Delete from tables that might not have CASCADE
+                # Delete media_people entries
+                result = await conn.execute("DELETE FROM media_people WHERE person_id = $1", person_id)
+                logger.debug(f"Deleted {result} media_people entries")
+                
+                # Handle subscription history through client_profiles
+                client_profile = await conn.fetchrow("SELECT client_profile_id FROM client_profiles WHERE person_id = $1", person_id)
+                if client_profile:
+                    result = await conn.execute("DELETE FROM subscription_history WHERE client_profile_id = $1", client_profile['client_profile_id'])
+                    logger.debug(f"Deleted {result} subscription history records")
+                
+                # Delete chatbot conversations that might be directly linked to person (not through campaign)
+                result = await conn.execute("DELETE FROM chatbot_conversations WHERE person_id = $1", person_id)
+                logger.debug(f"Deleted {result} direct chatbot conversations")
+                
+                # Delete media kits that might be directly linked to person (not through campaign)
+                result = await conn.execute("DELETE FROM media_kits WHERE person_id = $1", person_id)
+                logger.debug(f"Deleted {result} direct media kits")
+                
+                # Check for and delete from tables that might exist
+                tables_to_check = [
+                    'email_verification_tokens',
+                    'onboarding_tokens',
+                    'oauth_connections',
+                    'oauth_states'
+                ]
+                
+                for table in tables_to_check:
+                    table_exists = await conn.fetchval(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_name = '{table}'
+                        )
+                    """)
+                    
+                    if table_exists:
+                        result = await conn.execute(f"DELETE FROM {table} WHERE person_id = $1", person_id)
+                        logger.debug(f"Deleted {result} from {table}")
+                
+                # 6. Tables with CASCADE constraints will be automatically deleted when we delete the person
+                # These include:
+                # - client_profiles
+                # - invoices
+                # - password_reset_tokens
+                # - payment_methods
+                
+                # 7. Finally, delete the person record (this will CASCADE delete the remaining tables)
+                result = await conn.execute("DELETE FROM people WHERE person_id = $1", person_id)
+                logger.info(f"Deleted person record: {result}")
+                
+                logger.info(f"Successfully deleted person and all related data: {person_id} ({person['full_name']}, {person['email']})")
                 return True
-            logger.warning(f"Person not found for deletion or delete failed: {person_id}")
-            return False
+                
         except Exception as e:
             logger.exception(f"Error deleting person {person_id} from DB: {e}")
             raise

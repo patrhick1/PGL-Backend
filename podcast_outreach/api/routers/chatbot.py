@@ -42,6 +42,9 @@ class ChatbotMessageResponse(BaseModel):
     phase: str
     keywords_found: int
     quick_replies: Optional[List[str]] = []
+    ready_for_completion: Optional[bool] = False
+    awaiting_confirmation: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 class ConversationSummaryResponse(BaseModel):
     conversation_id: str
@@ -71,7 +74,7 @@ conversation_engine = None
 def get_conversation_engine() -> ConversationEngine:
     global conversation_engine
     if conversation_engine is None:
-        conversation_engine = ConversationEngine()
+        conversation_engine = ConversationEngine(use_ai=True)  # Enable AI features
     return conversation_engine
 
 @router.post("/start", response_model=ChatbotStartResponse, 
@@ -150,6 +153,10 @@ async def send_chatbot_message(
         )
         
         # Message analytics tracking removed - ai_tracker is for AI usage, not general events
+        
+        # Debug logging before returning response
+        logger.info(f"API Response - bot_message has {response['bot_message'].count(chr(10))} newlines")
+        logger.info(f"API Response - first 200 chars: {repr(response['bot_message'][:200])}")
         
         return ChatbotMessageResponse(**response)
         
@@ -248,6 +255,18 @@ async def complete_chatbot_session(
                 detail="Access denied"
             )
         
+        # Check if already completed to prevent duplicate calls
+        if conv.get('status') == 'completed':
+            logger.info(f"Conversation {body.conversation_id} already completed - returning cached response")
+            return {
+                "status": "already_completed",
+                "message": "This conversation has already been completed",
+                "keywords_extracted": 0,
+                "bio_generation_status": "skipped",
+                "bio_generation_message": "Skipped - conversation already completed",
+                "next_steps": ["view_media_kit"]
+            }
+        
         engine = get_conversation_engine()
         result = await engine.complete_conversation(str(body.conversation_id))
         
@@ -336,19 +355,25 @@ async def resume_conversation(
         if not conversation_id:
             conv = await conv_queries.get_latest_resumable_conversation(campaign_id, person_id)
             if not conv:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No active or paused conversations found for this campaign"
-                )
+                return {
+                    "conversation_id": None,
+                    "status": "no_conversation",
+                    "message": "No conversation to resume. Please start a new conversation to begin.",
+                    "has_active_conversation": False,
+                    "suggestion": "Click 'Start New Conversation' to begin your questionnaire."
+                }
             conversation_id = conv['conversation_id']
         else:
             # Verify ownership if specific conversation_id provided
             conv = await conv_queries.get_conversation_by_id(conversation_id)
             if not conv:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Conversation not found"
-                )
+                return {
+                    "conversation_id": str(conversation_id),
+                    "status": "not_found",
+                    "message": "The requested conversation was not found. It may have been deleted or completed.",
+                    "has_active_conversation": False,
+                    "suggestion": "Please check your conversation history or start a new conversation."
+                }
             
             if conv['person_id'] != person_id:
                 raise HTTPException(
@@ -528,4 +553,70 @@ async def get_latest_conversation(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get latest conversation: {str(e)}"
+        )
+
+@router.get("/latest-completed",
+            summary="Get Latest Completed Conversation",
+            description="Get the latest completed conversation for the campaign")
+async def get_latest_completed_conversation(
+    campaign_id: UUID4,
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Get the latest completed conversation for a campaign"""
+    try:
+        # Get the latest completed conversation
+        conv = await conv_queries.get_latest_completed_conversation(campaign_id)
+        if not conv:
+            return {
+                "found": False,
+                "message": "No completed conversations found for this campaign"
+            }
+        
+        # For clients, verify they own this conversation
+        if user.get("role") == "client":
+            if conv['person_id'] != user.get("person_id"):
+                # If not theirs, return not found
+                return {
+                    "found": False,
+                    "message": "No completed conversations found for this campaign"
+                }
+        
+        # Parse the conversation data
+        messages = json.loads(conv.get('messages', '[]'))
+        extracted_data = json.loads(conv.get('extracted_data', '{}'))
+        
+        # Get conversation summary if available
+        conv_summary = await conv_queries.get_conversation_summary(conv['conversation_id'])
+        
+        # Calculate insights count
+        total_insights = 0
+        insight_types = []
+        if conv_summary:
+            total_insights = conv_summary.get('total_insights', 0)
+            insight_types = conv_summary.get('insight_types', [])
+        
+        return {
+            "found": True,
+            "conversation_id": str(conv['conversation_id']),
+            "person_id": conv['person_id'],
+            "status": conv['status'],
+            "phase": conv['conversation_phase'],
+            "progress": conv['progress'],
+            "message_count": len(messages),
+            "started_at": conv['started_at'].isoformat() if conv['started_at'] else None,
+            "completed_at": conv['completed_at'].isoformat() if conv['completed_at'] else None,
+            "last_activity_at": conv['last_activity_at'].isoformat() if conv['last_activity_at'] else None,
+            "extracted_data": extracted_data,
+            "messages": messages,
+            "total_insights": total_insights,
+            "insight_types": insight_types,
+            "conversation_metadata": json.loads(conv.get('conversation_metadata', '{}'))
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error getting latest completed conversation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get latest completed conversation: {str(e)}"
         )

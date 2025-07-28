@@ -44,8 +44,6 @@ You'll need to set these in Render's dashboard:
 - [ ] `GOOGLE_SERVICE_ACCOUNT_JSON` - The minified JSON string from step 1
 
 #### Email Configuration
-- [ ] `GMAIL_USER`
-- [ ] `GMAIL_APP_PASSWORD`
 - [ ] `SMTP_SERVER` - smtp.gmail.com
 - [ ] `SMTP_PORT` - 587
 - [ ] `SMTP_USERNAME`

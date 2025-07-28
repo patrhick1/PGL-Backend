@@ -18,7 +18,7 @@ class CampaignBase(BaseModel):
     compiled_social_posts: Optional[str] = None # Link to GDoc or text
     podcast_transcript_link: Optional[str] = None # Link to GDoc
     compiled_articles_link: Optional[str] = None # Link to GDoc
-    mock_interview_trancript: Optional[str] = None # Link to GDoc or text
+    mock_interview_transcript: Optional[str] = None # Link to GDoc or text
     # embedding: Optional[List[float]] = None # VECTOR(1536) - Handled separately if needed
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -44,7 +44,7 @@ class CampaignUpdate(BaseModel):
     compiled_social_posts: Optional[str] = None
     podcast_transcript_link: Optional[str] = None
     compiled_articles_link: Optional[str] = None
-    mock_interview_trancript: Optional[str] = None
+    mock_interview_transcript: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     goal_note: Optional[str] = None

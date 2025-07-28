@@ -1,7 +1,7 @@
 # podcast_outreach/api/routers/campaigns.py
 
 import uuid
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 import logging
@@ -26,6 +26,11 @@ from podcast_outreach.services.campaigns.questionnaire_processor import (
 
 # Import dependencies for authentication
 from ..dependencies import get_current_user, get_admin_user, get_staff_user
+from ..dependencies_email_verification import get_verified_user
+
+# Import additional services
+from ...database.queries import onboarding_queries
+from ...services.email_service import email_service
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +60,18 @@ async def test_campaigns_db():
         }
 
 @router.post("/", response_model=CampaignInDB, status_code=status.HTTP_201_CREATED, summary="Create New Campaign")
-async def create_campaign_api(campaign: CampaignCreate, user: dict = Depends(get_admin_user)):
+async def create_campaign_api(
+    campaign: CampaignCreate, 
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_admin_user)
+):
     """
     Creates a new campaign record. Admin access required.
+    Also sends onboarding invitation email to the client.
     """
     campaign_dict = campaign.model_dump()
     try:
-        # Optional: Validate person_id exists
+        # Validate person_id exists and get user details
         person_exists = await people_queries.get_person_by_id_from_db(campaign.person_id)
         if not person_exists:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Person with ID {campaign.person_id} does not exist.")
@@ -69,6 +79,33 @@ async def create_campaign_api(campaign: CampaignCreate, user: dict = Depends(get
         created_db_campaign = await campaign_queries.create_campaign_in_db(campaign_dict)
         if not created_db_campaign:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create campaign in database.")
+        
+        # Send onboarding invitation email if user hasn't completed onboarding
+        onboarding_status = await onboarding_queries.get_onboarding_status(campaign.person_id)
+        if not onboarding_status.get("onboarding_completed"):
+            # Create onboarding token
+            onboarding_token = await onboarding_queries.create_onboarding_token(
+                person_id=campaign.person_id,
+                campaign_id=created_db_campaign['campaign_id'],
+                created_by='admin',
+                client_ip=None,
+                expiry_days=7
+            )
+            
+            if onboarding_token:
+                # Send onboarding email in background
+                background_tasks.add_task(
+                    email_service.send_onboarding_invitation_email,
+                    to_email=person_exists['email'],
+                    full_name=person_exists['full_name'],
+                    token=onboarding_token,
+                    campaign_name=created_db_campaign['campaign_name'],
+                    created_by='admin'
+                )
+                logger.info(f"Admin-created campaign: Onboarding invitation email queued for {person_exists['email']}")
+            else:
+                logger.error(f"Failed to create onboarding token for admin-created campaign for {person_exists['email']}")
+        
         return CampaignInDB(**created_db_campaign)
     except HTTPException:
         raise # Re-raise FastAPI HTTPExceptions
@@ -229,7 +266,7 @@ async def delete_campaign_api(campaign_id: uuid.UUID, user: dict = Depends(get_a
 async def submit_campaign_questionnaire_api(
     campaign_id: uuid.UUID, 
     submission_data: QuestionnaireSubmitData,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_verified_user),
     enable_social_enrichment: bool = Query(default=True, description="Enable social media enrichment processing")
 ):
     """
@@ -344,7 +381,7 @@ async def save_campaign_questionnaire_draft_api(
 async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict = Depends(get_current_user)):
     """
     Triggers the AI-powered generation of client bio and talking angles for a campaign.
-    Requires the campaign to have mock_interview_trancript populated (usually from questionnaire).
+    Requires the campaign to have mock_interview_transcript populated (usually from questionnaire).
     Clients can generate bio/angles for their own campaigns. Staff/Admin can generate for any campaign.
     """
     campaign_exists = await campaign_queries.get_campaign_by_id(campaign_id)
@@ -357,12 +394,12 @@ async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict =
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only generate bio/angles for your own campaigns.")
     # Admin/staff can generate for any campaign
     
-    if not campaign_exists.get("mock_interview_trancript"):
+    if not campaign_exists.get("mock_interview_transcript"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Campaign {campaign_id} does not have a mock interview transcript. Please submit the questionnaire first.")
 
     processor = AnglesProcessorPG() 
     try:
-        # The process_campaign method in AnglesProcessorPG should use the mock_interview_trancript
+        # The process_campaign method in AnglesProcessorPG should use the mock_interview_transcript
         # and other fields from the campaign record.
         result = await processor.process_campaign(str(campaign_id))
         

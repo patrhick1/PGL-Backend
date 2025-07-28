@@ -78,7 +78,7 @@ async def submit_lead_magnet_questionnaire(submission_data: schemas.LeadMagnetSu
         "campaign_name": campaign_name,
         "campaign_type": "lead_magnet_prospect",
         "questionnaire_responses": submission_data.questionnaire_data, # Pass the dict directly
-        "mock_interview_trancript": mock_interview_text 
+        "mock_interview_transcript": mock_interview_text 
     }
     print(f"--- [PUBLIC LEAD MAGNET] --- Creating prospect campaign with data: {prospect_campaign_data}") # DEBUG PRINT
     prospect_campaign = await campaign_queries.create_campaign_in_db(prospect_campaign_data)

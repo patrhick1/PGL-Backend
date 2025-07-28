@@ -294,3 +294,25 @@ async def get_latest_resumable_conversation(campaign_id: UUID, person_id: int) -
         except Exception as e:
             logger.exception(f"Error fetching latest resumable conversation: {e}")
             raise
+
+async def get_latest_completed_conversation(campaign_id: UUID) -> Optional[Dict[str, Any]]:
+    """Get the latest completed conversation for a campaign"""
+    query = """
+    SELECT * FROM chatbot_conversations 
+    WHERE campaign_id = $1 
+    AND status = 'completed'
+    ORDER BY completed_at DESC, last_activity_at DESC
+    LIMIT 1;
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, campaign_id)
+            if row:
+                logger.info(f"Found latest completed conversation: {row['conversation_id']} for campaign {campaign_id}")
+                return dict(row)
+            logger.info(f"No completed conversations found for campaign {campaign_id}")
+            return None
+        except Exception as e:
+            logger.exception(f"Error fetching latest completed conversation: {e}")
+            raise

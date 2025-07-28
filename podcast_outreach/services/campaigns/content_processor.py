@@ -283,7 +283,7 @@ class ClientContentProcessor:
             text_segments.append(f"Campaign Angles (direct):\n{campaign_angles_source}\n")
         
         # Mock Interview Transcript
-        mock_interview_source = campaign_data.get('mock_interview_trancript') # Note: 'trancript' typo from schema
+        mock_interview_source = campaign_data.get('mock_interview_transcript') # Note: 'trancript' typo from schema
         if self._is_gdoc_link(mock_interview_source):
             content = await self._get_gdoc_content_async(mock_interview_source, f"{campaign_name_for_logs} - Mock Interview GDoc")
             if content: text_segments.append(f"Mock Interview Transcript (from GDoc):\n{content}\n")

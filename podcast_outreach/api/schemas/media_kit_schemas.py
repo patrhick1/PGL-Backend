@@ -1,6 +1,6 @@
 # podcast_outreach/api/schemas/media_kit_schemas.py
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, HttpUrl
 from datetime import datetime
 from pydantic import EmailStr
@@ -42,6 +42,8 @@ class MediaKitBase(BaseModel):
     headshot_image_url: Optional[str] = None
     logo_image_url: Optional[str] = None
     call_to_action_text: Optional[str] = None
+    call_to_action_url: Optional[str] = None
+    show_contact_form: Optional[bool] = Field(default=True)
     contact_information_for_booking: Optional[str] = None
     # custom_sections: Optional[List[Dict[str, str]]] = Field(default_factory=list) # Old definition
     custom_sections: Optional[List[CustomSectionSchema]] = Field(default_factory=list) # New definition
@@ -65,9 +67,23 @@ class MediaKitEditableContentSchema(BaseModel):
     # Bio and Angles are pulled from campaign GDocs by the service, not directly set here.
 
 class MediaKitSettingsUpdateSchema(BaseModel):
-    is_public: Optional[bool] = None
+    # Content fields
+    title: Optional[str] = Field(None, description="Media kit title")
+    headline: Optional[str] = Field(None, description="Short headline/tagline")
+    custom_intro: Optional[str] = Field(None, description="Custom introduction text (maps to 'introduction' field)")
+    call_to_action_text: Optional[str] = Field(None, description="CTA button text")
+    call_to_action_url: Optional[Union[HttpUrl, str]] = Field(None, description="CTA button URL (valid URL or empty string)")
+    
+    # Social media links
+    person_social_links: Optional[List[SocialLinkSchema]] = Field(None, description="List of social media links with platform and URL")
+    
+    # Display settings
+    show_contact_form: Optional[bool] = Field(None, description="Whether to show contact form on public page")
+    is_public: Optional[bool] = Field(None, description="Whether the media kit is publicly accessible")
+    theme_preference: Optional[str] = Field(None, description="Theme selection (default: 'modern')")
+    
+    # URL settings
     slug: Optional[str] = Field(None, min_length=3, max_length=100, pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', description="URL-friendly slug. If changed, uniqueness will be checked.")
-    theme_preference: Optional[str] = None
 
 # Internal schemas used by the service, not directly by API input usually
 class MediaKitCreateInternal(MediaKitBase): # MediaKitBase now more aligned with DB fields
@@ -125,4 +141,33 @@ class TalkingPoint(BaseModel):
     description: str = Field(description="A more detailed description or elaboration of the talking point.")
 
 class ParsedTalkingPoints(BaseModel):
-    talking_points: List[TalkingPoint] = Field(default_factory=list) 
+    talking_points: List[TalkingPoint] = Field(default_factory=list)
+
+# --- Update Schema for comprehensive media kit updates ---
+class MediaKitUpdateSchema(BaseModel):
+    """Schema for updating all fields of a media kit"""
+    title: Optional[str] = None
+    slug: Optional[str] = Field(None, min_length=3, max_length=100, pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
+    is_public: Optional[bool] = None
+    theme_preference: Optional[str] = None
+    headline: Optional[str] = None
+    tagline: Optional[str] = None
+    introduction: Optional[str] = None
+    full_bio_content: Optional[str] = None
+    summary_bio_content: Optional[str] = None
+    short_bio_content: Optional[str] = None
+    bio_source: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    talking_points: Optional[List[Dict[str, str]]] = None
+    angles_source: Optional[str] = None
+    sample_questions: Optional[List[str]] = None
+    key_achievements: Optional[List[str]] = None
+    previous_appearances: Optional[List[Dict[str, str]]] = None
+    person_social_links: Optional[List[SocialLinkSchema]] = None
+    social_media_stats: Optional[Dict[str, Any]] = None
+    testimonials_section: Optional[str] = None
+    headshot_image_url: Optional[str] = None
+    logo_image_url: Optional[str] = None
+    call_to_action_text: Optional[str] = None
+    contact_information_for_booking: Optional[str] = None
+    custom_sections: Optional[List[CustomSectionSchema]] = None 

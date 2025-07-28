@@ -21,7 +21,10 @@ async def extract_topics_from_questionnaire(questionnaire: Dict[str, Any]) -> Di
         'expertise_topics': [],
         'target_audience': '',
         'key_messages': [],
-        'previous_shows': []
+        'previous_shows': [],
+        'current_role': '',
+        'unique_perspective': '',
+        'ideal_podcast_preference': ''  # New field for user's preference
     }
     
     # Extract expertise topics
@@ -34,6 +37,15 @@ async def extract_topics_from_questionnaire(questionnaire: Dict[str, Any]) -> Di
             else:
                 info['expertise_topics'] = [t.strip() for t in str(expertise).split(',') if t.strip()]
     
+    # Extract current role and unique perspective
+    contact_info = questionnaire.get('contactInfo', {})
+    if isinstance(contact_info, dict):
+        info['current_role'] = contact_info.get('title', '')
+    
+    unique_value = questionnaire.get('uniqueValue', {})
+    if isinstance(unique_value, dict):
+        info['unique_perspective'] = unique_value.get('description', '')
+    
     # Extract target audience
     target_audience = questionnaire.get('targetAudience', {})
     if isinstance(target_audience, dict):
@@ -43,6 +55,8 @@ async def extract_topics_from_questionnaire(questionnaire: Dict[str, Any]) -> Di
     suggested_topics = questionnaire.get('suggestedTopics', {})
     if isinstance(suggested_topics, dict):
         topics = suggested_topics.get('topics', '')
+        key_message = suggested_topics.get('keyMessage', '')
+        
         if topics:
             if isinstance(topics, list):
                 info['key_messages'] = topics
@@ -50,6 +64,10 @@ async def extract_topics_from_questionnaire(questionnaire: Dict[str, Any]) -> Di
                 import re
                 topic_list = re.split(r'\d+\.\s*|\n|,', str(topics))
                 info['key_messages'] = [t.strip() for t in topic_list if t.strip()]
+        
+        # Also capture the key message if available
+        if key_message and key_message not in info['key_messages']:
+            info['key_messages'].append(key_message)
     
     # Extract previous shows
     media_exp = questionnaire.get('mediaExperience', {})
@@ -60,6 +78,12 @@ async def extract_topics_from_questionnaire(questionnaire: Dict[str, Any]) -> Di
                 show.get('showName', '') for show in previous 
                 if isinstance(show, dict) and show.get('showName')
             ]
+    
+    # Extract ideal podcast preference if available
+    # This field may be added by chatbot in future
+    ideal_podcast = questionnaire.get('idealPodcast', {})
+    if isinstance(ideal_podcast, dict):
+        info['ideal_podcast_preference'] = ideal_podcast.get('description', '')
     
     return info
 
@@ -75,25 +99,54 @@ async def generate_ideal_description(campaign_data: Dict[str, Any], openai_servi
     if not info['expertise_topics'] and not info['key_messages']:
         return ""
     
-    prompt = f"""Based on the following client information, create a 2-3 sentence description of the ideal podcasts they should appear on:
+    # Use the user's preference if available
+    if info['ideal_podcast_preference']:
+        prompt = f"""Based on the following client information and their stated preference, create a 2-3 sentence description of the ideal podcasts they should appear on:
 
-Client Expertise: {', '.join(info['expertise_topics'][:10])}
-Key Discussion Topics: {', '.join(info['key_messages'][:10])}
-Target Audience: {info['target_audience']}
-Previous Shows: {', '.join(info['previous_shows'][:5])}
+Client's Stated Preference: {info['ideal_podcast_preference']}
 
-Write a clear, specific description that captures:
-1. The type of podcasts (topic/industry focus)
-2. The ideal audience demographic
-3. The show format or style that would work best
+Additional Context:
+- Current Role: {info['current_role']}
+- Expertise: {', '.join(info['expertise_topics'][:10])}
+- Key Topics: {', '.join(info['key_messages'][:10])}
+- Target Audience: {info['target_audience']}
+- Unique Perspective: {info['unique_perspective']}
+- Previous Shows: {', '.join(info['previous_shows'][:5]) if info['previous_shows'] else 'None mentioned'}
 
-Keep it concise and actionable for matching purposes."""
+Refine their preference into a clear, actionable description that:
+1. Specifies the exact type of podcasts and their focus areas
+2. Identifies the target audience demographics and characteristics
+3. Describes the ideal show format (interview, panel, educational, etc.)
+4. Mentions any specific podcast characteristics that would be a good fit
+
+Make it specific and actionable for podcast matching."""
+    else:
+        # Fallback to generating based on available data
+        prompt = f"""Based on the following client information, create a 2-3 sentence description of the ideal podcasts they should appear on:
+
+Professional Background:
+- Current Role: {info['current_role']}
+- Areas of Expertise: {', '.join(info['expertise_topics'][:10])}
+- Unique Perspective: {info['unique_perspective']}
+
+Content Focus:
+- Key Topics: {', '.join(info['key_messages'][:10])}
+- Target Audience: {info['target_audience']}
+- Previous Podcast Experience: {', '.join(info['previous_shows'][:5]) if info['previous_shows'] else 'None mentioned'}
+
+Generate a specific, actionable description that identifies:
+1. The exact type of podcasts (e.g., "business podcasts focusing on B2B SaaS growth" not just "business podcasts")
+2. The specific audience demographics (e.g., "startup founders in series A-B stage" not just "entrepreneurs")
+3. The ideal show format and host type (e.g., "interview-style shows with hosts who are active operators" not just "interview shows")
+4. Any specific characteristics that indicate a good fit
+
+Avoid vague terms. Be specific about the niche, audience, and format."""
 
     try:
-        response = await openai_service.get_completion(
+        response = await openai_service.create_chat_completion(
+            system_prompt="You are an expert at matching podcast guests with ideal podcasts. Generate clear, specific descriptions that help with podcast vetting and matching.",
             prompt=prompt,
-            max_tokens=150,
-            temperature=0.7
+            workflow="ideal_podcast_generation"
         )
         return response.strip()
     except Exception as e:

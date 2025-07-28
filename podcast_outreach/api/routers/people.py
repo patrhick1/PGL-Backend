@@ -146,7 +146,18 @@ async def update_person_api(person_id: int, person_update_data: PersonUpdate, us
 @router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete Person")
 async def delete_person_api(person_id: int, user: dict = Depends(get_admin_user)):
     """
-    Deletes a person record. Admin access required.
+    Deletes a person record and all associated data. Admin access required.
+    
+    This will cascade delete:
+    - All campaigns owned by the person
+    - All pitches, placements, and match suggestions
+    - Media kits and associated content
+    - Chatbot conversations and insights
+    - OAuth connections and tokens
+    - Payment methods and invoices
+    - Client profile
+    
+    This action cannot be undone.
     """
     try:
         success = await people_queries.delete_person_from_db(person_id)

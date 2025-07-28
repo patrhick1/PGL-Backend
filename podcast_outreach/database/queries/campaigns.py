@@ -44,7 +44,7 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
         campaign_id, person_id, attio_client_id, campaign_name, campaign_type,
         campaign_bio, campaign_angles, campaign_keywords, questionnaire_keywords,
         gdoc_keywords, compiled_social_posts, podcast_transcript_link, 
-        compiled_articles_link, mock_interview_trancript, start_date, end_date, 
+        compiled_articles_link, mock_interview_transcript, start_date, end_date, 
         goal_note, media_kit_url, instantly_campaign_id, ideal_podcast_description,
         questionnaire_responses
     ) VALUES (
@@ -86,7 +86,7 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
                 campaign_data.get('compiled_social_posts'), 
                 campaign_data.get('podcast_transcript_link'),
                 campaign_data.get('compiled_articles_link'), 
-                campaign_data.get('mock_interview_trancript'),
+                campaign_data.get('mock_interview_transcript'),
                 campaign_data.get('start_date'), 
                 campaign_data.get('end_date'),
                 campaign_data.get('goal_note'), 

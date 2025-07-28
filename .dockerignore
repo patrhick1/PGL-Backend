@@ -88,6 +88,10 @@ uploads/
 scripts/test_*.py
 scripts/*_test.py
 
+# Migrations and scripts
+podcast_outreach/migrations/
+podcast_outreach/scripts/
+
 # Any local development files
 *.local
 local_*

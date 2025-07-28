@@ -18,8 +18,10 @@ from ..database.queries import people as people_queries
 from ..database.queries import oauth_queries
 from ..database.queries import campaigns as campaign_queries
 from ..database.queries import client_profiles as client_profile_queries
+from ..database.queries import onboarding_queries
 from ..api.dependencies import prepare_session_data
 from ..config import FRONTEND_ORIGIN, BACKEND_URL
+from .email_service import email_service
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +279,10 @@ class OAuthService:
             "oauth_refresh_token": encrypted_refresh,
             "oauth_access_token_expires": token_expires_at,
             "last_oauth_login": datetime.utcnow(),
-            "profile_image_url": user_info.get("picture")
+            "profile_image_url": user_info.get("picture"),
+            # OAuth users are automatically email verified
+            "email_verified": True,
+            "email_verified_at": datetime.utcnow()
         }
         
         created_person = await people_queries.create_person_in_db(person_data)
@@ -304,7 +309,7 @@ class OAuthService:
             "campaign_name": f"{created_person['full_name']}'s First Campaign",
             "campaign_type": "targetted media campaign"
         }
-        await campaign_queries.create_campaign_in_db(campaign_data)
+        created_campaign = await campaign_queries.create_campaign_in_db(campaign_data)
         
         # Create client profile
         profile_data = {
@@ -313,6 +318,35 @@ class OAuthService:
             "weekly_discovery_allowance": 50,
         }
         await client_profile_queries.create_client_profile(created_person["person_id"], profile_data)
+        
+        # Send onboarding invitation email for OAuth users (they skip email verification but still need onboarding)
+        try:
+            # Create onboarding token
+            onboarding_token = await onboarding_queries.create_onboarding_token(
+                person_id=created_person['person_id'],
+                campaign_id=campaign_data['campaign_id'],
+                created_by='oauth',
+                client_ip=None,
+                expiry_days=7
+            )
+            
+            if onboarding_token:
+                # Send onboarding invitation email
+                email_sent = await email_service.send_onboarding_invitation_email(
+                    to_email=created_person['email'],
+                    full_name=created_person['full_name'],
+                    token=onboarding_token,
+                    campaign_name=campaign_data['campaign_name'],
+                    created_by='oauth'
+                )
+                if email_sent:
+                    logger.info(f"Onboarding invitation email sent to OAuth user {created_person['email']}")
+                else:
+                    logger.error(f"Failed to send onboarding invitation email to OAuth user {created_person['email']}")
+            else:
+                logger.error(f"Failed to create onboarding token for OAuth user {created_person['email']}")
+        except Exception as e:
+            logger.error(f"Failed to send onboarding invitation email to OAuth user {created_person['email']}: {e}")
         
         logger.info(f"Created new OAuth user: {created_person['email']} via {provider}")
         
@@ -332,7 +366,10 @@ class OAuthService:
             "oauth_email_verified": user_info["email_verified"],
             "oauth_refresh_token": encrypted_refresh,
             "oauth_access_token_expires": token_expires_at,
-            "last_oauth_login": datetime.utcnow()
+            "last_oauth_login": datetime.utcnow(),
+            # Mark as email verified when linking OAuth
+            "email_verified": True,
+            "email_verified_at": datetime.utcnow()
         }
         
         # Update profile image if not already set

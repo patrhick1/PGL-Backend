@@ -2,16 +2,17 @@
 
 import asyncio
 import json
+import os
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from uuid import UUID
 
 from podcast_outreach.logging_config import get_logger
 from podcast_outreach.database.queries import chatbot_conversations as conv_queries
 from podcast_outreach.database.queries import campaigns as campaign_queries
 from podcast_outreach.database.queries import people as people_queries
-from podcast_outreach.services.chatbot.enhanced_nlp_processor import EnhancedNLPProcessor
-from podcast_outreach.services.chatbot.improved_conversation_flows import ImprovedConversationFlowManager
+# from podcast_outreach.services.chatbot.enhanced_nlp_processor import EnhancedNLPProcessor  # REMOVED - legacy system
+# from podcast_outreach.services.chatbot.improved_conversation_flows import ImprovedConversationFlowManager  # REMOVED - legacy system
 from podcast_outreach.services.chatbot.mock_interview_generator import MockInterviewGenerator
 from podcast_outreach.services.chatbot.data_merger import DataMerger
 from podcast_outreach.services.ai.gemini_client import GeminiService
@@ -21,15 +22,29 @@ from podcast_outreach.services.campaigns.angles_generator import AnglesProcessor
 logger = get_logger(__name__)
 
 class ConversationEngine:
-    def __init__(self, gemini_service: GeminiService = None):
+    def __init__(self, gemini_service: GeminiService = None, use_ai: bool = False):
         self.gemini_service = gemini_service or GeminiService()
-        self.nlp_processor = EnhancedNLPProcessor()
-        self.flow_manager = ImprovedConversationFlowManager()
+        # self.nlp_processor = EnhancedNLPProcessor()  # REMOVED - legacy system
+        # self.flow_manager = ImprovedConversationFlowManager()  # REMOVED - legacy system
         self.interview_generator = MockInterviewGenerator()
         self.data_merger = DataMerger()
         self.model_name = "gemini-2.0-flash"
         # Track asked questions per conversation
         self.conversation_states = {}
+        
+        # AI integration layer removed - using agentic system exclusively
+        
+        # Initialize agentic adapter
+        try:
+            from podcast_outreach.services.chatbot.agentic.agentic_adapter import AgenticChatbotAdapter
+            self.agentic_adapter = AgenticChatbotAdapter(
+                gemini_service=self.gemini_service,
+                fallback_enabled=True
+            )
+            logger.info("Agentic adapter initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize agentic adapter: {e}")
+            self.agentic_adapter = None
     
     async def create_conversation(self, campaign_id: str, person_id: int) -> Dict:
         """Create a new conversation session"""
@@ -39,6 +54,61 @@ class ConversationEngine:
             if not campaign:
                 raise ValueError("Campaign not found")
             
+            # Get person info
+            person = await people_queries.get_person_by_id_from_db(person_id)
+            
+            # Try agentic system first
+            if self.agentic_adapter:
+                logger.info(f"Attempting to create conversation with agentic adapter for person {person_id}")
+                agentic_result = await self.agentic_adapter.create_conversation(
+                    campaign_id=campaign_id,
+                    person_id=person_id,
+                    person_data=person
+                )
+                
+                if agentic_result:
+                    logger.info(f"Agentic conversation created successfully")
+                    # Create conversation with agentic data
+                    conversation = await conv_queries.create_conversation(
+                        UUID(campaign_id), person_id, 'active', 'introduction'
+                    )
+                    
+                    if not conversation:
+                        raise ValueError("Failed to create conversation")
+                    
+                    # Add initial message and metadata
+                    messages = [{
+                        "type": "bot",
+                        "content": agentic_result['initial_message'],
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "phase": "introduction"
+                    }]
+                    
+                    metadata = {
+                        "start_time": datetime.utcnow().isoformat(),
+                        "is_agentic": True,
+                        "use_agentic": agentic_result.get('use_agentic', True)
+                    }
+                    
+                    await conv_queries.update_conversation(
+                        conversation['conversation_id'],
+                        messages,
+                        {},  # extracted_data
+                        metadata,
+                        'introduction',
+                        0  # progress
+                    )
+                    
+                    return {
+                        "conversation_id": str(conversation['conversation_id']),
+                        "initial_message": agentic_result['initial_message'],
+                        "estimated_time": "15-20 minutes"
+                    }
+                else:
+                    logger.warning("Agentic adapter returned None, falling back to legacy")
+            
+            # Continue with legacy conversation creation
+            logger.info("Creating conversation with legacy system")
             # Create conversation
             conversation = await conv_queries.create_conversation(
                 UUID(campaign_id), person_id, 'active', 'introduction'
@@ -46,9 +116,6 @@ class ConversationEngine:
             
             if not conversation:
                 raise ValueError("Failed to create conversation")
-            
-            # Get person info for personalization
-            person = await people_queries.get_person_by_id_from_db(person_id)
             
             initial_message = self._generate_initial_message(
                 person.get('full_name', 'there'),
@@ -90,157 +157,57 @@ class ConversationEngine:
             if not conv:
                 raise ValueError("Active conversation not found")
             
-            # Parse existing data
-            messages = json.loads(conv['messages'])
-            extracted_data = json.loads(conv['extracted_data'])
-            metadata = json.loads(conv['conversation_metadata'])
-            
-            # Add user message
-            messages.append({
-                "type": "user",
-                "content": message,
-                "timestamp": datetime.utcnow().isoformat(),
-                "phase": conv['conversation_phase']
-            })
-            
-            # Process with NLP
-            nlp_results = await self.nlp_processor.process(
-                message, 
-                messages, 
-                extracted_data,
-                conv.get('campaign_keywords') or []
-            )
-            
-            # Check if this is a correction
-            correction_indicators = ['for my', 'actually', 'correction', 'i meant', 'let me clarify', 'to be clear']
-            is_correction = any(indicator in message.lower() for indicator in correction_indicators)
-            
-            # Update extracted data
-            if is_correction and 'achievement' in message.lower():
-                # Clear old achievements if this is a correction
-                extracted_data['achievements'] = []
-                extracted_data['stories'] = []  # Also clear stories as they might be related
-            
-            extracted_data = self._merge_extracted_data(extracted_data, nlp_results)
-            
-            # Store recent user responses for better context
-            if 'recent_responses' not in extracted_data:
-                extracted_data['recent_responses'] = []
-            extracted_data['recent_responses'].append(message)
-            # Keep only last 5 responses
-            extracted_data['recent_responses'] = extracted_data['recent_responses'][-5:]
-            
-            # Check if user wants to complete the conversation
-            completion_phrases = ['complete', 'done', 'finish', 'that\'s all', 'awesome', 'perfect', 'great']
-            state = self._get_conversation_state(conversation_id)
-            if (state["phase_states"].get("confirmation", {}).get("complete", False) and 
-                any(phrase in message.lower() for phrase in completion_phrases)):
-                # Complete the conversation
-                await self.complete_conversation(conversation_id)
-                return {
-                    "bot_message": "Thank you! Your media kit is being created and we'll start finding podcast matches for you. You'll receive updates via email as we find great opportunities!",
-                    "extracted_data": extracted_data,
-                    "progress": 100,
-                    "phase": "complete",
-                    "completed": True,
-                    "keywords_found": len(extracted_data.get('keywords', {}).get('explicit', [])),
-                    "quick_replies": []
-                }
-            
-            # Check for LinkedIn URL and analyze if not done yet
-            linkedin_url = self._extract_linkedin_from_social(nlp_results)
-            linkedin_processed = False
-            
-            if linkedin_url and not metadata.get('linkedin_analyzed'):
-                # Add a processing message
-                processing_message = {
-                    "type": "bot",
-                    "content": "I see you've shared your LinkedIn profile! Let me analyze it quickly to learn more about your expertise... This will just take a moment.",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "phase": conv['conversation_phase'],
-                    "is_processing": True
-                }
-                messages.append(processing_message)
-                
-                # Update conversation to show processing
-                await conv_queries.update_conversation(
-                    UUID(conversation_id),
-                    messages,
-                    extracted_data,
-                    metadata,
-                    conv['conversation_phase'],
-                    self.nlp_processor.calculate_progress(extracted_data)
+            # Try agentic system first
+            if self.agentic_adapter:
+                agentic_response = await self.agentic_adapter.process_message(
+                    conversation_id=conversation_id,
+                    message=message,
+                    conversation_data=conv
                 )
                 
-                try:
-                    # Analyze LinkedIn profile
-                    linkedin_analyzer = LinkedInAnalyzer()
-                    linkedin_data = await linkedin_analyzer.analyze_profile(linkedin_url)
+                if agentic_response:
+                    # Update conversation with agentic response
+                    messages = json.loads(conv['messages'])
+                    messages.extend([
+                        {
+                            "type": "user",
+                            "content": message,
+                            "timestamp": datetime.utcnow().isoformat()
+                        },
+                        {
+                            "type": "bot",
+                            "content": agentic_response['bot_message'],
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                    ])
                     
-                    if linkedin_data and linkedin_data.get('analysis_complete'):
-                        # Remove processing message
-                        messages = [msg for msg in messages if not msg.get('is_processing')]
-                        
-                        # Merge LinkedIn data
-                        extracted_data = self._merge_linkedin_insights(extracted_data, linkedin_data)
-                        metadata['linkedin_analyzed'] = True
-                        metadata['linkedin_analysis_timestamp'] = datetime.utcnow().isoformat()
-                        linkedin_processed = True
-                        
-                except Exception as e:
-                    logger.error(f"LinkedIn analysis failed: {e}")
-                    # Remove processing message and continue normally
-                    messages = [msg for msg in messages if not msg.get('is_processing')]
+                    # Update metadata with state flags from agentic response
+                    metadata = json.loads(conv.get('conversation_metadata', '{}'))
+                    
+                    # Get metadata from agentic response
+                    response_metadata = agentic_response.get('metadata', {})
+                    
+                    # Simple update - merge response metadata into existing metadata
+                    # This preserves existing fields and adds/updates from response
+                    metadata.update(response_metadata)
+                    
+                    # Also check top-level fields for backward compatibility
+                    if 'awaiting_confirmation' in agentic_response:
+                        metadata['awaiting_confirmation'] = agentic_response['awaiting_confirmation']
+                    
+                    await conv_queries.update_conversation(
+                        UUID(conversation_id),
+                        messages,
+                        agentic_response.get('extracted_data', {}),
+                        metadata,
+                        agentic_response.get('phase', 'processing'),
+                        agentic_response.get('progress', 0)
+                    )
+                    
+                    return agentic_response
             
-            # Save insights to separate table for analysis
-            await self._save_insights(conversation_id, nlp_results)
-            
-            # Generate next question based on phase and gaps
-            next_message, new_phase, progress = await self._generate_next_question(
-                conversation_id,
-                conv['conversation_phase'],
-                messages,
-                extracted_data,
-                metadata,
-                conv['full_name']
-            )
-            
-            # If LinkedIn was just processed, create a detailed feedback message
-            if linkedin_processed:
-                linkedin_insights = self._format_linkedin_insights(extracted_data.get('linkedin_analysis', {}))
-                linkedin_success = f"Great! I've analyzed your LinkedIn profile. Here's what I learned about you:\n\n{linkedin_insights}\n\nIf any of this needs updating, just let me know! Otherwise, let me continue with a few more specific questions.\n\n"
-                next_message = linkedin_success + next_message
-            
-            # Add bot message
-            messages.append({
-                "type": "bot",
-                "content": next_message,
-                "timestamp": datetime.utcnow().isoformat(),
-                "phase": new_phase
-            })
-            
-            # Update conversation
-            await conv_queries.update_conversation(
-                UUID(conversation_id),
-                messages,
-                extracted_data,
-                metadata,
-                new_phase,
-                progress
-            )
-            
-            # Auto-save to campaign if enough data
-            if len(messages) % 10 == 0:
-                await self._auto_save_to_campaign(conv['campaign_id'], extracted_data)
-            
-            return {
-                "bot_message": next_message,
-                "extracted_data": extracted_data,
-                "progress": progress,
-                "phase": new_phase,
-                "keywords_found": len(extracted_data.get('keywords', {}).get('explicit', [])),
-                "quick_replies": self._get_quick_replies(new_phase, extracted_data)
-            }
+            # Agentic system is required
+            raise ValueError("Agentic adapter not available")
             
         except Exception as e:
             logger.exception(f"Error processing message: {e}")
@@ -253,6 +220,18 @@ class ConversationEngine:
             conv = await conv_queries.get_conversation_by_id(UUID(conversation_id))
             if not conv:
                 raise ValueError("Conversation not found")
+            
+            # Check if already completed
+            if conv.get('status') == 'completed':
+                logger.info(f"Conversation {conversation_id} is already completed")
+                return {
+                    "status": "already_completed",
+                    "message": "This conversation has already been completed",
+                    "keywords_extracted": 0,
+                    "bio_generation_status": "skipped",
+                    "bio_generation_message": "Skipped - conversation already completed",
+                    "next_steps": ["view_media_kit"]
+                }
             
             messages = json.loads(conv['messages'])
             extracted_data = json.loads(conv['extracted_data'])
@@ -353,7 +332,7 @@ Ready to get started?"""
         # Check if we should transition phases
         messages_in_phase = self._count_messages_in_phase(messages, current_phase)
         should_transition, next_phase = self.flow_manager.should_transition(
-            current_phase, messages_in_phase, extracted_data, completeness
+            current_phase, extracted_data, metadata
         )
         
         if should_transition:
@@ -363,7 +342,14 @@ Ready to get started?"""
         # Calculate progress with LinkedIn bonus
         progress = self.nlp_processor.calculate_progress(extracted_data)
         if has_linkedin:
-            progress = min(progress + 15, 95)  # Add 15% bonus for LinkedIn
+            # LinkedIn helps with data but doesn't skip phases
+            progress = min(progress + 10, 95)  # Reduced from 15
+            
+            # Track that we have LinkedIn data
+            metadata['has_linkedin_data'] = True
+            
+            # DO NOT mark as ready to complete early
+            # DO NOT skip to confirmation
         
         # Check if confirmation phase is complete
         state = self._get_conversation_state(conversation_id)
@@ -375,9 +361,8 @@ Ready to get started?"""
             extracted_data, len(messages)
         )
         
-        # Lower the message threshold if we have LinkedIn data
-        if has_linkedin and len(messages) >= 8:  # Instead of 10
-            completion_readiness["can_complete"] = True
+        # Remove aggressive LinkedIn completion logic
+        # LinkedIn should enhance the conversation, not skip phases
         
         if completion_readiness["can_complete"] and current_phase != "confirmation":
             current_phase = "confirmation"
@@ -392,9 +377,24 @@ Ready to get started?"""
             missing_data = [item for item in missing_data if item not in linkedin_provided]
         
         # Generate smart question based on phase and missing data
-        next_question = self._get_smart_question(
-            conversation_id, current_phase, messages_in_phase, extracted_data, missing_data, has_linkedin
+        # First try flow manager with our enhanced checking
+        logger.info(f"Getting next question for phase: {current_phase}, should_transition: {should_transition}, next_phase: {next_phase if should_transition else 'N/A'}")
+        next_question = self.flow_manager.get_next_question(
+            current_phase, messages, extracted_data, metadata, self._should_ask_question
         )
+        
+        # If flow manager returns a generic question, use smart question generation
+        if not next_question or "What's your full name?" in next_question:
+            # Check if we already have the name
+            if self._check_if_data_exists(extracted_data, 'name'):
+                # Skip to next question type
+                next_question = self._get_smart_question(
+                    conversation_id, current_phase, messages_in_phase, extracted_data, missing_data, has_linkedin
+                )
+            else:
+                next_question = self._get_smart_question(
+                    conversation_id, current_phase, messages_in_phase, extracted_data, missing_data, has_linkedin
+                )
         
         return next_question, current_phase, progress
     
@@ -482,40 +482,157 @@ Ready to get started?"""
         state = self._get_conversation_state(conversation_id)
         return topic.lower() in state["asked_topics"]
     
-    def _mark_question_asked(self, conversation_id: str, question: str, topic: str):
-        """Mark a question as asked"""
+    def _mark_question_asked(self, conversation_id: str, question: str, topic: str, metadata: Dict = None):
+        """Mark a question as asked with enhanced tracking"""
         state = self._get_conversation_state(conversation_id)
         state["asked_questions"].add(question.lower()[:100])  # First 100 chars
         state["asked_topics"].add(topic.lower())
+        
+        # Enhanced tracking in metadata
+        if metadata is not None:
+            if 'questions_asked' not in metadata:
+                metadata['questions_asked'] = {}
+            
+            if topic not in metadata['questions_asked']:
+                metadata['questions_asked'][topic] = {
+                    'count': 0,
+                    'first_asked': datetime.utcnow().isoformat(),
+                    'responses': []
+                }
+            
+            metadata['questions_asked'][topic]['count'] += 1
+            metadata['questions_asked'][topic]['last_asked'] = datetime.utcnow().isoformat()
+            metadata['questions_asked'][topic]['last_question'] = question
+    
+    # Define comprehensive mapping of question types to data fields
+    QUESTION_TO_DATA_MAP = {
+        'name': ['contact_info.fullName', 'fullName', 'professional_bio.fullName'],
+        'email': ['contact_info.email', 'email'],
+        'achievements': ['achievements', 'stories', 'linkedin_analysis.key_achievements'],
+        'expertise': ['expertise_keywords', 'professional_bio.expertise_topics', 'linkedin_analysis.expertise_keywords'],
+        'unique_value': ['unique_value', 'unique_perspective', 'linkedin_analysis.unique_perspective'],
+        'podcast_topics': ['topics.suggested', 'topics_can_discuss', 'linkedin_analysis.podcast_topics', 'topics'],
+        'target_audience': ['target_audience', 'linkedin_analysis.target_audience'],
+        'professional_bio': ['professional_bio.about_work', 'linkedin_analysis.professional_bio'],
+        'metrics': ['metrics', 'stories'],
+        'promotion': ['promotion_preferences'],
+        'contact_preference': ['scheduling_preference', 'contact_preference'],
+        'linkedin': ['linkedin_analysis.analysis_complete', 'contact_info.linkedin_url'],
+        'success_story': ['stories', 'linkedin_analysis.success_stories']
+    }
+    
+    def _get_nested_value(self, data: Dict, path: str) -> Any:
+        """Get value from nested dictionary using dot notation"""
+        keys = path.split('.')
+        value = data
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+        return value
     
     def _check_if_data_exists(self, extracted_data: Dict, data_type: str) -> bool:
-        """Check if we already have this type of data"""
+        """Check if we already have this type of data - comprehensive version"""
+        # First check the mapping
+        paths = self.QUESTION_TO_DATA_MAP.get(data_type, [])
+        
+        for path in paths:
+            value = self._get_nested_value(extracted_data, path)
+            if value:
+                # Check if it's meaningful data
+                if isinstance(value, list) and len(value) > 0:
+                    # For achievements/stories, check if they have content
+                    if data_type in ['achievements', 'success_story']:
+                        return any(
+                            (isinstance(item, dict) and (item.get('description') or item.get('result'))) or
+                            (isinstance(item, str) and item.strip())
+                            for item in value
+                        )
+                    return True
+                elif isinstance(value, str) and value.strip():
+                    return True
+                elif isinstance(value, dict) and any(value.values()):
+                    return True
+        
+        # Legacy specific checks
         if data_type == "metrics":
             stories = extracted_data.get('stories', [])
-            return any(
-                story.get('metrics') or 
-                any(char.isdigit() for char in story.get('result', '')) or
-                '$' in story.get('result', '') or '%' in story.get('result', '')
-                for story in stories
-            )
-        elif data_type == "email":
-            return bool(extracted_data.get('contact_info', {}).get('email'))
-        elif data_type == "promotion":
-            # Check various places where promotion info might be stored
-            return (
-                bool(extracted_data.get('promotion_preferences')) or
-                any('promot' in str(msg).lower() for msg in extracted_data.get('messages', [])) or
-                any('book' in str(msg).lower() or 'course' in str(msg).lower() or 'service' in str(msg).lower() 
-                    for msg in extracted_data.get('recent_responses', []))
-            )
-        elif data_type == "contact_preference":
-            # Check if scheduling preference exists
-            return (
-                bool(extracted_data.get('scheduling_preference')) or
-                'calendly' in str(extracted_data).lower() or
-                'calendar' in str(extracted_data).lower()
-            )
+            for story in stories:
+                if isinstance(story, dict):
+                    result = story.get('result', '')
+                    if any(char.isdigit() for char in str(result)) or '$' in str(result) or '%' in str(result):
+                        return True
+        
         return False
+    
+    def _should_ask_question(self, question_type: str, extracted_data: Dict, metadata: Dict) -> bool:
+        """Determine if we should ask a specific question"""
+        # Check if data already exists
+        if self._check_if_data_exists(extracted_data, question_type):
+            return False
+        
+        # Check if marked as unavailable
+        if question_type in metadata.get('unavailable_fields', []):
+            return False
+        
+        # Check attempt limit
+        questions_asked = metadata.get('questions_asked', {})
+        if question_type in questions_asked:
+            attempts = questions_asked[question_type]['count']
+            # Check if user explicitly declined
+            if questions_asked[question_type].get('user_declined', False):
+                return False
+            # Required fields: 3 attempts, Optional fields: 2 attempts
+            is_required = self._is_required_field(question_type)
+            max_attempts = 3 if is_required else 2
+            if attempts >= max_attempts:
+                return False
+        
+        return True
+    
+    def _is_required_field(self, field_type: str) -> bool:
+        """Check if a field is required"""
+        required_fields = ['name', 'email', 'professional_bio', 'expertise', 'unique_value']
+        return field_type in required_fields
+    
+    def _determine_field_from_context(self, message: str, current_phase: str, messages: List[Dict]) -> Optional[str]:
+        """Determine which field the user is referring to based on context"""
+        message_lower = message.lower()
+        
+        # Look at the last bot question to understand context
+        last_bot_question = ""
+        for msg in reversed(messages[-5:]):  # Check last 5 messages
+            if msg.get('type') == 'bot':
+                last_bot_question = msg.get('content', '').lower()
+                break
+        
+        # Map keywords to field types
+        field_indicators = {
+            'achievements': ['achievement', 'accomplish', 'proud of', 'success', 'win'],
+            'metrics': ['metric', 'number', 'measure', 'specific', 'result', 'statistic'],
+            'podcast_topics': ['topic', 'discuss', 'talk about', 'podcast'],
+            'expertise': ['expertise', 'expert', 'specialize', 'skill'],
+            'unique_value': ['unique', 'different', 'perspective', 'approach'],
+            'promotion': ['promote', 'book', 'course', 'service', 'product'],
+            'experience': ['experience', 'previous', 'speaking', 'podcast experience'],
+            'linkedin': ['linkedin', 'profile', 'social media', 'online presence']
+        }
+        
+        # Check message and last question for field indicators
+        for field_type, keywords in field_indicators.items():
+            if any(keyword in message_lower for keyword in keywords):
+                return field_type
+            if any(keyword in last_bot_question for keyword in keywords):
+                return field_type
+        
+        # Phase-specific defaults
+        if current_phase == 'core_discovery' and 'achievement' in last_bot_question:
+            return 'achievements'
+        elif current_phase == 'media_focus' and 'topic' in last_bot_question:
+            return 'podcast_topics'
+        
+        return None
     
     def _get_smart_question(self, conversation_id: str, phase: str, messages_in_phase: int, 
                            extracted_data: Dict, missing_data: List[str], 
@@ -610,25 +727,60 @@ Ready to get started?"""
             if 'stories' not in existing:
                 existing['stories'] = []
             
+            # Ensure existing stories is a list
+            if not isinstance(existing['stories'], list):
+                existing['stories'] = []
+            
             # Check for duplicates before adding
-            existing_stories = {(s.get('subject', ''), s.get('result', '')) for s in existing['stories']}
+            existing_stories = set()
+            for s in existing['stories']:
+                if isinstance(s, dict):
+                    existing_stories.add((s.get('subject', ''), s.get('result', '')))
+                elif isinstance(s, str):
+                    # Convert string to dict format
+                    existing['stories'][existing['stories'].index(s)] = {'subject': s, 'result': ''}
+                    existing_stories.add((s, ''))
+            
             for story in new_results['stories']:
-                story_key = (story.get('subject', ''), story.get('result', ''))
-                if story_key not in existing_stories:
-                    existing['stories'].append(story)
-                    existing_stories.add(story_key)
+                if isinstance(story, dict):
+                    story_key = (story.get('subject', ''), story.get('result', ''))
+                    if story_key not in existing_stories:
+                        existing['stories'].append(story)
+                        existing_stories.add(story_key)
+                elif isinstance(story, str) and (story, '') not in existing_stories:
+                    # Convert string to dict format
+                    existing['stories'].append({'subject': story, 'result': ''})
+                    existing_stories.add((story, ''))
         
         # Append achievements with deduplication
         if 'achievements' in new_results:
             if 'achievements' not in existing:
                 existing['achievements'] = []
             
+            # Ensure existing achievements is a list
+            if not isinstance(existing['achievements'], list):
+                existing['achievements'] = []
+            
             # Check for duplicates before adding
-            existing_descs = {a.get('description', '') for a in existing['achievements']}
+            existing_descs = set()
+            for a in existing['achievements']:
+                if isinstance(a, dict) and 'description' in a:
+                    existing_descs.add(a['description'])
+                elif isinstance(a, str):
+                    # Convert string to dict format
+                    existing['achievements'][existing['achievements'].index(a)] = {'description': a}
+                    existing_descs.add(a)
+            
             for achievement in new_results['achievements']:
-                if achievement.get('description', '') not in existing_descs:
-                    existing['achievements'].append(achievement)
-                    existing_descs.add(achievement.get('description', ''))
+                if isinstance(achievement, dict):
+                    desc = achievement.get('description', '')
+                    if desc and desc not in existing_descs:
+                        existing['achievements'].append(achievement)
+                        existing_descs.add(desc)
+                elif isinstance(achievement, str) and achievement not in existing_descs:
+                    # Convert string to dict format
+                    existing['achievements'].append({'description': achievement})
+                    existing_descs.add(achievement)
         
         # Update topics
         if 'topics' in new_results:
@@ -699,7 +851,10 @@ Ready to get started?"""
         if linkedin_data.get('success_stories'):
             # Add stories without duplication
             existing_stories = extracted_data.setdefault('stories', [])
-            existing_story_keys = {(s.get('subject', ''), s.get('result', '')) for s in existing_stories}
+            existing_story_keys = set()
+            for s in existing_stories:
+                if isinstance(s, dict):
+                    existing_story_keys.add((s.get('subject', ''), s.get('result', '')))
             
             for story in linkedin_data['success_stories']:
                 new_story = {
@@ -721,6 +876,29 @@ Ready to get started?"""
         
         if linkedin_data.get('unique_perspective'):
             extracted_data['unique_value'] = linkedin_data['unique_perspective']
+        
+        # CRITICAL: Merge LinkedIn achievements into achievements array
+        if linkedin_data.get('key_achievements'):
+            # Convert LinkedIn achievements to proper format
+            achievements = extracted_data.setdefault('achievements', [])
+            existing_descs = set()
+            
+            # Get existing descriptions
+            for a in achievements:
+                if isinstance(a, dict):
+                    existing_descs.add(a.get('description', ''))
+                elif isinstance(a, str):
+                    existing_descs.add(a)
+            
+            # Add LinkedIn achievements
+            for achievement_text in linkedin_data['key_achievements']:
+                if achievement_text and achievement_text not in existing_descs:
+                    achievements.append({
+                        'description': achievement_text,
+                        'source': 'linkedin',
+                        'confidence': 0.9
+                    })
+                    existing_descs.add(achievement_text)
         
         return extracted_data
     
@@ -799,11 +977,15 @@ Ready to get started?"""
         if stories or achievements:
             achievement_list = []
             for story in stories[:2]:
-                if story.get('result'):
+                if isinstance(story, dict) and story.get('result'):
                     achievement_list.append(f"• {story['result']}")
+                elif isinstance(story, str) and story:
+                    achievement_list.append(f"• {story}")
             for achievement in achievements[:2]:
-                if achievement.get('description'):
+                if isinstance(achievement, dict) and achievement.get('description'):
                     achievement_list.append(f"• {achievement['description']}")
+                elif isinstance(achievement, str) and achievement:
+                    achievement_list.append(f"• {achievement}")
             
             if achievement_list:
                 summary_parts.append("**Key Achievements:**\n" + "\n".join(achievement_list[:3]))
@@ -870,18 +1052,42 @@ Ready to get started?"""
     async def _generate_ideal_podcast_description(self, extracted_data: Dict, 
                                                 transcript: str) -> str:
         """Generate ideal podcast description from conversation data"""
-        # Extract key information
+        # Check if user provided their ideal podcast description
+        user_ideal_podcast = extracted_data.get('ideal_podcast', '')
+        
+        # Extract comprehensive information
         keywords = self._extract_all_keywords(extracted_data)[:10]
         stories = extracted_data.get('stories', [])
         expertise = extracted_data.get('keywords', {}).get('explicit', [])
+        podcast_topics = extracted_data.get('podcast_topics', [])
+        target_audience = extracted_data.get('target_audience', '')
+        key_message = extracted_data.get('key_message', '')
+        speaking_experience = extracted_data.get('speaking_experience', '')
+        expertise_keywords = extracted_data.get('expertise_keywords', [])
         
-        prompt = f"""Based on this conversation data, create a brief ideal podcast description (2-3 sentences):
+        # Build comprehensive prompt
+        prompt = f"""Create a specific 2-3 sentence description of the ideal podcast for this guest.
 
-Keywords: {', '.join(keywords)}
-Expertise areas: {', '.join(expertise[:5])}
-Number of stories shared: {len(stories)}
+Guest Profile:
+- Expertise: {', '.join(expertise_keywords[:5]) if expertise_keywords else ', '.join(expertise[:5])}
+- Topics They Want to Discuss: {', '.join(podcast_topics[:5]) if podcast_topics else ', '.join(keywords[:5])}
+- Their Target Audience: {target_audience or 'Not specified'}
+- Core Message: {key_message or 'Not specified'}
+- Speaking Experience: {speaking_experience or 'New to podcasting'}
+"""
 
-Create a compelling description that would help match this person with relevant podcasts:"""
+        # Add user's ideal podcast preference if provided
+        if user_ideal_podcast:
+            prompt += f"\nUser's Ideal Podcast Preference: {user_ideal_podcast}\n"
+            prompt += "\nUse the user's preference as the foundation, but enhance it with specific details about show format, audience level, and host characteristics."
+        else:
+            prompt += "\nGenerate a description that specifies:"
+            prompt += "\n1. The podcast's target audience and niche"
+            prompt += "\n2. The show format that best suits their expertise (interview, panel, educational, etc.)"
+            prompt += "\n3. The type of host/show that would create the best conversation"
+
+        prompt += "\n\nBe specific about podcast characteristics, not just topic keywords."
+        prompt += '\nExample: "Business podcasts targeting mid-level managers seeking practical leadership strategies, particularly interview-format shows that dive deep into real-world case studies and actionable frameworks. Ideal hosts are those who can facilitate discussions about organizational challenges and innovative management approaches."'
         
         try:
             response = await self.gemini_service.create_message(
@@ -895,8 +1101,15 @@ Create a compelling description that would help match this person with relevant 
         except Exception as e:
             logger.error(f"Error generating ideal description: {e}")
         
-        # Fallback description
-        return f"Expert in {', '.join(expertise[:3])} with experience in {', '.join(keywords[:5])}"
+        # Better fallback that uses user input if available
+        if user_ideal_podcast:
+            return user_ideal_podcast
+        
+        # Improved fallback description
+        if podcast_topics and target_audience:
+            return f"Podcasts focusing on {', '.join(podcast_topics[:3])} for {target_audience}, particularly shows that explore {key_message or 'practical insights and strategies'}."
+        
+        return f"Podcasts specializing in {', '.join(expertise[:3])} with audiences interested in {', '.join(keywords[:5])}"
     
     async def _auto_save_to_campaign(self, campaign_id: UUID, extracted_data: Dict):
         """Auto-save progress to campaign"""
@@ -910,3 +1123,17 @@ Create a compelling description that would help match this person with relevant 
             logger.info(f"Auto-saved {len(keywords)} keywords to campaign {campaign_id}")
         except Exception as e:
             logger.error(f"Error auto-saving to campaign: {e}")
+    
+    async def get_system_health(self) -> Dict[str, Any]:
+        """Get health status of chatbot systems"""
+        health = {
+            'legacy_system': 'operational',
+            'agentic_system': 'not_initialized',
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        if self.agentic_adapter:
+            health['agentic_system'] = 'operational'
+            health['agentic_details'] = self.agentic_adapter.get_health_status()
+        
+        return health
