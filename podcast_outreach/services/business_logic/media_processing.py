@@ -3,7 +3,6 @@
 import logging
 from podcast_outreach.services.database_service import DatabaseService
 from podcast_outreach.services.media.episode_sync import main_episode_sync_orchestrator
-from podcast_outreach.scripts.transcribe_episodes import run_transcription_logic
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +35,8 @@ async def transcribe_episodes(db_service: DatabaseService) -> bool:
     """
     try:
         logger.info("Running episode transcription")
+        # Import here to avoid circular imports
+        from podcast_outreach.scripts.transcribe_episodes import run_transcription_logic
         await run_transcription_logic(db_service)
         logger.info("Episode transcription completed")
         return True
