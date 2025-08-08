@@ -20,8 +20,9 @@ COPY podcast_outreach/requirements.txt ./
 # Use --no-deps for conflicting packages and install them separately
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt || \
-    (grep -v "google-generativeai\|langchain-google-genai" requirements.txt > requirements_filtered.txt && \
+    (grep -v "google-generativeai\|langchain-google-genai\|langgraph" requirements.txt > requirements_filtered.txt && \
      pip install --no-cache-dir -r requirements_filtered.txt && \
+     pip install --no-cache-dir --no-deps langgraph==0.5.3 langgraph-checkpoint==2.1.1 && \
      pip install --no-cache-dir langchain-google-genai google-generativeai)
 
 # Copy application code
