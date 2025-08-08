@@ -11,6 +11,7 @@ from ..schemas.pitch_schemas import PitchGenerationRequest, PitchGenerationRespo
 # Import services
 from podcast_outreach.services.pitches.generator import PitchGeneratorService
 from podcast_outreach.services.pitches.sender import PitchSenderService
+from podcast_outreach.services.pitches.sender_v2 import PitchSenderServiceV2
 
 # Import modular queries
 from podcast_outreach.database.queries import pitches as pitch_queries
@@ -165,6 +166,290 @@ async def send_pitch_api(
     except Exception as e:
         logger.exception(f"Error sending pitch {pitch_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred during pitch sending: {str(e)}")
+
+@router.post("/send-nylas/{pitch_gen_id}", status_code=status.HTTP_202_ACCEPTED, summary="Send Pitch via Nylas")
+async def send_pitch_via_nylas(
+    pitch_gen_id: int,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Sends an approved pitch via Nylas email service.
+    Requires the campaign to have a configured Nylas grant ID.
+    Staff or Admin access required.
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
+    
+    sender_service_v2 = PitchSenderServiceV2()
+    
+    try:
+        # Verify pitch generation exists and is ready to send
+        pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+        if not pitch_gen_record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found.")
+        
+        if not pitch_gen_record.get('send_ready_bool'):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Pitch generation {pitch_gen_id} is not marked as send-ready.")
+        
+        # Get campaign and verify it has Nylas configured
+        campaign_id = pitch_gen_record.get('campaign_id')
+        campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+        
+        if not campaign_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+        
+        if not campaign_data.get('nylas_grant_id'):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Campaign {campaign_id} does not have a Nylas grant ID configured.")
+        
+        # Force the email provider to Nylas for this send
+        campaign_data['email_provider'] = 'nylas'
+        
+        # Send the pitch using the V2 service (which will use Nylas)
+        result = await sender_service_v2.send_pitch(pitch_gen_id=pitch_gen_id)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message"))
+        
+        return {
+            "message": result.get("message"),
+            "status": "accepted",
+            "provider": "nylas",
+            "nylas_message_id": result.get("nylas_message_id")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error sending pitch {pitch_gen_id} via Nylas: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.post("/send-instantly/{pitch_gen_id}", status_code=status.HTTP_202_ACCEPTED, summary="Send Pitch via Instantly")
+async def send_pitch_via_instantly(
+    pitch_gen_id: int,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Sends an approved pitch via Instantly.ai email service.
+    Requires the campaign to have a configured Instantly campaign ID.
+    Staff or Admin access required.
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
+    
+    sender_service_v2 = PitchSenderServiceV2()
+    
+    try:
+        # Verify pitch generation exists and is ready to send
+        pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+        if not pitch_gen_record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found.")
+        
+        if not pitch_gen_record.get('send_ready_bool'):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Pitch generation {pitch_gen_id} is not marked as send-ready.")
+        
+        # Get campaign and verify it has Instantly configured
+        campaign_id = pitch_gen_record.get('campaign_id')
+        campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+        
+        if not campaign_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
+        
+        if not campaign_data.get('instantly_campaign_id'):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Campaign {campaign_id} does not have an Instantly campaign ID configured.")
+        
+        # Force the email provider to Instantly for this send
+        campaign_data['email_provider'] = 'instantly'
+        
+        # Send the pitch using the V2 service (which will use Instantly)
+        result = await sender_service_v2.send_pitch(pitch_gen_id=pitch_gen_id)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message"))
+        
+        return {
+            "message": result.get("message"),
+            "status": "accepted",
+            "provider": "instantly",
+            "instantly_lead_id": result.get("instantly_lead_id")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error sending pitch {pitch_gen_id} via Instantly: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.post("/send-batch-nylas", status_code=status.HTTP_202_ACCEPTED, summary="Send Multiple Pitches via Nylas")
+async def send_pitches_batch_nylas(
+    pitch_gen_ids: List[int],
+    user: dict = Depends(get_current_user)
+):
+    """
+    Sends multiple approved pitches via Nylas email service.
+    Each pitch generation must be from a campaign with a configured Nylas grant ID.
+    Staff or Admin access required.
+    
+    Example request body:
+    [1, 2, 3, 4, 5]
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
+    
+    sender_service_v2 = PitchSenderServiceV2()
+    results = {"successful": [], "failed": []}
+    
+    for pitch_gen_id in pitch_gen_ids:
+        try:
+            # Verify pitch generation exists and is ready to send
+            pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            if not pitch_gen_record:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Pitch generation {pitch_gen_id} not found."
+                })
+                continue
+            
+            if not pitch_gen_record.get('send_ready_bool'):
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Pitch generation {pitch_gen_id} is not marked as send-ready."
+                })
+                continue
+            
+            # Get campaign and verify it has Nylas configured
+            campaign_id = pitch_gen_record.get('campaign_id')
+            campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+            
+            if not campaign_data:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Campaign {campaign_id} not found."
+                })
+                continue
+            
+            if not campaign_data.get('nylas_grant_id'):
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Campaign {campaign_id} does not have a Nylas grant ID configured."
+                })
+                continue
+            
+            # Force the email provider to Nylas for this send
+            campaign_data['email_provider'] = 'nylas'
+            
+            # Send the pitch using the V2 service
+            result = await sender_service_v2.send_pitch(pitch_gen_id=pitch_gen_id)
+            
+            if result.get("success"):
+                results["successful"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "message": result.get("message"),
+                    "nylas_message_id": result.get("nylas_message_id")
+                })
+            else:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": result.get("message")
+                })
+                
+        except Exception as e:
+            logger.exception(f"Error sending pitch {pitch_gen_id} via Nylas: {e}")
+            results["failed"].append({
+                "pitch_gen_id": pitch_gen_id,
+                "error": str(e)
+            })
+    
+    return {
+        "status": "completed",
+        "message": f"Batch send completed. Success: {len(results['successful'])}, Failed: {len(results['failed'])}",
+        "provider": "nylas",
+        "results": results
+    }
+
+@router.post("/send-batch-instantly", status_code=status.HTTP_202_ACCEPTED, summary="Send Multiple Pitches via Instantly")
+async def send_pitches_batch_instantly(
+    pitch_gen_ids: List[int],
+    user: dict = Depends(get_current_user)
+):
+    """
+    Sends multiple approved pitches via Instantly.ai email service.
+    Each pitch generation must be from a campaign with a configured Instantly campaign ID.
+    Staff or Admin access required.
+    
+    Example request body:
+    [1, 2, 3, 4, 5]
+    """
+    if user.get("role") not in ["admin", "staff"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
+    
+    sender_service_v2 = PitchSenderServiceV2()
+    results = {"successful": [], "failed": []}
+    
+    for pitch_gen_id in pitch_gen_ids:
+        try:
+            # Verify pitch generation exists and is ready to send
+            pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            if not pitch_gen_record:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Pitch generation {pitch_gen_id} not found."
+                })
+                continue
+            
+            if not pitch_gen_record.get('send_ready_bool'):
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Pitch generation {pitch_gen_id} is not marked as send-ready."
+                })
+                continue
+            
+            # Get campaign and verify it has Instantly configured
+            campaign_id = pitch_gen_record.get('campaign_id')
+            campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+            
+            if not campaign_data:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Campaign {campaign_id} not found."
+                })
+                continue
+            
+            if not campaign_data.get('instantly_campaign_id'):
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": f"Campaign {campaign_id} does not have an Instantly campaign ID configured."
+                })
+                continue
+            
+            # Force the email provider to Instantly for this send
+            campaign_data['email_provider'] = 'instantly'
+            
+            # Send the pitch using the V2 service
+            result = await sender_service_v2.send_pitch(pitch_gen_id=pitch_gen_id)
+            
+            if result.get("success"):
+                results["successful"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "message": result.get("message"),
+                    "instantly_lead_id": result.get("instantly_lead_id")
+                })
+            else:
+                results["failed"].append({
+                    "pitch_gen_id": pitch_gen_id,
+                    "error": result.get("message")
+                })
+                
+        except Exception as e:
+            logger.exception(f"Error sending pitch {pitch_gen_id} via Instantly: {e}")
+            results["failed"].append({
+                "pitch_gen_id": pitch_gen_id,
+                "error": str(e)
+            })
+    
+    return {
+        "status": "completed",
+        "message": f"Batch send completed. Success: {len(results['successful'])}, Failed: {len(results['failed'])}",
+        "provider": "instantly",
+        "results": results
+    }
 
 @router.get("/generations", response_model=List[PitchGenerationInDB], summary="List All Pitch Generations")
 async def list_pitch_generations_api(skip: int = 0, limit: int = 100, user: dict = Depends(get_current_user)):
