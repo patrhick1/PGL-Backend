@@ -16,15 +16,16 @@ logger = get_logger(__name__)
 
 async def upsert_media_with_rss_fallback(media_data: Dict[str, Any], pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     """
-    Enhanced upsert that handles source API transitions by using RSS URL as a fallback identifier.
+    Enhanced upsert that handles source API transitions by using RSS URL as the primary identifier.
     
     This fixes the issue where promoting a ListenNotes podcast to Podscan causes failures
     because the api_id changes, breaking the ON CONFLICT clause.
     
     Strategy:
     1. First try to find existing media by RSS URL (most stable identifier)
-    2. If not found, try by current source_api + api_id combination
-    3. Update if found, insert if not found
+    2. If not found, try by current source_api + api_id combination  
+    3. Update if found (including api_id changes for promotions), insert if not found
+    4. Handle api_id changes safely when promoting between APIs
     """
     # Clean the data before processing
     cleaned_data = media_data.copy()
@@ -54,29 +55,51 @@ async def upsert_media_with_rss_fallback(media_data: Dict[str, Any], pool: Optio
     
     async with pool.acquire() as conn:
         try:
-            # First, try to find existing media by RSS URL
+            # First, try to find existing media by RSS URL (primary identifier)
             existing_media = None
+            existing_api_id = None
             rss_url = cleaned_data.get('rss_url')
             api_id = cleaned_data.get('api_id')
             source_api = cleaned_data.get('source_api')
             
             if rss_url:
-                existing_query = "SELECT media_id FROM media WHERE rss_url = $1 LIMIT 1"
+                # Get full record to check if api_id is changing
+                existing_query = "SELECT media_id, api_id, source_api FROM media WHERE rss_url = $1 LIMIT 1"
                 existing_row = await conn.fetchrow(existing_query, rss_url)
                 if existing_row:
                     existing_media = existing_row['media_id']
-                    logger.info(f"Found existing media by RSS URL for '{cleaned_data.get('name')}': media_id={existing_media}")
+                    existing_api_id = existing_row['api_id']
+                    logger.info(f"Found existing media by RSS URL for '{cleaned_data.get('name')}': media_id={existing_media}, existing_api_id={existing_api_id}")
             
-            # If not found by RSS, try by source_api + api_id
-            if not existing_media and api_id and source_api:
-                existing_query = "SELECT media_id FROM media WHERE source_api = $1 AND api_id = $2 LIMIT 1"
-                existing_row = await conn.fetchrow(existing_query, source_api, api_id)
+            # If not found by RSS, try by api_id alone (not source_api + api_id)
+            # This catches cases where the same api_id might exist but wasn't found by RSS
+            if not existing_media and api_id:
+                existing_query = "SELECT media_id, rss_url FROM media WHERE api_id = $1 LIMIT 1"
+                existing_row = await conn.fetchrow(existing_query, api_id)
                 if existing_row:
-                    existing_media = existing_row['media_id']
-                    logger.info(f"Found existing media by API ID for '{cleaned_data.get('name')}': media_id={existing_media}")
+                    # Check if this is actually the same podcast (by comparing RSS if available)
+                    if rss_url and existing_row['rss_url'] and existing_row['rss_url'] != rss_url:
+                        # Different RSS URLs - this is a different podcast with same api_id (shouldn't happen but handle it)
+                        logger.warning(f"Found media with same api_id but different RSS URL. Treating as new media.")
+                    else:
+                        existing_media = existing_row['media_id']
+                        existing_api_id = api_id
+                        logger.info(f"Found existing media by API ID for '{cleaned_data.get('name')}': media_id={existing_media}")
             
             if existing_media:
                 # UPDATE existing record
+                # Special handling for api_id changes during promotion
+                if api_id and existing_api_id and api_id != existing_api_id:
+                    # Check if the new api_id already exists on a different record
+                    check_query = "SELECT media_id FROM media WHERE api_id = $1 AND media_id != $2"
+                    conflict_row = await conn.fetchrow(check_query, api_id, existing_media)
+                    if conflict_row:
+                        logger.warning(f"Cannot update api_id to {api_id} - already exists on media_id {conflict_row['media_id']}. Keeping existing api_id.")
+                        # Remove api_id from the update to avoid conflict
+                        cleaned_data.pop('api_id', None)
+                    else:
+                        logger.info(f"Promoting media_id {existing_media}: changing api_id from {existing_api_id} to {api_id}")
+                
                 # Build dynamic UPDATE query
                 update_fields = []
                 update_values = []
@@ -121,7 +144,37 @@ async def upsert_media_with_rss_fallback(media_data: Dict[str, Any], pool: Optio
                         return dict(row)
             
             else:
-                # INSERT new record - use the original robust insert logic
+                # INSERT new record - but first double-check RSS URL doesn't exist
+                # This handles race conditions where two processes might be inserting simultaneously
+                if rss_url:
+                    final_check_query = "SELECT media_id FROM media WHERE rss_url = $1 LIMIT 1"
+                    final_check_row = await conn.fetchrow(final_check_query, rss_url)
+                    if final_check_row:
+                        # Another process just inserted this media, return it instead
+                        logger.info(f"Race condition avoided: found media_id {final_check_row['media_id']} on final RSS check")
+                        select_query = "SELECT * FROM media WHERE media_id = $1"
+                        row = await conn.fetchrow(select_query, final_check_row['media_id'])
+                        if row:
+                            return dict(row)
+                
+                # Check if api_id already exists before insert
+                if api_id:
+                    api_check_query = "SELECT media_id, name, rss_url FROM media WHERE api_id = $1 LIMIT 1"
+                    api_check_row = await conn.fetchrow(api_check_query, api_id)
+                    if api_check_row:
+                        logger.warning(f"Cannot insert new media with api_id {api_id} - already exists on media_id {api_check_row['media_id']} ('{api_check_row['name']}')")
+                        # If RSS URLs match, this is the same podcast - return existing
+                        if rss_url and api_check_row['rss_url'] == rss_url:
+                            logger.info(f"Same podcast detected by matching RSS. Returning existing media_id {api_check_row['media_id']}")
+                            select_query = "SELECT * FROM media WHERE media_id = $1"
+                            row = await conn.fetchrow(select_query, api_check_row['media_id'])
+                            if row:
+                                return dict(row)
+                        # Otherwise, clear the api_id to allow insert with NULL api_id
+                        logger.info(f"Inserting without api_id to avoid conflict")
+                        cleaned_data['api_id'] = None
+                
+                # Proceed with insert
                 cols = [
                     'api_id', 'source_api', 'name', 'title', 'rss_url', 'website', 'description',
                     'contact_email', 'language', 'category', 'image_url', 'total_episodes',

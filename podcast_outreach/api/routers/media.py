@@ -81,21 +81,13 @@ async def update_media_api(media_id: int, media_update_data: MediaUpdate, user: 
     if not update_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update data provided.")
 
-    # --- NEW LOGIC for Manual Updates ---
-    update_data_with_provenance = {}
-    for key, value in update_data.items():
-        update_data_with_provenance[key] = value
-        # Set source and confidence for the field being updated
-        update_data_with_provenance[f"{key}_source"] = "manual"
-        update_data_with_provenance[f"{key}_confidence"] = 1.0
-    
-    # Flag that a manual update occurred
-    update_data_with_provenance["last_manual_update_ts"] = datetime.now(timezone.utc)
-    # --- END NEW LOGIC ---
+    # Simply pass through the update data - the database query function will handle
+    # adding the proper confidence tracking fields based on the source being "manual"
+    update_data_with_provenance = update_data.copy()
 
     try:
         # Use the modified payload with provenance data
-        updated_db_media = await media_queries.update_media_in_db(media_id, update_data_with_provenance)
+        updated_db_media = await media_queries.update_media_manual_override(media_id, update_data_with_provenance)
         if not updated_db_media:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Media with ID {media_id} not found or update failed.")
         return MediaInDB(**updated_db_media)

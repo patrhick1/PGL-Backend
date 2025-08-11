@@ -99,6 +99,10 @@ async def generate_ideal_description(campaign_data: Dict[str, Any], openai_servi
     if not info['expertise_topics'] and not info['key_messages']:
         return ""
     
+    # Identify top 2-3 primary expertise areas
+    primary_expertise = info['expertise_topics'][:3] if info['expertise_topics'] else []
+    primary_topics = info['key_messages'][:3] if info['key_messages'] else []
+    
     # Use the user's preference if available
     if info['ideal_podcast_preference']:
         prompt = f"""Based on the following client information and their stated preference, create a 2-3 sentence description of the ideal podcasts they should appear on:
@@ -107,44 +111,50 @@ Client's Stated Preference: {info['ideal_podcast_preference']}
 
 Additional Context:
 - Current Role: {info['current_role']}
-- Expertise: {', '.join(info['expertise_topics'][:10])}
-- Key Topics: {', '.join(info['key_messages'][:10])}
+- Primary Expertise Areas: {', '.join(primary_expertise)}
+- Main Discussion Topics: {', '.join(primary_topics)}
 - Target Audience: {info['target_audience']}
 - Unique Perspective: {info['unique_perspective']}
-- Previous Shows: {', '.join(info['previous_shows'][:5]) if info['previous_shows'] else 'None mentioned'}
 
-Refine their preference into a clear, actionable description that:
-1. Specifies the exact type of podcasts and their focus areas
-2. Identifies the target audience demographics and characteristics
-3. Describes the ideal show format (interview, panel, educational, etc.)
-4. Mentions any specific podcast characteristics that would be a good fit
+IMPORTANT GUIDELINES:
+1. Use "OR" logic to make the description inclusive (e.g., "podcasts focusing on X, Y, or Z")
+2. Focus on the 1-2 PRIMARY areas of expertise, not all areas
+3. Keep the description flexible to allow for broader matching
+4. Avoid requiring ALL criteria to be met - use phrases like "particularly those" or "especially shows that"
 
-Make it specific and actionable for podcast matching."""
+Create a flexible, inclusive description that will match a good range of relevant podcasts."""
     else:
         # Fallback to generating based on available data
         prompt = f"""Based on the following client information, create a 2-3 sentence description of the ideal podcasts they should appear on:
 
 Professional Background:
 - Current Role: {info['current_role']}
-- Areas of Expertise: {', '.join(info['expertise_topics'][:10])}
+- Primary Expertise Areas (TOP 2-3): {', '.join(primary_expertise)}
 - Unique Perspective: {info['unique_perspective']}
 
 Content Focus:
-- Key Topics: {', '.join(info['key_messages'][:10])}
+- Main Discussion Topics (TOP 2-3): {', '.join(primary_topics)}
 - Target Audience: {info['target_audience']}
-- Previous Podcast Experience: {', '.join(info['previous_shows'][:5]) if info['previous_shows'] else 'None mentioned'}
+- Previous Podcast Experience: {', '.join(info['previous_shows'][:3]) if info['previous_shows'] else 'None mentioned'}
 
-Generate a specific, actionable description that identifies:
-1. The exact type of podcasts (e.g., "business podcasts focusing on B2B SaaS growth" not just "business podcasts")
-2. The specific audience demographics (e.g., "startup founders in series A-B stage" not just "entrepreneurs")
-3. The ideal show format and host type (e.g., "interview-style shows with hosts who are active operators" not just "interview shows")
-4. Any specific characteristics that indicate a good fit
+IMPORTANT GUIDELINES:
+1. Use "OR" logic instead of "AND" logic (e.g., "Podcasts focusing on web development, entrepreneurship, or digital marketing")
+2. Focus ONLY on the 1-2 PRIMARY areas, not all expertise areas
+3. Use inclusive language like "particularly those discussing" or "especially shows that cover"
+4. Make the description flexible enough to match 30-40% of relevant podcasts, not just 5-10%
+5. Avoid overly specific requirements that few podcasts would meet
 
-Avoid vague terms. Be specific about the niche, audience, and format."""
+Example of GOOD description:
+"Podcasts focusing on web development, technology careers, or leadership in tech, particularly those discussing career transitions or building technical skills."
+
+Example of BAD description:
+"Podcasts focused on Sales, Web Development, Customer interaction, Leadership with audiences interested in specific demographic."
+
+Generate a flexible, inclusive description that prioritizes the PRIMARY expertise areas."""
 
     try:
         response = await openai_service.create_chat_completion(
-            system_prompt="You are an expert at matching podcast guests with ideal podcasts. Generate clear, specific descriptions that help with podcast vetting and matching.",
+            system_prompt="You are an expert at matching podcast guests with ideal podcasts. Generate flexible, inclusive descriptions that focus on PRIMARY expertise areas using OR logic, not AND logic. Your descriptions should help match a good range of relevant podcasts (30-40%), not just a narrow few (5-10%).",
             prompt=prompt,
             workflow="ideal_podcast_generation"
         )

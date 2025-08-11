@@ -82,7 +82,7 @@ See [podcast_outreach/DOCKER_DEPLOYMENT_GUIDE.md](podcast_outreach/DOCKER_DEPLOY
 
 ### Feature Guides
 - [Pitch System Documentation](PITCH_SYSTEM_DOCUMENTATION.md) - Complete pitch system guide
-- [Frontend Integration Guide](FRONTEND_PITCH_GENERATION_GUIDE.md) - Frontend implementation
+- [Frontend Integration Guide](FRONTEND_INTEGRATION_GUIDE.md) - Frontend implementation
 - [Review Tasks Flow](REVIEW_TASK_ACCEPT_REJECT_FLOW.md) - Review system documentation
 
 ### System Documentation

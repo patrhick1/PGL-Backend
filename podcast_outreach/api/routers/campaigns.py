@@ -421,5 +421,146 @@ async def trigger_angles_bio_generation_api(campaign_id: uuid.UUID, user: dict =
         processor.cleanup()
 
 
+@router.get("/{campaign_id}/placement-metrics", summary="Get Placement Metrics for Campaign")
+async def get_placement_metrics(
+    campaign_id: uuid.UUID,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Get placement analytics metrics for a specific campaign.
+    Returns placement statistics including total placements, placement rate,
+    status breakdown, and upcoming placement events.
+    """
+    try:
+        # Verify campaign exists and user has access
+        campaign = await campaign_queries.get_campaign_by_id_from_db(campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        # Check if user has access to this campaign
+        if user.get("role") == "client":
+            if campaign.get("person_id") != user.get("person_id"):
+                raise HTTPException(status_code=403, detail="Access denied to this campaign")
+        
+        # Import placement queries
+        from podcast_outreach.database.queries import placements as placement_queries
+        from podcast_outreach.database.queries import pitches as pitch_queries
+        
+        # Get all placements for the campaign
+        placements = await placement_queries.get_placements_for_campaign(campaign_id)
+        
+        # Get total pitches sent for this campaign to calculate placement rate
+        # Count pitches in sent state or beyond
+        sent_states = ["sent", "opened", "replied", "clicked", "replied_interested", "live", "paid"]
+        total_pitches = await pitch_queries.count_pitches_by_campaign(
+            campaign_id=campaign_id,
+            pitch_states=sent_states
+        )
+        
+        # Calculate metrics
+        total_placements = len(placements) if placements else 0
+        placement_rate = (total_placements / total_pitches * 100) if total_pitches > 0 else 0.0
+        
+        # Count by status
+        status_counts = {
+            "scheduled": 0,
+            "completed": 0,
+            "cancelled": 0,
+            "recording_booked": 0,
+            "live": 0,
+            "recorded": 0
+        }
+        
+        upcoming_placements = []
+        
+        for placement in (placements or []):
+            status = placement.get("current_status", "").lower()
+            
+            # Map various statuses to simplified categories
+            if status in ["scheduled", "recording_booked", "recording_scheduled"]:
+                status_counts["scheduled"] += 1
+            elif status in ["completed", "live", "paid", "recorded"]:
+                status_counts["completed"] += 1
+            elif status in ["cancelled", "canceled", "rejected"]:
+                status_counts["cancelled"] += 1
+            else:
+                # Try to map to closest category
+                if "book" in status or "schedule" in status:
+                    status_counts["scheduled"] += 1
+                elif "live" in status or "complete" in status or "record" in status:
+                    status_counts["completed"] += 1
+            
+            # Add to upcoming placements if scheduled
+            if status in ["scheduled", "recording_booked", "recording_scheduled"]:
+                # Get media info for the placement
+                from podcast_outreach.database.queries import media as media_queries
+                media = await media_queries.get_media_by_id_from_db(placement.get("media_id"))
+                
+                upcoming_event = {
+                    "placement_id": placement.get("placement_id"),
+                    "media_id": placement.get("media_id"),
+                    "podcast_name": media.get("name") if media else "Unknown Podcast",
+                    "host_names": media.get("host_names", []) if media else [],
+                    "recording_date": placement.get("recording_date"),
+                    "go_live_date": placement.get("go_live_date"),
+                    "status": placement.get("current_status"),
+                    "topic": placement.get("outreach_topic"),
+                    "notes": placement.get("notes")
+                }
+                
+                # Only add if there's a future date
+                from datetime import datetime, date
+                today = date.today()
+                
+                recording_date = placement.get("recording_date")
+                go_live_date = placement.get("go_live_date")
+                
+                # Check if dates are in the future
+                if recording_date and isinstance(recording_date, (date, datetime)):
+                    if recording_date >= today:
+                        upcoming_event["scheduled_date"] = recording_date.isoformat()
+                        upcoming_event["date_type"] = "recording"
+                        upcoming_placements.append(upcoming_event)
+                elif go_live_date and isinstance(go_live_date, (date, datetime)):
+                    if go_live_date >= today:
+                        upcoming_event["scheduled_date"] = go_live_date.isoformat()
+                        upcoming_event["date_type"] = "go_live"
+                        upcoming_placements.append(upcoming_event)
+                elif status in ["scheduled", "recording_booked"]:
+                    # Include even without date if status indicates it's upcoming
+                    upcoming_event["scheduled_date"] = None
+                    upcoming_event["date_type"] = "pending"
+                    upcoming_placements.append(upcoming_event)
+        
+        # Sort upcoming placements by date
+        upcoming_placements.sort(
+            key=lambda x: x.get("scheduled_date") or "9999-12-31"
+        )
+        
+        return {
+            "campaign_id": str(campaign_id),
+            "campaign_name": campaign.get("campaign_name"),
+            "total_placements": total_placements,
+            "total_pitches_sent": total_pitches,
+            "placement_rate": round(placement_rate, 2),
+            "by_status": {
+                "scheduled": status_counts["scheduled"],
+                "completed": status_counts["completed"],
+                "cancelled": status_counts["cancelled"]
+            },
+            "detailed_status": status_counts,  # Include more detailed breakdown
+            "upcoming_placements": upcoming_placements[:10]  # Limit to 10 most recent
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching placement metrics for campaign {campaign_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch placement metrics: {str(e)}"
+        )
+
+
 
 

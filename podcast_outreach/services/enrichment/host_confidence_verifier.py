@@ -32,10 +32,10 @@ class HostConfidenceVerifier:
         "rss_owner": 0.9,             # From RSS feed owner field
         "episode_transcript": 0.85,    # Extracted from episode transcripts
         "ai_analysis": 0.8,           # From AI episode analysis
-        "podcast_description": 0.7,    # From podcast description
-        "tavily_search": 0.6,         # From web search
-        "llm_extraction": 0.5,        # From LLM extraction without specific source
-        "social_media": 0.4,          # From social media profiles
+        "podcast_description": 0.8,    # From podcast description with AI extraction (increased from 0.7)
+        "tavily_search": 0.75,        # From web search (increased from 0.6)
+        "llm_extraction": 0.65,        # From LLM extraction without specific source (increased from 0.5)
+        "social_media": 0.5,          # From social media profiles (increased from 0.4)
     }
     
     # Verification interval (days)
@@ -107,7 +107,10 @@ class HostConfidenceVerifier:
                             host_sources[normalized_host] = set()
                         # Determine source based on existing confidence data
                         existing_confidence = media_data.get('host_names_discovery_confidence', {})
-                        if normalized_host in existing_confidence and existing_confidence[normalized_host] >= 0.9:
+                        # Ensure existing_confidence is a dict
+                        if not isinstance(existing_confidence, dict):
+                            existing_confidence = {}
+                        if existing_confidence.get(normalized_host, 0) >= 0.9:
                             host_sources[normalized_host].add("manual_entry")
                         else:
                             host_sources[normalized_host].add("llm_extraction")
@@ -147,7 +150,8 @@ class HostConfidenceVerifier:
             # 4. Extract from podcast description if available
             description = media_data.get('description', '')
             if description:
-                hosts_from_desc = self._extract_hosts_from_description(description)
+                media_name = media_data.get('name', '')
+                hosts_from_desc = await self._extract_hosts_from_description(description, media_name)
                 for host in hosts_from_desc:
                     all_discovered_hosts.add(host)
                     if host not in host_sources:
@@ -214,26 +218,66 @@ class HostConfidenceVerifier:
             logger.error(f"Error verifying host names for media {media_id}: {e}", exc_info=True)
             return {}
     
-    def _extract_hosts_from_description(self, description: str) -> List[str]:
+    async def _extract_hosts_from_description(self, description: str, media_name: str = "") -> List[str]:
         """
-        Extract potential host names from podcast description.
+        Extract potential host names from podcast description using AI.
         """
         hosts = []
         
-        # Common patterns for host mentions
-        patterns = [
-            r'hosted by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            r'with host\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            r'your host[,\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            r'(?:I\'m|I am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, description, re.IGNORECASE)
-            for match in matches:
-                # Basic validation - should look like a name
-                if match and len(match.split()) <= 4 and not any(char.isdigit() for char in match):
-                    hosts.append(match.strip())
+        try:
+            # Use Gemini for intelligent host extraction
+            from podcast_outreach.services.ai.gemini_client import GeminiService
+            
+            gemini_service = GeminiService()
+            prompt = f"""
+            Analyze this podcast description and extract ONLY the actual host name(s).
+            
+            Podcast: {media_name}
+            Description: {description[:1000]}
+            
+            Instructions:
+            1. Extract only real person names (e.g., "John Smith", "Jane Doe")
+            2. Do NOT include generic descriptions like "the dynamic duo", "the team", "our hosts"
+            3. Look for names mentioned after phrases like "hosted by", "with host", "your host", etc.
+            4. If nicknames are included, keep them (e.g., "Jordyn 'J' Short")
+            5. Return each host name on a separate line
+            6. If no actual host names are found, return "Unknown"
+            
+            Return ONLY the host names, one per line, nothing else.
+            """
+            
+            response = await gemini_service.create_message(
+                prompt=prompt,
+                model='gemini-2.0-flash',
+                workflow='host_extraction'
+            )
+            
+            if response and response.strip() != "Unknown":
+                # Split by newlines and clean up
+                potential_hosts = response.strip().split('\n')
+                for host in potential_hosts:
+                    host = host.strip()
+                    # Basic validation - should look like a name
+                    if host and len(host.split()) <= 5 and not host.lower() in ['unknown', 'none', 'n/a']:
+                        hosts.append(host)
+            
+            logger.debug(f"Extracted hosts from description using AI: {hosts}")
+            
+        except Exception as e:
+            logger.warning(f"AI host extraction failed, falling back to regex: {e}")
+            
+            # Fallback to basic regex patterns if AI fails
+            patterns = [
+                r'hosted by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+                r'with host\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+                r'your host[,\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, description, re.IGNORECASE)
+                for match in matches:
+                    if match and len(match.split()) <= 4 and not any(char.isdigit() for char in match):
+                        hosts.append(match.strip())
         
         return hosts
     
@@ -300,10 +344,16 @@ class HostConfidenceVerifier:
             # Prepare update data
             host_names_list = [host['name'] for host in verified_hosts]
             
+            # Calculate overall confidence score (use the highest confidence among all hosts)
+            overall_confidence = 0.0
+            if confidence_scores:
+                overall_confidence = max(confidence_scores.values())
+            
             update_data = {
                 'host_names': host_names_list,
                 'host_names_discovery_sources': discovery_sources,
                 'host_names_discovery_confidence': confidence_scores,
+                'host_names_confidence': overall_confidence,  # Add overall confidence score
                 'host_names_last_verified': datetime.now(timezone.utc)
             }
             

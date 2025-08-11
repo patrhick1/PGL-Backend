@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - Podcast Outreach</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+    <div class="admin-container">
+        <header class="admin-header">
+            <h1>Admin Dashboard</h1>
+            <div class="user-info">
+                <span>Welcome, {{ username }}</span>
+                <span class="role-badge">{{ role }}</span>
+                <a href="/logout" class="logout-btn">Logout</a>
+            </div>
+        </header>
+
+        <nav class="admin-nav">
+            <ul>
+                <li><a href="#" onclick="loadMediaManagement()" class="nav-link active">Media Management</a></li>
+                <li><a href="#" onclick="loadPeopleManagement()" class="nav-link">People Management</a></li>
+                <li><a href="#" onclick="loadMediaPeopleRelations()" class="nav-link">Media-People Relations</a></li>
+                <li><a href="#" onclick="loadEnrichmentQueue()" class="nav-link">Enrichment Queue</a></li>
+            </ul>
+        </nav>
+
+        <main class="admin-content" id="mainContent">
+            <!-- Content will be loaded here dynamically -->
+            <div class="welcome-message">
+                <h2>Welcome to the Admin Dashboard</h2>
+                <p>Select a management area from the navigation menu to get started.</p>
+                
+                <div class="quick-stats">
+                    <div class="stat-card">
+                        <h3>Quick Actions</h3>
+                        <ul>
+                            <li><button onclick="loadMediaManagement()" class="action-btn">Manage Media Records</button></li>
+                            <li><button onclick="loadPeopleManagement()" class="action-btn">Manage People/Hosts</button></li>
+                            <li><button onclick="triggerBulkEnrichment()" class="action-btn">Trigger Bulk Enrichment</button></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal for editing -->
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2 id="modalTitle">Edit Record</h2>
+            <form id="editForm">
+                <div id="formFields"></div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <script src="/static/admin.js?v={{ timestamp }}"></script>
+</body>
+</html>

@@ -55,6 +55,8 @@ from podcast_outreach.api.routers import public_lead_magnet
 from podcast_outreach.api.routers import notifications
 # Add OAuth router for social authentication
 from podcast_outreach.api.routers import oauth
+# Add Nylas-related routers
+from podcast_outreach.api.routers import nylas_webhooks, inbox, drafts, metrics
 
 setup_logging()
 logger = get_logger(__name__)
@@ -276,6 +278,10 @@ app.include_router(notifications.router)
 app.include_router(billing.router)
 app.include_router(oauth.router)
 app.include_router(chatbot.router)
+app.include_router(nylas_webhooks.router)
+app.include_router(inbox.router)
+app.include_router(drafts.router)
+app.include_router(metrics.router)
 
 
 @app.get("/login")
@@ -354,12 +360,14 @@ def admin_dashboard(request: Request, user: dict = Depends(get_admin_user)):
     Admin dashboard page that shows links to all admin-only features.
     Admin access required.
     """
+    import time
     return templates.TemplateResponse(
         "admin_dashboard.html", 
         {
             "request": request,
             "username": user["username"],
-            "role": user["role"]
+            "role": user["role"],
+            "timestamp": int(time.time())  # Add timestamp for cache-busting
         }
     )
 

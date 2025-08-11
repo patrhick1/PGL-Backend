@@ -19,6 +19,7 @@ from podcast_outreach.database.models.media_models import EnrichedPodcastProfile
 from .enrichment_agent import EnrichmentAgent
 from .quality_score import QualityService
 from .social_scraper import SocialDiscoveryService
+from .host_confidence_verifier import HostConfidenceVerifier
 
 # Import modular DB connection for main execution block
 from podcast_outreach.database.connection import init_db_pool, close_db_pool 
@@ -32,11 +33,13 @@ class EnrichmentOrchestrator:
     def __init__(self,
                  enrichment_agent: EnrichmentAgent,
                  quality_service: QualityService,
-                 social_discovery_service: SocialDiscoveryService):
+                 social_discovery_service: SocialDiscoveryService,
+                 host_verifier: Optional[HostConfidenceVerifier] = None):
         self.enrichment_agent = enrichment_agent
         self.quality_service = quality_service
         self.social_discovery_service = social_discovery_service
-        logger.info("EnrichmentOrchestrator initialized with EnrichmentAgent, QualityService, and SocialDiscoveryService.")
+        self.host_verifier = host_verifier or HostConfidenceVerifier()
+        logger.info("EnrichmentOrchestrator initialized with EnrichmentAgent, QualityService, SocialDiscoveryService, and HostConfidenceVerifier.")
 
     def _clean_media_data_for_validation(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Clean media data to fix common validation issues (same logic as data_merger)."""
@@ -174,6 +177,17 @@ class EnrichmentOrchestrator:
             await asyncio.sleep(0.5)
         logger.info("Core details enrichment batch finished.")
 
+    async def run_host_verification_batch(self, batch_size: int = 20):
+        """Run host name verification for media needing verification."""
+        logger.info("Starting host name verification batch...")
+        
+        # Run the verification batch
+        results = await self.host_verifier.run_verification_batch(batch_size)
+        
+        # Count successful verifications
+        successful = sum(1 for r in results if r.get("status") == "success")
+        logger.info(f"Host verification batch completed: {successful}/{len(results)} successful")
+        
     async def run_quality_score_updates(self, batch_size: int = 20):
         """Refreshes quality scores for records where the score is stale."""
         logger.info("Starting quality score update batch...")
@@ -343,7 +357,11 @@ class EnrichmentOrchestrator:
                 await media_queries.update_media_enrichment_data(media_id, update_data)
                 logger.info(f"Core enrichment completed for media_id: {media_id}")
             
-            # 2. Generate AI description if missing
+            # 2. Verify and enhance host names with confidence scores
+            logger.info(f"Verifying host names for media_id: {media_id}")
+            await self.host_verifier.verify_host_names(media_id)
+            
+            # 3. Generate AI description if missing
             media_data = await media_queries.get_media_by_id_from_db(media_id)
             if not media_data.get('ai_description'):
                 # Check if we have enough episode data for AI description
@@ -360,7 +378,7 @@ class EnrichmentOrchestrator:
                         await media_queries.update_media_ai_description(media_id, podcast_analysis["ai_description"])
                         logger.info(f"AI description generated for media_id: {media_id}")
             
-            # 3. Update quality score and compile episode summaries
+            # 4. Update quality score and compile episode summaries
             # Refetch media data to get latest updates
             media_data = await media_queries.get_media_by_id_from_db(media_id)
             transcribed_count = await media_queries.count_transcribed_episodes_for_media(media_id)
@@ -392,6 +410,7 @@ class EnrichmentOrchestrator:
         start_time = datetime.now(timezone.utc)
 
         await self.run_core_details_enrichment()
+        await self.run_host_verification_batch()  # Add host verification after core enrichment
         await self.run_social_stats_refresh()
         await self.run_quality_score_updates()
         await self._manage_transcription_flags()
@@ -436,8 +455,9 @@ if __name__ == '__main__':
             
             enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
             quality_service = QualityService()
+            host_verifier = HostConfidenceVerifier()
             
-            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
+            orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service, host_verifier)
             
             await orchestrator.run_pipeline_once()
             

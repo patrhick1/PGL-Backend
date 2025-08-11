@@ -51,7 +51,9 @@ class TaskScheduler:
             'transcription_pipeline': asyncio.Semaphore(2),     # Max 2 concurrent
             'episode_sync': asyncio.Semaphore(1),               # Only 1 concurrent
             'qualitative_assessment': asyncio.Semaphore(1),     # Only 1 concurrent
-            'workflow_health_check': asyncio.Semaphore(1)       # Only 1 concurrent
+            'workflow_health_check': asyncio.Semaphore(1),      # Only 1 concurrent
+            'match_notifications_morning': asyncio.Semaphore(1), # Only 1 concurrent
+            'match_notifications_afternoon': asyncio.Semaphore(1) # Only 1 concurrent
         }
         
         logger.info("TaskScheduler initialized with concurrency controls")
@@ -143,6 +145,21 @@ class TaskScheduler:
             task_function=self._check_weekly_reset_health,
             schedule_type=ScheduleType.DAILY,
             time_of_day="10:00"  # 10 AM UTC daily
+        ))
+        
+        # Match notification emails - twice daily at 9am and 3pm
+        self.register_task(ScheduledTask(
+            name="match_notifications_morning",
+            task_function=self._run_match_notifications,
+            schedule_type=ScheduleType.DAILY,
+            time_of_day="09:00"  # 9 AM UTC
+        ))
+        
+        self.register_task(ScheduledTask(
+            name="match_notifications_afternoon",
+            task_function=self._run_match_notifications,
+            schedule_type=ScheduleType.DAILY,
+            time_of_day="15:00"  # 3 PM UTC
         ))
         
         logger.info(f"Registered {len(self.scheduled_tasks)} default background tasks")
@@ -341,6 +358,16 @@ class TaskScheduler:
         task_id = f"scheduled_reset_health_{int(datetime.now().timestamp())}"
         self.task_manager.start_task(task_id, "scheduled_reset_health_check")
         self.task_manager.check_weekly_reset_health(task_id)
+    
+    async def _run_match_notifications(self):
+        """Run match notification email checks"""
+        try:
+            from podcast_outreach.services.match_notification_service import MatchNotificationService
+            notification_service = MatchNotificationService()
+            await notification_service.check_and_send_match_notifications()
+            logger.info("Match notification check completed successfully")
+        except Exception as e:
+            logger.error(f"Error running match notifications: {e}", exc_info=True)
     
     def get_task_status(self) -> Dict[str, Any]:
         """Get status of all scheduled tasks"""

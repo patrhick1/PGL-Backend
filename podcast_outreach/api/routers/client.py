@@ -61,10 +61,11 @@ async def get_client_discovery_status(current_user: dict = Depends(get_current_u
         if not profile:
              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not retrieve or create client profile.")
 
-    daily_allowance = profile.get('daily_discovery_allowance', FREE_PLAN_DAILY_DISCOVERY_LIMIT)
-    weekly_allowance = profile.get('weekly_discovery_allowance', FREE_PLAN_WEEKLY_DISCOVERY_LIMIT)
-    daily_used = profile.get('current_daily_discoveries', 0)
-    weekly_used = profile.get('current_weekly_discoveries', 0)
+    # Using new match tracking fields instead of old discovery fields
+    daily_allowance = profile.get('daily_discovery_allowance', FREE_PLAN_DAILY_DISCOVERY_LIMIT)  # Keep for backward compatibility
+    weekly_allowance = profile.get('weekly_match_allowance', 50) if profile.get('plan_type') == 'free' else profile.get('weekly_discovery_allowance', FREE_PLAN_WEEKLY_DISCOVERY_LIMIT)
+    daily_used = 0  # Daily tracking deprecated, using weekly only
+    weekly_used = profile.get('current_weekly_matches', 0)
 
     return schemas.ClientDiscoveryStatusSchema(
         person_id=person_id,
@@ -96,10 +97,10 @@ async def client_discover_podcast_previews(campaign_id: uuid.UUID, current_user:
     daily_allowance = profile.get('daily_discovery_allowance', FREE_PLAN_DAILY_DISCOVERY_LIMIT)
     weekly_allowance = profile.get('weekly_discovery_allowance', FREE_PLAN_WEEKLY_DISCOVERY_LIMIT)
 
-    if profile.get('current_daily_discoveries', 0) >= daily_allowance:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"Daily discovery limit of {daily_allowance} reached.")
-    if profile.get('current_weekly_discoveries', 0) >= weekly_allowance:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"Weekly discovery limit of {weekly_allowance} reached.")
+    # Check weekly match limits (daily limits deprecated)
+    current_weekly_matches = profile.get('current_weekly_matches', 0)
+    if profile.get('plan_type') == 'free' and current_weekly_matches >= 50:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"Weekly match limit of 50 reached for free plan.")
 
     keywords = campaign.get('campaign_keywords', [])
     if not keywords:
@@ -535,10 +536,12 @@ async def get_auto_discovery_status(
     profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
     
     # Calculate remaining auto-discoveries
+    # Use unified tracking for both free and paid users
     if profile['plan_type'] == 'free':
         remaining_this_week = 50 - profile.get('current_weekly_matches', 0)
     else:
-        remaining_this_week = 200 - profile.get('auto_discovery_matches_this_week', 0)
+        # Paid users now also use current_weekly_matches with 200 limit
+        remaining_this_week = 200 - profile.get('current_weekly_matches', 0)
     
     return {
         "campaign_id": campaign_id,

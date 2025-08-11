@@ -43,6 +43,9 @@ ENV/
 Thumbs.db
 old script/
 
+# Documentation Archive
+docs_archive/
+
 # Replit specific
 .replit
 replit.nix

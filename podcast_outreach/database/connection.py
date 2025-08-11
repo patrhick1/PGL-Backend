@@ -140,3 +140,41 @@ async def close_all_pools():
 #     pool = await get_db_pool()
 #     async with pool.acquire() as connection:
 #         yield connection
+
+# Context manager for async database operations
+class AsyncDatabaseConnection:
+    """Context manager for async database operations with helper methods."""
+    
+    def __init__(self, pool: asyncpg.Pool = None):
+        self.pool = pool
+        self.connection = None
+    
+    async def __aenter__(self):
+        if self.pool is None:
+            self.pool = await get_db_pool()
+        self.connection = await self.pool.acquire()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.connection:
+            await self.pool.release(self.connection)
+    
+    async def execute(self, query: str, *args):
+        """Execute a query without returning results."""
+        return await self.connection.execute(query, *args)
+    
+    async def fetch_one(self, query: str, *args):
+        """Fetch a single row."""
+        return await self.connection.fetchrow(query, *args)
+    
+    async def fetch_all(self, query: str, *args):
+        """Fetch all rows."""
+        return await self.connection.fetch(query, *args)
+    
+    async def fetch_val(self, query: str, *args):
+        """Fetch a single value."""
+        return await self.connection.fetchval(query, *args)
+
+def get_db_async():
+    """Get an async database connection context manager."""
+    return AsyncDatabaseConnection()

@@ -202,6 +202,28 @@ async def count_pitches_by_state(pitch_states: List[str], person_id: Optional[in
             logger.exception(f"Error counting pitches by state (person_id: {person_id}, states: {pitch_states}): {e}")
             return 0
 
+async def count_pitches_by_campaign(
+    campaign_id: uuid.UUID,
+    pitch_states: Optional[List[str]] = None
+) -> int:
+    """Count pitches for a specific campaign, optionally filtered by states."""
+    pool = await get_db_pool()
+    
+    query = "SELECT COUNT(*) FROM pitches WHERE campaign_id = $1"
+    params = [campaign_id]
+    
+    if pitch_states:
+        query += f" AND pitch_state = ANY(${len(params) + 1})"
+        params.append(pitch_states)
+    
+    async with pool.acquire() as conn:
+        try:
+            count = await conn.fetchval(query, *params)
+            return count if count is not None else 0
+        except Exception as e:
+            logger.exception(f"Error counting pitches for campaign {campaign_id}: {e}")
+            return 0
+
 async def get_all_pitches_enriched(
     skip: int = 0, 
     limit: int = 100,

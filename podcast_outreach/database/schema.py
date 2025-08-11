@@ -128,7 +128,10 @@ def create_people_table(conn):
         profile_banner_url        TEXT,
         notification_settings     JSONB DEFAULT '{}'::jsonb,
         privacy_settings          JSONB DEFAULT '{}'::jsonb,
-        stripe_customer_id        VARCHAR(255) UNIQUE
+        stripe_customer_id        VARCHAR(255) UNIQUE,
+        -- Nylas fields
+        nylas_grant_id            VARCHAR(255),
+        nylas_email_account       VARCHAR(255)
     );
 
     """
@@ -141,28 +144,35 @@ def create_client_profiles_table(conn):
     CREATE TABLE client_profiles (
         client_profile_id         SERIAL PRIMARY KEY,
         person_id                 INTEGER NOT NULL UNIQUE REFERENCES people(person_id) ON DELETE CASCADE,
-        plan_type                 VARCHAR(50) DEFAULT 'free' NOT NULL, -- e.g., 'free', 'paid_basic', 'paid_premium'
-        daily_discovery_allowance INTEGER DEFAULT 10 NOT NULL,
-        weekly_discovery_allowance INTEGER DEFAULT 50 NOT NULL,
-        current_daily_discoveries INTEGER DEFAULT 0 NOT NULL,
-        current_weekly_discoveries INTEGER DEFAULT 0 NOT NULL,
-        last_daily_reset          DATE DEFAULT CURRENT_DATE,
-        last_weekly_reset         DATE DEFAULT CURRENT_DATE, -- Could be Monday of the week
-        -- NEW: Match tracking fields
-        weekly_match_allowance    INTEGER DEFAULT 50 NOT NULL, -- Matches allowed per week (where vetting_score > 50)
-        current_weekly_matches    INTEGER DEFAULT 0 NOT NULL,  -- Current week's match count
+        plan_type                 VARCHAR(50) DEFAULT 'free' NOT NULL, -- 'free' or 'paid'
+        
+        -- UNIFIED MATCH TRACKING (for both free and paid users)
+        weekly_match_allowance    INTEGER NOT NULL, -- 50 for free, 200 for paid
+        current_weekly_matches    INTEGER DEFAULT 0,  -- Current week's quality match count (vetting_score >= 50)
         last_weekly_match_reset   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- When match count was last reset
-        -- AUTO-DISCOVERY TRACKING
-        auto_discovery_matches_this_week INTEGER DEFAULT 0, -- For paid users: track weekly auto-discoveries
-        last_auto_discovery_reset TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- When auto-discovery count was reset
+        last_auto_discovery_reset TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, -- Kept for backward compatibility
+        
+        -- MATCH NOTIFICATION PREFERENCES
+        match_notification_enabled BOOLEAN DEFAULT TRUE, -- Whether to send match notifications
+        match_notification_threshold INTEGER DEFAULT 30, -- Number of matches to trigger notification
+        last_match_notification_sent TIMESTAMPTZ, -- When last notification was sent
+        
+        -- SUBSCRIPTION TRACKING
         subscription_provider_id  VARCHAR(255), -- e.g., Stripe subscription ID
         subscription_status       VARCHAR(50),  -- e.g., 'active', 'canceled', 'past_due'
         subscription_ends_at      TIMESTAMPTZ,
+        
         created_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at                TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_client_profiles_person_id ON client_profiles (person_id);
     CREATE INDEX IF NOT EXISTS idx_client_profiles_plan_type ON client_profiles (plan_type);
+    
+    -- Add comments for clarity
+    COMMENT ON COLUMN client_profiles.current_weekly_matches IS 
+        'Unified tracking for quality matches (vetting_score >= 50). Limit: 50/week for free, 200/week for paid.';
+    COMMENT ON COLUMN client_profiles.weekly_match_allowance IS 
+        'Weekly limit for quality matches. Set to 50 for free users, 200 for paid users.';
     """
     execute_sql(conn, sql_statement)
     print("Table CLIENT_PROFILES created/ensured.")
@@ -178,6 +188,7 @@ def create_media_table(conn):
         name                      TEXT,
         title                     TEXT,
         rss_url                   TEXT,
+        rss_feed_url              TEXT,
         category                  TEXT,
         language                  VARCHAR(50),
         image_url                 TEXT,
@@ -324,7 +335,11 @@ def create_campaigns_table(conn):
         -- *** RELIABILITY FIELDS FROM MIGRATION ***
         auto_discovery_last_heartbeat TIMESTAMPTZ,
         auto_discovery_progress JSONB DEFAULT '{}',
-        auto_discovery_error TEXT
+        auto_discovery_error TEXT,
+        -- Nylas fields
+        nylas_grant_id VARCHAR(255),
+        email_account VARCHAR(255),
+        email_provider VARCHAR(50) DEFAULT 'instantly'
     );
     CREATE INDEX IF NOT EXISTS idx_campaigns_person_id ON CAMPAIGNS (person_id);
     CREATE INDEX IF NOT EXISTS idx_campaigns_embedding_hnsw ON CAMPAIGNS USING hnsw (embedding vector_cosine_ops);
@@ -426,7 +441,179 @@ def create_match_suggestions(conn):
     """
     execute_sql(conn, sql_statement)
     print("Table MATCH_SUGGESTIONS created/ensured.")
+    
+    # Create match tracking functions and triggers
+    create_match_tracking_functions_and_triggers(conn)
  
+def create_match_tracking_functions_and_triggers(conn):
+    """Create functions and triggers for unified match tracking system"""
+    
+    # Create the increment function
+    increment_function_sql = """
+    CREATE OR REPLACE FUNCTION increment_quality_match_counter()
+    RETURNS TRIGGER AS $$
+    DECLARE
+        v_person_id INTEGER;
+        v_plan_type TEXT;
+        v_current_matches INTEGER;
+        v_weekly_limit INTEGER;
+    BEGIN
+        -- Only count quality matches (score >= 50)
+        IF NEW.vetting_score < 50 THEN
+            RETURN NEW;
+        END IF;
+        
+        -- Get user details
+        SELECT c.person_id, cp.plan_type, cp.current_weekly_matches, cp.weekly_match_allowance
+        INTO v_person_id, v_plan_type, v_current_matches, v_weekly_limit
+        FROM campaigns c
+        LEFT JOIN client_profiles cp ON c.person_id = cp.person_id
+        WHERE c.campaign_id = NEW.campaign_id;
+        
+        IF v_person_id IS NULL THEN
+            RETURN NEW;
+        END IF;
+        
+        -- Check if limit would be exceeded (log only, don't block)
+        IF v_weekly_limit IS NOT NULL AND v_current_matches >= v_weekly_limit THEN
+            RAISE NOTICE 'User % has reached weekly match limit of %', v_person_id, v_weekly_limit;
+        END IF;
+        
+        -- Increment counter for BOTH free and paid users
+        UPDATE client_profiles
+        SET current_weekly_matches = COALESCE(current_weekly_matches, 0) + 1,
+            updated_at = NOW()
+        WHERE person_id = v_person_id;
+        
+        RAISE NOTICE 'User % (%) match count incremented', v_person_id, v_plan_type;
+        
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    execute_sql(conn, increment_function_sql)
+    print("Function increment_quality_match_counter created/updated.")
+    
+    # Create the trigger on match_suggestions
+    trigger_sql = """
+    DROP TRIGGER IF EXISTS quality_match_counter ON match_suggestions;
+    CREATE TRIGGER quality_match_counter
+    AFTER INSERT ON match_suggestions
+    FOR EACH ROW
+    EXECUTE FUNCTION increment_quality_match_counter();
+    """
+    execute_sql(conn, trigger_sql)
+    print("Trigger quality_match_counter created on match_suggestions.")
+    
+    # Create the weekly reset function
+    reset_function_sql = """
+    CREATE OR REPLACE FUNCTION reset_all_weekly_counts()
+    RETURNS TABLE(
+        person_id INTEGER,
+        plan_type VARCHAR,
+        prev_weekly_matches INTEGER,
+        prev_auto_discovery INTEGER,
+        weekly_limit INTEGER
+    ) AS $$
+    BEGIN
+        RETURN QUERY
+        UPDATE client_profiles cp
+        SET 
+            current_weekly_matches = 0,
+            last_weekly_match_reset = NOW(),
+            last_auto_discovery_reset = NOW(),
+            updated_at = NOW()
+        WHERE 
+            -- Reset if it's been more than 6 days since last reset
+            (last_weekly_match_reset IS NULL 
+             OR last_weekly_match_reset < NOW() - INTERVAL '6 days')
+        RETURNING 
+            cp.person_id,
+            cp.plan_type,
+            current_weekly_matches as prev_weekly_matches,
+            0 as prev_auto_discovery,
+            cp.weekly_match_allowance as weekly_limit;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    execute_sql(conn, reset_function_sql)
+    print("Function reset_all_weekly_counts created/updated.")
+    
+    # Create helper function to check if user can create matches
+    helper_function_sql = """
+    CREATE OR REPLACE FUNCTION can_create_quality_matches(
+        p_person_id INTEGER,
+        p_matches_to_create INTEGER DEFAULT 1
+    ) RETURNS BOOLEAN AS $$
+    DECLARE
+        v_current_matches INTEGER;
+        v_weekly_limit INTEGER;
+        v_plan_type VARCHAR;
+    BEGIN
+        SELECT current_weekly_matches, weekly_match_allowance, plan_type
+        INTO v_current_matches, v_weekly_limit, v_plan_type
+        FROM client_profiles
+        WHERE person_id = p_person_id;
+        
+        -- No profile = no limits (admin users)
+        IF NOT FOUND THEN
+            RETURN TRUE;
+        END IF;
+        
+        -- Check against limit
+        IF v_weekly_limit IS NULL THEN
+            RETURN TRUE;  -- No limit set
+        END IF;
+        
+        RETURN (v_current_matches + p_matches_to_create) <= v_weekly_limit;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    execute_sql(conn, helper_function_sql)
+    print("Function can_create_quality_matches created/updated.")
+    
+    # Create function to check limit before insert
+    check_limit_function_sql = """
+    CREATE OR REPLACE FUNCTION check_match_limit_before_insert(
+        p_campaign_id UUID,
+        p_vetting_score NUMERIC
+    ) RETURNS BOOLEAN AS $$
+    DECLARE
+        v_person_id INTEGER;
+        v_plan_type TEXT;
+        v_current_matches INTEGER;
+        v_weekly_limit INTEGER;
+    BEGIN
+        -- Only check for quality matches
+        IF p_vetting_score < 50 THEN
+            RETURN TRUE; -- Allow low-score matches
+        END IF;
+        
+        -- Get user details
+        SELECT c.person_id, cp.plan_type, cp.current_weekly_matches, cp.weekly_match_allowance
+        INTO v_person_id, v_plan_type, v_current_matches, v_weekly_limit
+        FROM campaigns c
+        JOIN client_profiles cp ON c.person_id = cp.person_id
+        WHERE c.campaign_id = p_campaign_id;
+        
+        -- No profile = admin/unlimited
+        IF NOT FOUND THEN
+            RETURN TRUE;
+        END IF;
+        
+        -- Check limits
+        IF v_weekly_limit IS NOT NULL AND v_current_matches >= v_weekly_limit THEN
+            RAISE NOTICE 'User % has reached weekly limit of % matches', v_person_id, v_weekly_limit;
+            RETURN FALSE;
+        END IF;
+        
+        RETURN TRUE;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    execute_sql(conn, check_limit_function_sql)
+    print("Function check_match_limit_before_insert created/updated.")
+
 def create_pitch_templates_table(conn):
     sql_statement = """
     CREATE TABLE pitch_templates (
@@ -520,13 +707,33 @@ def create_pitches_table(conn):
         pitch_state VARCHAR(100),
         client_approval_status VARCHAR(100),
         created_by TEXT,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        -- Nylas fields
+        nylas_message_id VARCHAR(255),
+        nylas_thread_id VARCHAR(255),
+        nylas_draft_id VARCHAR(255),
+        email_provider VARCHAR(50) DEFAULT 'instantly',
+        opened_ts TIMESTAMPTZ,
+        clicked_ts TIMESTAMPTZ,
+        bounce_type VARCHAR(50),
+        bounce_reason TEXT,
+        bounced_ts TIMESTAMPTZ,
+        -- Enhanced tracking fields from implementation plan
+        tracking_label VARCHAR(255),
+        open_count INTEGER DEFAULT 0,
+        click_count INTEGER DEFAULT 0,
+        scheduled_send_at TIMESTAMPTZ,
+        send_status VARCHAR(50) DEFAULT 'pending' -- pending, scheduled, sent, failed
     );
     CREATE INDEX IF NOT EXISTS idx_pitches_campaign_id ON pitches (campaign_id);
     CREATE INDEX IF NOT EXISTS idx_pitches_media_id ON pitches (media_id);
     CREATE INDEX IF NOT EXISTS idx_pitches_pitch_gen_id ON pitches (pitch_gen_id);
     CREATE INDEX IF NOT EXISTS idx_pitches_placement_id ON pitches (placement_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pitches_instantly_lead_id ON pitches (instantly_lead_id) WHERE instantly_lead_id IS NOT NULL; -- Ensure uniqueness
+    -- Nylas indexes
+    CREATE INDEX IF NOT EXISTS idx_pitches_nylas_message_id ON pitches(nylas_message_id) WHERE nylas_message_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pitches_nylas_thread_id ON pitches(nylas_thread_id) WHERE nylas_thread_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pitches_email_provider ON pitches(email_provider);
     """
     execute_sql(conn, sql_statement)
     print("Table PITCHES created/ensured.")
@@ -863,6 +1070,117 @@ def create_webhook_events_table(conn):
     execute_sql(conn, sql_statement)
     print("Table WEBHOOK_EVENTS created/ensured.")
 
+def create_email_sync_status_table(conn):
+    """Create table to track email sync status and processing."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS email_sync_status (
+        sync_id SERIAL PRIMARY KEY,
+        grant_id VARCHAR(255) NOT NULL,
+        last_sync_timestamp TIMESTAMPTZ,
+        last_message_timestamp TIMESTAMPTZ,
+        sync_cursor VARCHAR(500),
+        messages_processed INTEGER DEFAULT 0,
+        sync_status VARCHAR(50) DEFAULT 'active',
+        error_count INTEGER DEFAULT 0,
+        last_error TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_email_sync_grant_id ON email_sync_status(grant_id);
+    CREATE INDEX IF NOT EXISTS idx_email_sync_status ON email_sync_status(sync_status);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table EMAIL_SYNC_STATUS created/ensured.")
+    apply_timestamp_update_trigger(conn, "email_sync_status")
+
+def create_processed_emails_table(conn):
+    """Create table to track processed email messages."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS processed_emails (
+        id SERIAL PRIMARY KEY,
+        message_id VARCHAR(255) UNIQUE NOT NULL,
+        thread_id VARCHAR(255),
+        grant_id VARCHAR(255),
+        processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        processing_type VARCHAR(50), -- 'reply', 'bounce', 'opened', etc.
+        pitch_id INTEGER REFERENCES pitches(pitch_id),
+        placement_id INTEGER REFERENCES placements(placement_id),
+        metadata JSONB DEFAULT '{}'::jsonb
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_processed_emails_message_id ON processed_emails(message_id);
+    CREATE INDEX IF NOT EXISTS idx_processed_emails_thread_id ON processed_emails(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_processed_emails_grant_id ON processed_emails(grant_id);
+    CREATE INDEX IF NOT EXISTS idx_processed_emails_processed_at ON processed_emails(processed_at);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table PROCESSED_EMAILS created/ensured.")
+
+def create_message_events_table(conn):
+    """Create message_events table for comprehensive event tracking."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS message_events (
+        event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        message_id VARCHAR(255) NOT NULL,
+        pitch_id INTEGER REFERENCES pitches(pitch_id),
+        event_type VARCHAR(50) NOT NULL, -- opened, clicked, bounced, replied, send_success, send_failed
+        timestamp TIMESTAMPTZ NOT NULL,
+        payload_json JSONB,
+        ip_address INET,
+        user_agent TEXT,
+        link_url TEXT,
+        is_duplicate BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_events_message_id ON message_events(message_id);
+    CREATE INDEX IF NOT EXISTS idx_message_events_pitch_id ON message_events(pitch_id);
+    CREATE INDEX IF NOT EXISTS idx_message_events_type_timestamp ON message_events(event_type, timestamp);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table MESSAGE_EVENTS created/ensured.")
+
+def create_contact_status_table(conn):
+    """Create contact_status table for email deliverability management."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS contact_status (
+        email VARCHAR(255) PRIMARY KEY,
+        status VARCHAR(50) DEFAULT 'active', -- active, bounced, cleaned, do_not_contact
+        last_bounce_reason TEXT,
+        bounce_count INTEGER DEFAULT 0,
+        hard_bounce_count INTEGER DEFAULT 0,
+        soft_bounce_count INTEGER DEFAULT 0,
+        do_not_contact BOOLEAN DEFAULT FALSE,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_contact_status_status ON contact_status(status);
+    CREATE INDEX IF NOT EXISTS idx_contact_status_do_not_contact ON contact_status(do_not_contact);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table CONTACT_STATUS created/ensured.")
+    apply_timestamp_update_trigger(conn, "contact_status")
+
+def create_send_queue_table(conn):
+    """Create send_queue table for throttling and scheduled sends."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS send_queue (
+        queue_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pitch_id INTEGER REFERENCES pitches(pitch_id),
+        grant_id VARCHAR(255) NOT NULL,
+        scheduled_for TIMESTAMPTZ NOT NULL,
+        priority INTEGER DEFAULT 5,
+        attempts INTEGER DEFAULT 0,
+        last_attempt_at TIMESTAMPTZ,
+        status VARCHAR(50) DEFAULT 'pending', -- pending, processing, sent, failed
+        error_message TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_send_queue_status_scheduled ON send_queue(status, scheduled_for);
+    CREATE INDEX IF NOT EXISTS idx_send_queue_grant_id ON send_queue(grant_id);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table SEND_QUEUE created/ensured.")
+
 def create_chatbot_conversations_table(conn):
     """Create chatbot_conversations table for storing chatbot conversation sessions"""
     sql_statement = """
@@ -909,6 +1227,27 @@ def create_conversation_insights_table(conn):
     execute_sql(conn, sql_statement)
     print("Table CONVERSATION_INSIGHTS created/ensured.")
 
+def create_match_notification_log_table(conn):
+    """Creates MATCH_NOTIFICATION_LOG table for tracking match notification emails sent to clients"""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS match_notification_log (
+        notification_id     SERIAL PRIMARY KEY,
+        campaign_id         UUID NOT NULL REFERENCES campaigns(campaign_id) ON DELETE CASCADE,
+        person_id           INTEGER NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+        match_count         INTEGER NOT NULL, -- Number of matches at time of notification
+        sent_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at          TIMESTAMPTZ DEFAULT NOW()
+    );
+    
+    -- Index for checking when we last sent notification for a campaign
+    CREATE INDEX IF NOT EXISTS idx_notification_log_campaign_sent 
+        ON match_notification_log(campaign_id, sent_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notification_log_person 
+        ON match_notification_log(person_id, sent_at DESC);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table MATCH_NOTIFICATION_LOG created/ensured.")
+
 def drop_all_tables(conn):
     """Drops all known tables in the database, in an order suitable for dependencies if CASCADE is not fully effective."""
     # Order for dropping: from tables that are referenced by others to tables that are not, 
@@ -916,6 +1255,12 @@ def drop_all_tables(conn):
     table_names_in_drop_order = [
         "CONVERSATION_INSIGHTS", # FK to CHATBOT_CONVERSATIONS
         "CHATBOT_CONVERSATIONS", # FKs to CAMPAIGNS, PEOPLE
+        "MATCH_NOTIFICATION_LOG", # FKs to CAMPAIGNS, PEOPLE
+        "SEND_QUEUE",         # FK to PITCHES
+        "MESSAGE_EVENTS",     # FK to PITCHES
+        "PROCESSED_EMAILS",   # FKs to PITCHES, PLACEMENTS
+        "CONTACT_STATUS",     # No FKs
+        "EMAIL_SYNC_STATUS",  # No FKs
         "WEBHOOK_EVENTS",     # No FKs, drop first
         "INVOICES",           # FK to PEOPLE
         "SUBSCRIPTION_HISTORY", # FK to CLIENT_PROFILES
@@ -1017,9 +1362,17 @@ def create_all_tables():
         create_invoices_table(conn)
         create_price_products_table(conn)
         create_webhook_events_table(conn)
+        # Create Nylas-related tables
+        create_email_sync_status_table(conn)
+        create_processed_emails_table(conn) # Depends on PITCHES, PLACEMENTS
+        create_message_events_table(conn) # Depends on PITCHES
+        create_contact_status_table(conn)
+        create_send_queue_table(conn) # Depends on PITCHES
         # Create chatbot-related tables
         create_chatbot_conversations_table(conn) # Depends on CAMPAIGNS, PEOPLE
         create_conversation_insights_table(conn) # Depends on CHATBOT_CONVERSATIONS
+        # Create notification tracking table
+        create_match_notification_log_table(conn) # Depends on CAMPAIGNS, PEOPLE
         
         print("All tables checked/created successfully.")
     except psycopg2.Error as e:

@@ -345,7 +345,123 @@ Error responses include a `detail` field:
 }
 ```
 
+
+## Pitch Management Endpoints (`/pitches/`)
+
+All pitch endpoints require **AUTHENTICATION**.
+
+### 1. Create a Pitch
+
+`POST /api/pitches/`
+
+*   **Description:** Creates a new pitch.
+*   **Body:**
+
+```json
+{
+  "client_id": 1,
+  "podcast_id": 1,
+  "subject": "Podcast Pitch: John Doe",
+  "body": "I would like to be a guest on your podcast..."
+}
+```
+
+### 2. Get Pitches
+
+`GET /api/pitches/`
+
+*   **Description:** Retrieves a list of pitches.
+
+### 3. Get a Specific Pitch
+
+`GET /api/pitches/{pitch_id}`
+
+*   **Description:** Retrieves a specific pitch by its ID.
+
+### 4. Update a Pitch
+
+`PUT /api/pitches/{pitch_id}`
+
+*   **Description:** Updates a pitch.
+
+### 5. Delete a Pitch
+
+`DELETE /api/pitches/{pitch_id}`
+
+*   **Description:** Deletes a pitch.
+
+### 6. Send a Pitch
+
+`POST /api/pitches/{pitch_id}/send`
+
+*   **Description:** Sends a pitch to the podcast.
+
+## Placement Management Endpoints (`/placements/`)
+
+All placement endpoints require **AUTHENTICATION**.
+
+### 1. Create a Placement
+
+`POST /api/placements/`
+
+*   **Description:** Creates a new placement.
+*   **Body:**
+
+```json
+{
+  "pitch_id": 1,
+  "booking_date": "2025-12-25T12:00:00Z"
+}
+```
+
+### 2. Get Placements
+
+`GET /api/placements/`
+
+*   **Description:** Retrieves a list of placements.
+
+### 3. Get a Specific Placement
+
+`GET /api/placements/{placement_id}`
+
+*   **Description:** Retrieves a specific placement by its ID.
+
+### 4. Update a Placement
+
+`PUT /api/placements/{placement_id}`
+
+*   **Description:** Updates a placement.
+
+### 5. Delete a Placement
+
+`DELETE /api/placements/{placement_id}`
+
+*   **Description:** Deletes a placement.
+
+## Review Task Management Endpoints (`/review_tasks/`)
+
+All review task endpoints require **AUTHENTICATION**.
+
+### 1. Get Review Tasks
+
+`GET /api/review_tasks/`
+
+*   **Description:** Retrieves a list of review tasks.
+
+### 2. Get a Specific Review Task
+
+`GET /api/review_tasks/{task_id}`
+
+*   **Description:** Retrieves a specific review task by its ID.
+
+### 3. Update a Review Task
+
+`PUT /api/review_tasks/{task_id}`
+
+*   **Description:** Updates a review task (e.g., to approve or reject it).
+
 ## Campaign Management Endpoints (`/campaigns/`)
+
 
 All campaign endpoints require **AUTHENTICATION**.
 

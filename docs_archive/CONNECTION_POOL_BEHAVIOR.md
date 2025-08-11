@@ -6,6 +6,9 @@ The application uses asyncpg connection pooling to efficiently manage database c
 
 ## Connection Pool Configuration
 
+The application uses a **dual-pool architecture** for better resource management:
+
+### Frontend Pool (API requests)
 From `podcast_outreach/database/connection.py`:
 
 ```python
@@ -20,12 +23,26 @@ DB_POOL = await asyncpg.create_pool(
 )
 ```
 
+### Background Task Pool (Long-running operations)
+```python
+BACKGROUND_TASK_POOL = await asyncpg.create_pool(
+    dsn=dsn,
+    min_size=2,         # Lower minimum for background tasks
+    max_size=8,         # Separate limit from frontend
+    command_timeout=1800,  # 30 minutes for long operations
+    timeout=60,         # Longer acquire timeout
+    max_queries=10000,
+    max_inactive_connection_lifetime=300
+)
+```
+
 ## Normal Pool Behavior
 
-1. **Initial State**: Pool starts with `min_size=3` connections
-2. **Growth**: Pool grows as needed up to `max_size=10` connections
+1. **Initial State**: Frontend pool starts with `min_size=3` connections, background pool with 2
+2. **Growth**: Pools grow as needed up to their respective `max_size` limits
 3. **Reuse**: Connections are reused for multiple queries
 4. **Idle Cleanup**: Unused connections are closed after 5 minutes
+5. **Separation**: Frontend and background tasks use separate pools to prevent interference
 
 ## What's NOT a Connection Leak
 
@@ -33,16 +50,18 @@ The following scenarios are NORMAL and not connection leaks:
 
 1. **Pool Size Growth**: Going from 1 → 2 → 3 connections is normal startup behavior
 2. **Concurrent Requests**: Multiple simultaneous requests may temporarily increase pool size
-3. **Size Fluctuation**: Pool size varying between 3-10 is expected
+3. **Size Fluctuation**: Frontend pool varying between 3-10 and background pool between 2-8 is expected
+4. **Dual Pool Usage**: Seeing connections from both pools active simultaneously is normal
 
 ## What IS a Connection Leak
 
 Real connection leaks would show:
 
-1. Pool size exceeding `max_size` (>10)
+1. Frontend pool size exceeding `max_size` (>10) or background pool (>8)
 2. Connections not being returned after queries complete
 3. Gradual increase over time without decrease
 4. Application hanging when trying to acquire connections
+5. Total connections across both pools exceeding 18 (10+8)
 
 ## Monitoring Connection Pool
 

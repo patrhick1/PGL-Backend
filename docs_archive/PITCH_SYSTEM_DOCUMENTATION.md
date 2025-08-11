@@ -26,10 +26,12 @@ The pitch system is a core component that generates personalized outreach emails
    - Variable substitution system
 
 4. **API Endpoints** (`api/routers/pitches.py`)
-   - POST `/pitches/generations` - Generate new pitch
-   - GET `/pitches/generations/{id}` - Retrieve pitch
-   - PATCH `/pitches/generations/{id}/content` - Update pitch content
-   - POST `/pitches/send` - Send pitch via Instantly
+   - POST `/pitches/generate` - Generate new pitch
+   - POST `/pitches/generate-batch` - Generate pitches for multiple matches
+   - GET `/pitches/generations/{pitch_gen_id}` - Retrieve pitch
+   - PATCH `/pitches/generations/{pitch_gen_id}/content` - Update pitch content
+   - POST `/pitches/send-instantly/{pitch_gen_id}` - Send pitch via Instantly
+   - POST `/pitches/send-nylas/{pitch_gen_id}` - Send pitch via Nylas
 
 ## Workflow
 
@@ -78,30 +80,61 @@ graph TD
 ### pitch_generations Table
 ```sql
 - pitch_gen_id (PRIMARY KEY)
-- match_id (FOREIGN KEY)
-- person_id (FOREIGN KEY)
+- campaign_id (FOREIGN KEY)
+- media_id (FOREIGN KEY)
+- template_id (FOREIGN KEY)
 - draft_text
-- template_used
-- variables_snapshot (JSONB)
 - ai_model_used
-- generation_prompt
-- created_at
-- updated_at
+- pitch_topic
+- temperature
+- generated_at (DEFAULT CURRENT_TIMESTAMP)
+- reviewer_id
+- reviewed_at
+- final_text
+- send_ready_bool
+- generation_status
 ```
 
 ### pitches Table
 ```sql
 - pitch_id (PRIMARY KEY)
-- pitch_gen_id (FOREIGN KEY)
 - campaign_id (FOREIGN KEY)
-- person_id (FOREIGN KEY)
 - media_id (FOREIGN KEY)
+- pitch_gen_id (FOREIGN KEY)
+- attempt_no
+- match_score
+- matched_keywords (TEXT[])
+- score_evaluated_at
+- outreach_type
 - subject_line
-- body_text
-- status (draft, sent, replied, etc.)
-- sent_at
-- created_at
-- updated_at
+- body_snippet
+- send_ts
+- reply_bool
+- reply_ts
+- instantly_lead_id
+- placement_id (FOREIGN KEY)
+- pitch_state
+- client_approval_status
+- created_by
+- created_at (DEFAULT CURRENT_TIMESTAMP)
+
+# Nylas Integration Fields:
+- nylas_message_id
+- nylas_thread_id
+- nylas_draft_id
+- email_provider (DEFAULT 'instantly')
+- opened_ts
+- clicked_ts
+- bounce_type
+- bounce_reason
+- bounced_ts
+
+# Enhanced Tracking Fields:
+- tracking_label
+- open_count (DEFAULT 0)
+- click_count (DEFAULT 0)
+- scheduled_send_at
+- send_status (DEFAULT 'pending')
 ```
 
 ## API Usage
@@ -109,20 +142,32 @@ graph TD
 ### Generate a Pitch
 
 ```bash
-POST /pitches/generations
+POST /pitches/generate
 Content-Type: application/json
 
 {
   "match_id": 123,
-  "template_id": 1,
-  "regenerate": false
+  "pitch_template_id": "friendly_intro_template"
 }
+```
+
+### Generate Multiple Pitches (Batch)
+
+```bash
+POST /pitches/generate-batch
+Content-Type: application/json
+
+[
+  {"match_id": 1, "pitch_template_id": "template_1"},
+  {"match_id": 2, "pitch_template_id": "template_2"},
+  {"match_id": 3, "pitch_template_id": "template_1"}
+]
 ```
 
 ### Update Pitch Content
 
 ```bash
-PATCH /pitches/generations/{id}/content
+PATCH /pitches/generations/{pitch_gen_id}/content
 Content-Type: application/json
 
 {
@@ -131,16 +176,18 @@ Content-Type: application/json
 }
 ```
 
-### Send Pitch
+### Send Pitch via Instantly
 
 ```bash
-POST /pitches/send
+POST /pitches/send-instantly/{pitch_gen_id}
 Content-Type: application/json
+```
 
-{
-  "pitch_id": 456,
-  "send_immediately": true
-}
+### Send Pitch via Nylas
+
+```bash
+POST /pitches/send-nylas/{pitch_gen_id}
+Content-Type: application/json
 ```
 
 ## Templates

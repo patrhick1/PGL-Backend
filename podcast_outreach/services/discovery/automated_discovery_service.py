@@ -203,11 +203,10 @@ class AutomatedDiscoveryService:
             cp.plan_type,
             cp.current_weekly_matches,
             cp.weekly_match_allowance,
-            cp.auto_discovery_matches_this_week,
-            CASE 
-                WHEN cp.plan_type = 'free' THEN 50 - cp.current_weekly_matches
-                ELSE 200 - COALESCE(cp.auto_discovery_matches_this_week, 0)
-            END as remaining_auto_matches
+            -- Calculate remaining matches based on unified limit
+            COALESCE(cp.weekly_match_allowance, 
+                CASE WHEN cp.plan_type = 'free' THEN 50 ELSE 200 END
+            ) - COALESCE(cp.current_weekly_matches, 0) as remaining_auto_matches
         FROM campaigns c
         JOIN people p ON c.person_id = p.person_id
         JOIN client_profiles cp ON p.person_id = cp.person_id
@@ -225,11 +224,10 @@ class AutomatedDiscoveryService:
                      OR c.auto_discovery_last_run < NOW() - INTERVAL '1 hour'))
         )
         AND (
-            -- Free users: still have weekly match allowance
-            (cp.plan_type = 'free' AND cp.current_weekly_matches < 50)
-            OR 
-            -- Paid users: under 200 auto-discoveries this week
-            (cp.plan_type != 'free' AND COALESCE(cp.auto_discovery_matches_this_week, 0) < 200)
+            -- All users: still have weekly match allowance
+            cp.current_weekly_matches < COALESCE(cp.weekly_match_allowance, 
+                CASE WHEN cp.plan_type = 'free' THEN 50 ELSE 200 END
+            )
         )
         ORDER BY 
             -- Prioritize paid users
@@ -403,9 +401,8 @@ class AutomatedDiscoveryService:
                     if pipeline_result.get('match_id'):
                         results["matches"] += 1
                         
-                        # Update auto-discovery match count for paid users
-                        if plan_type != 'free':
-                            await self._increment_auto_discovery_count(person_id, 1)
+                        # Match count is now incremented by database trigger for all users
+                        # No need to manually increment here
                 
                 if results["paused"]:
                     break
@@ -536,20 +533,16 @@ class AutomatedDiscoveryService:
         logger.info(f"Total unique podcasts found for campaign {campaign_id}: {len(unique_media)}")
         return unique_media
     
-    async def _increment_auto_discovery_count(self, person_id: int, count: int):
+    async def _increment_match_count(self, person_id: int, count: int):
         """
-        Increment auto-discovery count for paid users.
+        DEPRECATED: Match counting is now handled by database trigger.
+        Kept for backward compatibility but no longer needed.
         """
-        query = """
-        UPDATE client_profiles
-        SET auto_discovery_matches_this_week = 
-            COALESCE(auto_discovery_matches_this_week, 0) + $1,
-            updated_at = NOW()
-        WHERE person_id = $2
-        """
-        pool = await get_background_task_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(query, count, person_id)
+        # The database trigger automatically increments current_weekly_matches
+        # when a quality match (vetting_score >= 50) is created.
+        # This method is no longer needed but kept to avoid breaking existing code.
+        logger.debug(f"_increment_match_count called but not needed (person_id: {person_id}, count: {count})")
+        pass
     
     async def reset_weekly_auto_discovery_counts(self):
         """
@@ -676,11 +669,10 @@ class AutomatedDiscoveryService:
             cp.plan_type,
             cp.current_weekly_matches,
             cp.weekly_match_allowance,
-            cp.auto_discovery_matches_this_week,
-            CASE 
-                WHEN cp.plan_type = 'free' THEN 50 - cp.current_weekly_matches
-                ELSE 200 - COALESCE(cp.auto_discovery_matches_this_week, 0)
-            END as remaining_auto_matches
+            -- Calculate remaining matches based on unified limit
+            COALESCE(cp.weekly_match_allowance, 
+                CASE WHEN cp.plan_type = 'free' THEN 50 ELSE 200 END
+            ) - COALESCE(cp.current_weekly_matches, 0) as remaining_auto_matches
         FROM campaigns c
         JOIN people p ON c.person_id = p.person_id
         JOIN client_profiles cp ON p.person_id = cp.person_id

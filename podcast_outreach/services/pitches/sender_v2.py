@@ -163,7 +163,11 @@ class PitchSenderServiceV2:
         host_names = media_data.get('host_names', [])
         host_name = host_names[0] if host_names else None
         
-        # Send email
+        # Generate tracking label for this campaign
+        campaign_name = campaign_data.get('campaign_name', 'unknown')
+        tracking_label = f"campaign-{campaign_data.get('campaign_id')}-{campaign_name}"
+        
+        # Send email with comprehensive tracking
         nylas_client = self._get_nylas_client(grant_id)
         success, send_result = nylas_client.send_email(
             to_email=primary_email,
@@ -171,17 +175,24 @@ class PitchSenderServiceV2:
             subject=subject,
             body=body,
             custom_headers=custom_headers,
-            tracking_options={"opens": True, "links": True}
+            tracking_options={
+                "opens": True, 
+                "links": True,
+                "thread_replies": True,
+                "label": tracking_label
+            }
         )
         
         if success:
-            # Update pitch record
+            # Update pitch record with tracking info
             update_data = {
                 "send_ts": datetime.now(timezone.utc),
                 "pitch_state": "sent",
                 "nylas_message_id": send_result.get("message_id"),
                 "nylas_thread_id": send_result.get("thread_id"),
-                "nylas_draft_id": send_result.get("draft_id")
+                "nylas_draft_id": send_result.get("draft_id"),
+                "tracking_label": tracking_label,
+                "send_status": "sent"
             }
             await pitch_queries.update_pitch_in_db(pitch_record['pitch_id'], update_data)
             

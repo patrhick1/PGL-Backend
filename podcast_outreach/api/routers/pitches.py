@@ -28,6 +28,163 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pitches", tags=["Pitches"])
 
+@router.get("/metrics", summary="Get Pitch Metrics for Current User")
+async def get_pitch_metrics(
+    campaign_id: Optional[uuid.UUID] = Query(None, description="Filter by specific campaign"),
+    days: int = Query(30, ge=1, le=365, description="Number of days to look back"),
+    user: dict = Depends(get_current_user)
+):
+    """
+    Get pitch performance metrics for the current user.
+    Returns statistics on pitch states, open rates, reply rates, etc.
+    Can be filtered by campaign and time period.
+    """
+    from datetime import timedelta
+    from podcast_outreach.database.connection import get_db_pool
+    
+    try:
+        person_id = user.get("person_id")
+        if not person_id:
+            raise HTTPException(status_code=400, detail="User not properly authenticated")
+        
+        pool = await get_db_pool()
+        
+        # Build the base query with user filtering
+        base_conditions = ["c.person_id = $1"]
+        params = [person_id]
+        
+        # Add campaign filter if provided
+        if campaign_id:
+            base_conditions.append(f"p.campaign_id = ${len(params) + 1}")
+            params.append(campaign_id)
+        
+        # Add date filter
+        if days:
+            base_conditions.append(f"p.created_at >= NOW() - INTERVAL '{days} days'")
+        
+        where_clause = " AND ".join(base_conditions)
+        
+        async with pool.acquire() as conn:
+            # Get overall pitch metrics
+            metrics_query = f"""
+            SELECT 
+                COUNT(*) as total_pitches,
+                COUNT(CASE WHEN p.pitch_state = 'generated' THEN 1 END) as generated,
+                COUNT(CASE WHEN p.pitch_state = 'sent' THEN 1 END) as sent,
+                COUNT(CASE WHEN p.pitch_state = 'opened' THEN 1 END) as opened,
+                COUNT(CASE WHEN p.pitch_state = 'clicked' THEN 1 END) as clicked,
+                COUNT(CASE WHEN p.pitch_state IN ('replied', 'replied_interested') THEN 1 END) as replied,
+                COUNT(CASE WHEN p.pitch_state = 'bounced' THEN 1 END) as bounced,
+                COUNT(CASE WHEN p.pitch_state IN ('live', 'paid') THEN 1 END) as converted,
+                COUNT(CASE WHEN p.open_count > 0 THEN 1 END) as total_opened,
+                COUNT(CASE WHEN p.click_count > 0 THEN 1 END) as total_clicked,
+                AVG(p.open_count) as avg_opens_per_pitch,
+                AVG(p.click_count) as avg_clicks_per_pitch
+            FROM pitches p
+            JOIN campaigns c ON p.campaign_id = c.campaign_id
+            WHERE {where_clause}
+            """
+            
+            metrics = await conn.fetchrow(metrics_query, *params)
+            
+            # Get campaign breakdown if not filtering by specific campaign
+            campaign_breakdown = []
+            if not campaign_id:
+                campaign_query = f"""
+                SELECT 
+                    c.campaign_id,
+                    c.campaign_name,
+                    COUNT(p.pitch_id) as total_pitches,
+                    COUNT(CASE WHEN p.pitch_state = 'sent' THEN 1 END) as sent,
+                    COUNT(CASE WHEN p.pitch_state = 'opened' THEN 1 END) as opened,
+                    COUNT(CASE WHEN p.pitch_state IN ('replied', 'replied_interested') THEN 1 END) as replied
+                FROM campaigns c
+                LEFT JOIN pitches p ON c.campaign_id = p.campaign_id
+                WHERE c.person_id = $1
+                GROUP BY c.campaign_id, c.campaign_name
+                ORDER BY COUNT(p.pitch_id) DESC
+                LIMIT 10
+                """
+                
+                campaign_rows = await conn.fetch(campaign_query, person_id)
+                campaign_breakdown = [dict(row) for row in campaign_rows]
+            
+            # Get recent pitch activity
+            recent_query = f"""
+            SELECT 
+                p.pitch_id,
+                p.pitch_state,
+                p.created_at,
+                p.send_ts as sent_at,
+                c.campaign_name,
+                m.name as media_name
+            FROM pitches p
+            JOIN campaigns c ON p.campaign_id = c.campaign_id
+            LEFT JOIN media m ON p.media_id = m.media_id
+            WHERE {where_clause}
+            ORDER BY p.created_at DESC
+            LIMIT 10
+            """
+            
+            recent_pitches = await conn.fetch(recent_query, *params)
+            
+        # Calculate rates
+        total = metrics['total_pitches'] or 0
+        sent = metrics['sent'] or 0
+        opened = metrics['total_opened'] or 0
+        clicked = metrics['total_clicked'] or 0
+        replied = metrics['replied'] or 0
+        converted = metrics['converted'] or 0
+        
+        return {
+            "period_days": days,
+            "campaign_id": str(campaign_id) if campaign_id else None,
+            "totals": {
+                "total_pitches": total,
+                "generated": metrics['generated'] or 0,
+                "sent": sent,
+                "opened": metrics['opened'] or 0,
+                "clicked": metrics['clicked'] or 0,
+                "replied": replied,
+                "bounced": metrics['bounced'] or 0,
+                "converted": converted
+            },
+            "rates": {
+                "send_rate": round((sent / total * 100) if total > 0 else 0, 2),
+                "open_rate": round((opened / sent * 100) if sent > 0 else 0, 2),
+                "click_rate": round((clicked / sent * 100) if sent > 0 else 0, 2),
+                "reply_rate": round((replied / sent * 100) if sent > 0 else 0, 2),
+                "conversion_rate": round((converted / sent * 100) if sent > 0 else 0, 2)
+            },
+            "engagement": {
+                "avg_opens_per_pitch": round(float(metrics['avg_opens_per_pitch'] or 0), 2),
+                "avg_clicks_per_pitch": round(float(metrics['avg_clicks_per_pitch'] or 0), 2),
+                "total_opens": metrics['total_opened'] or 0,
+                "total_clicks": metrics['total_clicked'] or 0
+            },
+            "campaign_breakdown": campaign_breakdown,
+            "recent_activity": [
+                {
+                    "pitch_id": p['pitch_id'],
+                    "state": p['pitch_state'],
+                    "created_at": p['created_at'].isoformat() if p['created_at'] else None,
+                    "sent_at": p['sent_at'].isoformat() if p['sent_at'] else None,
+                    "campaign_name": p['campaign_name'],
+                    "media_name": p['media_name']
+                }
+                for p in recent_pitches
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching pitch metrics: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch pitch metrics: {str(e)}"
+        )
+
 @router.post("/generate-batch", status_code=status.HTTP_202_ACCEPTED, summary="Generate Pitches for Multiple Matches")
 async def generate_pitches_batch_api(
     requests: List[PitchGenerationRequest],

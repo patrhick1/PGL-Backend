@@ -64,6 +64,211 @@ async def create_placement_api(placement_data: PlacementCreate, user: dict = Dep
         logger.exception(f"Error in create_placement_api: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+@router.get("/metrics", summary="Get Placement Metrics")
+async def get_placement_metrics(
+    campaign_id: Optional[uuid.UUID] = Query(None, description="Filter by specific campaign"),
+    days: int = Query(30, ge=1, le=365, description="Number of days to look back"),
+    user: dict = Depends(get_current_user)
+):
+    """
+    Get placement performance metrics for the current user.
+    Returns statistics on placement statuses, conversion rates, upcoming placements, etc.
+    Can be filtered by campaign and time period.
+    """
+    from datetime import date, timedelta
+    from podcast_outreach.database.connection import get_db_pool
+    
+    try:
+        person_id = user.get("person_id")
+        if not person_id:
+            raise HTTPException(status_code=400, detail="User not properly authenticated")
+        
+        pool = await get_db_pool()
+        
+        # Build the base query with user filtering
+        base_conditions = ["c.person_id = $1"]
+        params = [person_id]
+        
+        # Add campaign filter if provided
+        if campaign_id:
+            base_conditions.append(f"pl.campaign_id = ${len(params) + 1}")
+            params.append(campaign_id)
+        
+        # Add date filter
+        if days:
+            base_conditions.append(f"pl.created_at >= NOW() - INTERVAL '{days} days'")
+        
+        where_clause = " AND ".join(base_conditions)
+        
+        async with pool.acquire() as conn:
+            # Get overall placement metrics
+            metrics_query = f"""
+            SELECT 
+                COUNT(*) as total_placements,
+                COUNT(CASE WHEN pl.current_status = 'scheduled' THEN 1 END) as scheduled,
+                COUNT(CASE WHEN pl.current_status = 'recording_booked' THEN 1 END) as recording_booked,
+                COUNT(CASE WHEN pl.current_status = 'recorded' THEN 1 END) as recorded,
+                COUNT(CASE WHEN pl.current_status = 'live' THEN 1 END) as live,
+                COUNT(CASE WHEN pl.current_status = 'paid' THEN 1 END) as paid,
+                COUNT(CASE WHEN pl.current_status IN ('cancelled', 'rejected') THEN 1 END) as cancelled,
+                COUNT(CASE WHEN pl.go_live_date IS NOT NULL THEN 1 END) as has_go_live_date,
+                COUNT(CASE WHEN pl.recording_date IS NOT NULL THEN 1 END) as has_recording_date,
+                COUNT(CASE WHEN pl.go_live_date >= CURRENT_DATE THEN 1 END) as upcoming_go_live,
+                COUNT(CASE WHEN pl.recording_date >= CURRENT_DATE THEN 1 END) as upcoming_recordings
+            FROM placements pl
+            JOIN campaigns c ON pl.campaign_id = c.campaign_id
+            WHERE {where_clause}
+            """
+            
+            metrics = await conn.fetchrow(metrics_query, *params)
+            
+            # Get upcoming placements
+            upcoming_query = f"""
+            SELECT 
+                pl.placement_id,
+                pl.current_status,
+                pl.recording_date,
+                pl.go_live_date,
+                pl.outreach_topic,
+                c.campaign_name,
+                m.name as media_name,
+                m.host_names
+            FROM placements pl
+            JOIN campaigns c ON pl.campaign_id = c.campaign_id
+            LEFT JOIN media m ON pl.media_id = m.media_id
+            WHERE {where_clause}
+            AND (pl.recording_date >= CURRENT_DATE OR pl.go_live_date >= CURRENT_DATE)
+            ORDER BY COALESCE(pl.recording_date, pl.go_live_date) ASC
+            LIMIT 10
+            """
+            
+            upcoming = await conn.fetch(upcoming_query, *params)
+            
+            # Get recent placements
+            recent_query = f"""
+            SELECT 
+                pl.placement_id,
+                pl.current_status,
+                pl.created_at,
+                pl.status_ts,
+                c.campaign_name,
+                m.name as media_name
+            FROM placements pl
+            JOIN campaigns c ON pl.campaign_id = c.campaign_id
+            LEFT JOIN media m ON pl.media_id = m.media_id
+            WHERE {where_clause}
+            ORDER BY pl.created_at DESC
+            LIMIT 10
+            """
+            
+            recent = await conn.fetch(recent_query, *params)
+            
+            # Get campaign breakdown if not filtering by specific campaign
+            campaign_breakdown = []
+            if not campaign_id:
+                campaign_query = f"""
+                SELECT 
+                    c.campaign_id,
+                    c.campaign_name,
+                    COUNT(pl.placement_id) as total_placements,
+                    COUNT(CASE WHEN pl.current_status IN ('live', 'paid') THEN 1 END) as completed,
+                    COUNT(CASE WHEN pl.current_status IN ('scheduled', 'recording_booked') THEN 1 END) as scheduled,
+                    COUNT(CASE WHEN pl.current_status IN ('cancelled', 'rejected') THEN 1 END) as cancelled
+                FROM campaigns c
+                LEFT JOIN placements pl ON c.campaign_id = pl.campaign_id
+                WHERE c.person_id = $1
+                GROUP BY c.campaign_id, c.campaign_name
+                HAVING COUNT(pl.placement_id) > 0
+                ORDER BY COUNT(pl.placement_id) DESC
+                LIMIT 10
+                """
+                
+                campaign_rows = await conn.fetch(campaign_query, person_id)
+                campaign_breakdown = [dict(row) for row in campaign_rows]
+            
+            # Calculate pitch to placement conversion rate
+            pitch_count_query = f"""
+            SELECT COUNT(DISTINCT p.pitch_id) as total_pitches
+            FROM pitches p
+            JOIN campaigns c ON p.campaign_id = c.campaign_id
+            WHERE c.person_id = $1
+            AND p.pitch_state IN ('sent', 'opened', 'replied', 'clicked', 'replied_interested', 'live', 'paid')
+            """
+            pitch_count_params = [person_id]
+            if campaign_id:
+                pitch_count_query += " AND p.campaign_id = $2"
+                pitch_count_params.append(campaign_id)
+            if days:
+                pitch_count_query += f" AND p.created_at >= NOW() - INTERVAL '{days} days'"
+            
+            pitch_result = await conn.fetchrow(pitch_count_query, *pitch_count_params)
+            total_pitches = pitch_result['total_pitches'] if pitch_result else 0
+            
+        # Calculate rates and prepare response
+        total = metrics['total_placements'] or 0
+        completed = (metrics['live'] or 0) + (metrics['paid'] or 0) + (metrics['recorded'] or 0)
+        scheduled = (metrics['scheduled'] or 0) + (metrics['recording_booked'] or 0)
+        
+        return {
+            "period_days": days,
+            "campaign_id": str(campaign_id) if campaign_id else None,
+            "totals": {
+                "total_placements": total,
+                "scheduled": metrics['scheduled'] or 0,
+                "recording_booked": metrics['recording_booked'] or 0,
+                "recorded": metrics['recorded'] or 0,
+                "live": metrics['live'] or 0,
+                "paid": metrics['paid'] or 0,
+                "cancelled": metrics['cancelled'] or 0,
+                "completed": completed,
+                "in_progress": scheduled
+            },
+            "conversion": {
+                "total_pitches_sent": total_pitches,
+                "total_placements": total,
+                "conversion_rate": round((total / total_pitches * 100) if total_pitches > 0 else 0, 2),
+                "completion_rate": round((completed / total * 100) if total > 0 else 0, 2)
+            },
+            "upcoming": {
+                "recordings": metrics['upcoming_recordings'] or 0,
+                "go_live": metrics['upcoming_go_live'] or 0,
+                "events": [
+                    {
+                        "placement_id": p['placement_id'],
+                        "status": p['current_status'],
+                        "recording_date": p['recording_date'].isoformat() if p['recording_date'] else None,
+                        "go_live_date": p['go_live_date'].isoformat() if p['go_live_date'] else None,
+                        "topic": p['outreach_topic'],
+                        "campaign_name": p['campaign_name'],
+                        "media_name": p['media_name'],
+                        "host_names": p['host_names'] or []
+                    }
+                    for p in upcoming
+                ]
+            },
+            "recent_activity": [
+                {
+                    "placement_id": p['placement_id'],
+                    "status": p['current_status'],
+                    "created_at": p['created_at'].isoformat() if p['created_at'] else None,
+                    "updated_at": p['status_ts'].isoformat() if p['status_ts'] else None,
+                    "campaign_name": p['campaign_name'],
+                    "media_name": p['media_name']
+                }
+                for p in recent
+            ],
+            "campaign_breakdown": campaign_breakdown
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching placement metrics: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch placement metrics: {str(e)}"
+        )
+
 @router.get("/", response_model=PaginatedPlacementList, summary="List Placements")
 async def list_placements_api(
     campaign_id: Optional[uuid.UUID] = Query(None, description="Filter by campaign ID"),

@@ -473,14 +473,43 @@ async def update_media_with_confidence_check(media_id: int, update_fields: Dict[
     confidence_fields = {
         'website': ('website_source', 'website_confidence'),
         'contact_email': ('contact_email_source', 'contact_email_confidence'),
-        'host_names': ('host_names_source', 'host_names_confidence'),
+        # host_names uses different JSONB columns for tracking
     }
     
     filtered_updates = {}
     confidence_updates = {}
     
     for field, value in cleaned_update_fields.items():
-        if field in confidence_fields:
+        if field == 'host_names':
+            # Special handling for host_names which uses JSONB columns
+            current_sources = current_media.get('host_names_discovery_sources', [])
+            current_confidences = current_media.get('host_names_discovery_confidence', {})
+            
+            # Check if we should override based on confidence
+            should_update = False
+            
+            if source == "manual":
+                # Manual updates always win
+                should_update = True
+            elif isinstance(current_sources, list) and "manual" in current_sources:
+                # Never override manual data with API/LLM data
+                logger.info(f"Skipping update to host_names for media {media_id} - manual data takes precedence")
+                continue
+            else:
+                # For non-manual sources, allow updates
+                should_update = True
+            
+            if should_update:
+                filtered_updates[field] = value
+                # Update JSONB tracking fields for host_names
+                if value:  # If host_names are provided
+                    from datetime import datetime, timezone
+                    sources = [source for _ in value]
+                    confidence_map = {name: confidence for name in value}
+                    confidence_updates['host_names_discovery_sources'] = sources
+                    confidence_updates['host_names_discovery_confidence'] = confidence_map
+                    confidence_updates['host_names_last_verified'] = datetime.now(timezone.utc)
+        elif field in confidence_fields:
             source_field, confidence_field = confidence_fields[field]
             current_confidence = current_media.get(confidence_field, 0.0) or 0.0
             current_source = current_media.get(source_field)
@@ -516,7 +545,8 @@ async def update_media_with_confidence_check(media_id: int, update_fields: Dict[
     
     # Add manual update timestamp if this is a manual update
     if source == "manual":
-        filtered_updates["last_manual_update_ts"] = "NOW()"
+        from datetime import datetime, timezone
+        filtered_updates["last_manual_update_ts"] = datetime.now(timezone.utc)
     
     if not filtered_updates:
         logger.info(f"No updates applied to media {media_id} after confidence checks")

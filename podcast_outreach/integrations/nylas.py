@@ -2,6 +2,7 @@
 
 import os
 import logging
+import json
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone
 from nylas import Client
@@ -53,7 +54,8 @@ class NylasAPIClient:
                    reply_to_message_id: Optional[str] = None,
                    attachments: Optional[List[Dict[str, Any]]] = None,
                    tracking_options: Optional[Dict[str, bool]] = None,
-                   custom_headers: Optional[Dict[str, str]] = None) -> Tuple[bool, Dict[str, Any]]:
+                   custom_headers: Optional[Dict[str, str]] = None,
+                   send_at: Optional[int] = None) -> Tuple[bool, Dict[str, Any]]:
         """
         Send an email using Nylas.
         
@@ -68,6 +70,7 @@ class NylasAPIClient:
             attachments: List of attachment data
             tracking_options: {"opens": bool, "links": bool, "thread_replies": bool}
             custom_headers: Custom email headers for tracking
+            send_at: Unix timestamp for scheduled send (optional)
             
         Returns:
             Tuple of (success: bool, result: dict with message_id, thread_id, or error)
@@ -78,7 +81,7 @@ class NylasAPIClient:
             if to_name:
                 to_list[0]["name"] = to_name
             
-            # Build request body
+            # Build request body according to Nylas v3 API spec
             request_body = {
                 "to": to_list,
                 "subject": subject,
@@ -97,23 +100,42 @@ class NylasAPIClient:
             
             # Add custom headers for tracking
             if custom_headers:
-                request_body["custom_headers"] = custom_headers
+                request_body["headers"] = custom_headers  # v3 uses "headers" not "custom_headers"
             
-            # Add tracking pixels/parameters if requested
+            # Add tracking options (Nylas v3 format)
             if tracking_options:
-                if tracking_options.get("opens"):
-                    request_body["tracking"] = {"opens": True}
-                if tracking_options.get("links"):
-                    request_body["tracking"]["links"] = True
+                # For Nylas v3, tracking_options is a direct field
+                request_body["tracking_options"] = {
+                    "opens": tracking_options.get("opens", False),
+                    "links": tracking_options.get("links", False),
+                    "thread_replies": tracking_options.get("thread_replies", False),
+                    "label": tracking_options.get("label", "pgl-tracking")
+                }
+            
+            # Add scheduled send time if provided
+            if send_at:
+                request_body["send_at"] = send_at  # Unix timestamp for scheduled send
             
             # Create and send the message
             logger.info(f"Sending email to {to_email} with subject: {subject}")
             
-            # First create a draft
-            draft_response = self.client.drafts.create(
-                self.grant_id,
-                request_body=request_body
-            )
+            # Clean up request body - remove None values
+            request_body = {k: v for k, v in request_body.items() if v is not None}
+            
+            # Debug: Log the request body
+            logger.info(f"Request body for draft: {json.dumps(request_body, indent=2)}")
+            
+            try:
+                # First create a draft
+                draft_response = self.client.drafts.create(
+                    self.grant_id,
+                    request_body=request_body
+                )
+            except Exception as e:
+                logger.error(f"Draft creation failed. Grant ID: {self.grant_id}")
+                logger.error(f"Request body type: {type(request_body)}")
+                logger.error(f"Request body keys: {list(request_body.keys())}")
+                raise
             
             # Then send the draft
             message = self.client.drafts.send(

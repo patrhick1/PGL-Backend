@@ -16,6 +16,7 @@ from podcast_outreach.database.queries import review_tasks as review_task_querie
 from podcast_outreach.database.connection import get_db_pool
 from podcast_outreach.services.matches.enhanced_vetting_agent import EnhancedVettingAgent
 from podcast_outreach.services.enrichment.enrichment_orchestrator import EnrichmentOrchestrator
+from podcast_outreach.services.enrichment.host_confidence_verifier import HostConfidenceVerifier
 from podcast_outreach.services.events.event_bus import get_event_bus, Event, EventType
 from podcast_outreach.services.ai.gemini_client import GeminiService
 from podcast_outreach.services.enrichment.enrichment_agent import EnrichmentAgent
@@ -65,7 +66,18 @@ async def process_discovery_workflow(
             # Trigger enrichment
             await cmd_queries.update_enrichment_status(discovery["id"], "in_progress")
             
-            enrichment_orchestrator = EnrichmentOrchestrator()
+            # Initialize required services for EnrichmentOrchestrator
+            from podcast_outreach.services.enrichment.social_scraper import SocialDiscoveryService
+            from podcast_outreach.services.enrichment.data_merger import DataMergerService
+            
+            gemini_service = GeminiService()
+            social_discovery_service = SocialDiscoveryService()
+            data_merger = DataMergerService()
+            enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
+            quality_service = QualityService()
+            host_verifier = HostConfidenceVerifier()
+            
+            enrichment_orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service, host_verifier)
             enrichment_success = await enrichment_orchestrator.enrich_media(media_id)
             
             if enrichment_success:
@@ -330,8 +342,9 @@ async def run_enrichment_pipeline() -> bool:
         data_merger = DataMergerService()
         enrichment_agent = EnrichmentAgent(gemini_service, social_discovery_service, data_merger)
         quality_service = QualityService()
+        host_verifier = HostConfidenceVerifier()
         
-        enrichment_orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service)
+        enrichment_orchestrator = EnrichmentOrchestrator(enrichment_agent, quality_service, social_discovery_service, host_verifier)
         
         for discovery in discoveries:
             try:

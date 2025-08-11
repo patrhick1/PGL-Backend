@@ -102,9 +102,10 @@ async def update_vetting_status(
             return False
 
 async def get_discoveries_ready_for_vetting(limit: int = 50) -> List[Dict[str, Any]]:
-    """Get discoveries ready for vetting (enrichment completed, vetting pending)."""
+    """Get discoveries ready for vetting (enrichment completed, vetting pending, has confident host names)."""
     query = """
-    SELECT cmd.*, m.name as media_name, m.ai_description, c.ideal_podcast_description
+    SELECT cmd.*, m.name as media_name, m.ai_description, c.ideal_podcast_description,
+           m.host_names, m.host_names_confidence
     FROM campaign_media_discoveries cmd
     JOIN media m ON cmd.media_id = m.media_id
     JOIN campaigns c ON cmd.campaign_id = c.campaign_id
@@ -112,6 +113,10 @@ async def get_discoveries_ready_for_vetting(limit: int = 50) -> List[Dict[str, A
     AND cmd.vetting_status = 'pending'
     AND m.ai_description IS NOT NULL
     AND c.ideal_podcast_description IS NOT NULL
+    -- Ensure podcast has host names with sufficient confidence
+    AND m.host_names IS NOT NULL
+    AND array_length(m.host_names, 1) > 0
+    AND m.host_names_confidence >= 0.8
     -- Only include podcasts that have at least one episode
     AND EXISTS (
         SELECT 1 FROM episodes e 
@@ -134,6 +139,7 @@ async def acquire_vetting_work_batch(limit: int = 10) -> List[Dict[str, Any]]:
     """
     Atomically acquire a batch of discoveries ready for vetting.
     Uses row-level locking to prevent race conditions.
+    Requires host names with confidence >= 0.8 for email personalization.
     """
     query = """
     WITH candidates AS (
@@ -145,6 +151,10 @@ async def acquire_vetting_work_batch(limit: int = 10) -> List[Dict[str, Any]]:
         AND cmd.vetting_status = 'pending'
         AND m.ai_description IS NOT NULL
         AND c.ideal_podcast_description IS NOT NULL
+        -- Ensure podcast has host names with sufficient confidence
+        AND m.host_names IS NOT NULL
+        AND array_length(m.host_names, 1) > 0
+        AND m.host_names_confidence >= 0.8
         -- Check if not already being processed (using vetting_error field temporarily for lock)
         AND (cmd.vetting_error IS NULL OR cmd.vetting_error NOT LIKE 'PROCESSING:%')
         -- Only vet podcasts that have at least one episode
@@ -166,6 +176,8 @@ async def acquire_vetting_work_batch(limit: int = 10) -> List[Dict[str, Any]]:
     RETURNING campaign_media_discoveries.*,
               (SELECT name FROM media WHERE media_id = campaign_media_discoveries.media_id) as media_name,
               (SELECT ai_description FROM media WHERE media_id = campaign_media_discoveries.media_id) as ai_description,
+              (SELECT host_names FROM media WHERE media_id = campaign_media_discoveries.media_id) as host_names,
+              (SELECT host_names_confidence FROM media WHERE media_id = campaign_media_discoveries.media_id) as host_names_confidence,
               (SELECT ideal_podcast_description FROM campaigns WHERE campaign_id = campaign_media_discoveries.campaign_id) as ideal_podcast_description,
               (SELECT questionnaire_responses FROM campaigns WHERE campaign_id = campaign_media_discoveries.campaign_id) as questionnaire_responses;
     """
