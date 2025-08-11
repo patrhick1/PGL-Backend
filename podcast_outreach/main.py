@@ -183,6 +183,13 @@ if not SESSION_SECRET_KEY:
     )
     SESSION_SECRET_KEY = secrets.token_hex(32)
 
+# Add ProxyHeaders middleware BEFORE SessionMiddleware in production (Render environment)
+# This ensures proper HTTPS detection behind Render's proxy
+if IS_PRODUCTION:
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+    logger.info("ProxyHeadersMiddleware added for production environment (Render)")
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET_KEY,
@@ -190,7 +197,7 @@ app.add_middleware(
     session_cookie="pgl_session_id",
     path="/",
     same_site="none" if IS_PRODUCTION else "lax",  # 'none' for production cross-origin, 'lax' for local dev
-    https_only=IS_PRODUCTION,  # Only require HTTPS in production
+    https_only=False,  # Set to False - Render handles HTTPS enforcement at proxy level
     domain=None  # Let the browser handle the domain
 )
 
