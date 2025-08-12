@@ -95,8 +95,8 @@ async def get_enhanced_review_tasks(
         # Get review tasks with enhanced data
         enhanced_tasks = []
         
-        # OWNERSHIP FILTER: For clients, only show their campaigns
-        filtered_campaign_id = campaign_id
+        # OWNERSHIP FILTER: For clients, get their campaigns first
+        client_campaign_ids = None
         if current_user.get("role") == "client":
             # Get all campaigns owned by this client
             client_campaigns = await campaign_queries.get_campaigns_by_person_id(current_user.get("person_id"))
@@ -106,21 +106,42 @@ async def get_enhanced_review_tasks(
             if campaign_id and campaign_id not in client_campaign_ids:
                 # Return empty list if they're trying to access a campaign they don't own
                 return []
-            
-            # If no campaign_id specified, we'll filter results later
-            # to only include their campaigns
         
         # Get basic tasks first
         # Convert offset to page number
         page = (offset // limit) + 1 if limit > 0 else 1
         
-        tasks, total = await review_task_queries.get_all_review_tasks_paginated(
-            task_type=task_type,
-            status=status,
-            page=page,
-            size=limit,
-            campaign_id=filtered_campaign_id  # Use filtered campaign_id
-        )
+        # For clients, we need to fetch tasks for ALL their campaigns
+        # We can't paginate properly if filtering happens after fetching
+        if client_campaign_ids and not campaign_id:
+            # Fetch ALL tasks for all client's campaigns (no limit per campaign)
+            all_tasks = []
+            for camp_id in client_campaign_ids:
+                # Fetch ALL tasks for this campaign by using a very high limit
+                camp_tasks, camp_total = await review_task_queries.get_all_review_tasks_paginated(
+                    task_type=task_type,
+                    status=status,
+                    page=1,
+                    size=10000,  # High limit to get all tasks for the campaign
+                    campaign_id=camp_id
+                )
+                all_tasks.extend(camp_tasks)
+            
+            # Sort by creation date (newest first) and vetting score
+            all_tasks.sort(key=lambda x: (x.get('created_at', ''), x.get('vetting_score', 0)), reverse=True)
+            
+            # Apply pagination to the combined results
+            total = len(all_tasks)
+            tasks = all_tasks[offset:offset + limit]
+        else:
+            # Standard query for non-clients or when campaign_id is specified
+            tasks, total = await review_task_queries.get_all_review_tasks_paginated(
+                task_type=task_type,
+                status=status,
+                page=page,
+                size=limit,
+                campaign_id=campaign_id
+            )
         
         for task in tasks:
             try:
@@ -131,14 +152,9 @@ async def get_enhanced_review_tasks(
                     if enhanced_task.vetting_score < min_vetting_score:
                         continue
                 
-                # Apply campaign filter if specified  
+                # Apply campaign filter if specified (shouldn't happen as we filter at query level)
                 if campaign_id and str(enhanced_task.campaign_id) != campaign_id:
                     continue
-                
-                # OWNERSHIP FILTER: For clients without campaign_id filter, check ownership
-                if current_user.get("role") == "client" and not campaign_id:
-                    if str(enhanced_task.campaign_id) not in client_campaign_ids:
-                        continue
                     
                 enhanced_tasks.append(enhanced_task)
                 
