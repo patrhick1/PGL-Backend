@@ -288,19 +288,19 @@ async def delete_person_from_db(person_id: int) -> bool:
                     """, campaign_id_list)
                     logger.debug(f"Deleted {result} placements")
                     
-                    # Delete match_suggestions
-                    result = await conn.execute("""
-                        DELETE FROM match_suggestions 
-                        WHERE campaign_id = ANY($1::uuid[])
-                    """, campaign_id_list)
-                    logger.debug(f"Deleted {result} match suggestions")
-                    
-                    # Delete campaign_media_discoveries
+                    # Delete campaign_media_discoveries BEFORE match_suggestions (FK dependency)
                     result = await conn.execute("""
                         DELETE FROM campaign_media_discoveries 
                         WHERE campaign_id = ANY($1::uuid[])
                     """, campaign_id_list)
                     logger.debug(f"Deleted {result} campaign media discoveries")
+                    
+                    # Delete match_suggestions (must be after campaign_media_discoveries)
+                    result = await conn.execute("""
+                        DELETE FROM match_suggestions 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} match suggestions")
                     
                     # Delete review_tasks
                     result = await conn.execute("""
@@ -322,6 +322,13 @@ async def delete_person_from_db(person_id: int) -> bool:
                         WHERE campaign_id = ANY($1::uuid[])
                     """, campaign_id_list)
                     logger.debug(f"Deleted {result} media kits")
+                    
+                    # Delete match_notification_log
+                    result = await conn.execute("""
+                        DELETE FROM match_notification_log 
+                        WHERE campaign_id = ANY($1::uuid[])
+                    """, campaign_id_list)
+                    logger.debug(f"Deleted {result} match notification logs")
                 
                 # 4. Now we can safely delete campaigns
                 result = await conn.execute("DELETE FROM campaigns WHERE person_id = $1", person_id)
