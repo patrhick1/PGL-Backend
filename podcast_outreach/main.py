@@ -197,7 +197,7 @@ app.add_middleware(
     session_cookie="pgl_session_id",
     path="/",
     same_site="none" if IS_PRODUCTION else "lax",  # 'none' for production cross-origin, 'lax' for local dev
-    https_only=False,  # Set to False - Render handles HTTPS enforcement at proxy level
+    https_only=IS_PRODUCTION,  # Must be True when same_site="none" for cross-domain cookies
     domain=None  # Let the browser handle the domain
 )
 
