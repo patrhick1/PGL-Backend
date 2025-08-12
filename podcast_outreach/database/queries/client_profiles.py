@@ -17,9 +17,9 @@ async def create_client_profile(person_id: int, profile_data: Dict[str, Any]) ->
     """Creates a new client profile linked to a person."""
     query = """
     INSERT INTO client_profiles (
-        person_id, plan_type, daily_discovery_allowance, weekly_discovery_allowance,
-        weekly_match_allowance, subscription_provider_id, subscription_status, subscription_ends_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        person_id, plan_type, weekly_match_allowance,
+        subscription_provider_id, subscription_status, subscription_ends_at
+    ) VALUES ($1, $2, $3, $4, $5, $6)
     ON CONFLICT (person_id) DO NOTHING -- Or DO UPDATE if you want to update if exists
     RETURNING *;
     """
@@ -28,23 +28,15 @@ async def create_client_profile(person_id: int, profile_data: Dict[str, Any]) ->
         try:
             # Set allowances based on plan_type if not explicitly provided
             plan_type = profile_data.get('plan_type', 'free')
-            daily_allowance = profile_data.get('daily_discovery_allowance')
-            weekly_allowance = profile_data.get('weekly_discovery_allowance')
             weekly_match_allowance = profile_data.get('weekly_match_allowance')
 
-            if daily_allowance is None:
-                daily_allowance = PAID_PLAN_DAILY_DISCOVERY_LIMIT if plan_type != 'free' else FREE_PLAN_DAILY_DISCOVERY_LIMIT
-            if weekly_allowance is None:
-                weekly_allowance = PAID_PLAN_WEEKLY_DISCOVERY_LIMIT if plan_type != 'free' else FREE_PLAN_WEEKLY_DISCOVERY_LIMIT
             if weekly_match_allowance is None:
-                weekly_match_allowance = 50  # Default value as per schema
+                weekly_match_allowance = 50 if plan_type == 'free' else 200  # 50 for free, 200 for paid users
 
             row = await conn.fetchrow(
                 query,
                 person_id,
                 plan_type,
-                daily_allowance,
-                weekly_allowance,
                 weekly_match_allowance,
                 profile_data.get('subscription_provider_id'),
                 profile_data.get('subscription_status'),

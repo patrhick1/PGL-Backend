@@ -204,8 +204,7 @@ async def _ensure_client_profile_exists(person_id: int, full_name: str):
             # Create default client profile
             profile_data = {
                 "plan_type": "free",
-                "daily_discovery_allowance": 10,  # Default free plan limit
-                "weekly_discovery_allowance": 50,  # Default free plan limit
+                "weekly_match_allowance": 50  # Default for free users
             }
             
             created_profile = await client_profile_queries.create_client_profile(person_id, profile_data)
