@@ -68,6 +68,12 @@ PORT = int(os.getenv("PORT"))
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# Nylas OAuth Configuration
+NYLAS_CLIENT_ID = os.getenv("NYLAS_CLIENT_ID")
+NYLAS_API_KEY = os.getenv("NYLAS_API_KEY")
+NYLAS_API_URI = os.getenv("NYLAS_API_URI", "https://api.us.nylas.com")
+NYLAS_WEBHOOK_SECRET = os.getenv("NYLAS_WEBHOOK_SECRET")
+
 FREE_PLAN_DAILY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_DAILY_DISCOVERY_LIMIT", 10))
 FREE_PLAN_WEEKLY_DISCOVERY_LIMIT = int(os.getenv("FREE_PLAN_WEEKLY_DISCOVERY_LIMIT", 50))
 

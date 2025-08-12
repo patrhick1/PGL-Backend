@@ -167,21 +167,30 @@ class PitchSenderServiceV2:
         campaign_name = campaign_data.get('campaign_name', 'unknown')
         tracking_label = f"campaign-{campaign_data.get('campaign_id')}-{campaign_name}"
         
-        # Send email with comprehensive tracking
+        # Send email with comprehensive tracking using v3 API
         nylas_client = self._get_nylas_client(grant_id)
-        success, send_result = nylas_client.send_email(
-            to_email=primary_email,
-            to_name=host_name,
-            subject=subject,
-            body=body,
-            custom_headers=custom_headers,
-            tracking_options={
-                "opens": True, 
-                "links": True,
-                "thread_replies": True,
-                "label": tracking_label
-            }
-        )
+        
+        # Convert body to proper HTML if needed
+        if not body.strip().startswith('<'):
+            body = f"<html><body>{body.replace(chr(10), '<br>')}</body></html>"
+        elif '<html>' not in body.lower():
+            body = f"<html><body>{body}</body></html>"
+        
+        try:
+            # Use v3 send method directly (no draft creation)
+            send_result = nylas_client.send_email_v3(
+                to_emails=[primary_email],
+                subject=subject,
+                body=body,
+                tracking=True,  # Enable full tracking for campaigns
+                track_opens=True,
+                track_links=True
+            )
+            success = True
+        except Exception as e:
+            logger.error(f"Failed to send via Nylas v3: {e}")
+            success = False
+            send_result = {"error": str(e)}
         
         if success:
             # Update pitch record with tracking info

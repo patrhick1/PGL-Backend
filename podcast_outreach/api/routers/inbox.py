@@ -1,19 +1,29 @@
 # podcast_outreach/api/routers/inbox.py
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel, EmailStr
+import json
 
 from podcast_outreach.database.connection import get_db_async
 from podcast_outreach.services.inbox.booking_assistant import BookingAssistantService
 from podcast_outreach.api.routers.nylas_webhooks import store_email_classification
 from podcast_outreach.api.dependencies import get_current_user
 from podcast_outreach.logging_config import get_logger
-import json
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/inbox", tags=["Inbox"])
+
+# Request models
+class SendEmailRequest(BaseModel):
+    to: List[EmailStr]
+    subject: str
+    body: str
+    cc: Optional[List[EmailStr]] = None
+    bcc: Optional[List[EmailStr]] = None
+    grant_id: Optional[str] = None
 
 
 @router.get("/nylas-status")
@@ -563,72 +573,326 @@ async def get_smart_replies(thread_id: str):
 
 
 @router.post("/nylas/connect")
-async def connect_nylas_account(current_user: dict = Depends(get_current_user)):
+async def connect_nylas_account(
+    provider: str = Query("google", description="Email provider (google, microsoft, etc.)"),
+    login_hint: Optional[str] = Query(None, description="User's email to pre-fill"),
+    state: Optional[str] = Query(None, description="CSRF/session token"),
+    current_user: dict = Depends(get_current_user)
+):
     """Initiate Nylas OAuth flow to connect email account."""
     
-    # This would typically redirect to Nylas OAuth URL
-    # For now, return the OAuth URL for frontend to handle
-    from podcast_outreach.config import NYLAS_CLIENT_ID, FRONTEND_ORIGIN
+    from podcast_outreach.config import NYLAS_CLIENT_ID, FRONTEND_ORIGIN, NYLAS_API_URI
+    import secrets
+    
+    if not NYLAS_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Nylas client ID not configured")
+    
+    # Generate state token if not provided (for CSRF protection)
+    if not state:
+        state = secrets.token_urlsafe(32)
+        # Store state in session/database for verification in callback
+        # For now, we'll pass it through
     
     redirect_uri = f"{FRONTEND_ORIGIN}/nylas/callback"
-    oauth_url = f"https://api.nylas.com/v3/connect/auth?client_id={NYLAS_CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&access_type=online"
+    
+    # Build OAuth URL with proper parameters
+    oauth_params = {
+        "client_id": NYLAS_CLIENT_ID,
+        "provider": provider,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "access_type": "online",
+        "state": state
+    }
+    
+    # Add Gmail-specific scopes if provider is Google
+    if provider == "google":
+        oauth_params["scope"] = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.modify"
+    
+    # Add login hint if provided
+    if login_hint:
+        oauth_params["login_hint"] = login_hint
+    
+    # Build query string
+    from urllib.parse import urlencode
+    query_string = urlencode(oauth_params)
+    oauth_url = f"{NYLAS_API_URI}/v3/connect/auth?{query_string}"
     
     return {
         "oauth_url": oauth_url,
+        "state": state,
         "message": "Redirect user to OAuth URL to connect their email account"
     }
 
 
+@router.get("/nylas/callback")
+async def nylas_oauth_callback(
+    code: str = Query(..., description="Authorization code from Nylas"),
+    state: str = Query(..., description="State token for CSRF protection"),
+    campaign_id: Optional[str] = Query(None, description="Campaign to associate email with"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Handle Nylas OAuth callback to exchange code for grant_id.
+    This is called after user authorizes their email account.
+    """
+    from podcast_outreach.config import NYLAS_API_KEY, NYLAS_API_URI, FRONTEND_ORIGIN
+    import httpx
+    
+    if not NYLAS_API_KEY:
+        raise HTTPException(status_code=500, detail="Nylas API key not configured")
+    
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=400, detail="User not properly authenticated")
+    
+    # TODO: Verify state matches stored state for CSRF protection
+    # For now, we'll skip this check but it should be implemented in production
+    
+    # Exchange code for grant
+    from podcast_outreach.config import NYLAS_CLIENT_ID, FRONTEND_ORIGIN
+    
+    if not NYLAS_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Nylas client ID not configured")
+    
+    # Build the redirect URI - must match exactly what was used in the authorization request
+    redirect_uri = f"{FRONTEND_ORIGIN}/nylas/callback"
+    
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            # Nylas v3 token exchange - client_secret is the API key
+            response = await client.post(
+                f"{NYLAS_API_URI}/v3/connect/token",
+                headers={
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "code": code,
+                    "client_id": NYLAS_CLIENT_ID,
+                    "client_secret": NYLAS_API_KEY,  # In v3, this is the API key
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                    "code_verifier": "nylas"  # Recommended per Nylas docs
+                }
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Nylas token exchange failed: {e.response.text}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Failed to exchange code for grant: {e.response.text}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error during token exchange: {e}")
+            raise HTTPException(status_code=500, detail="Token exchange failed")
+    
+    data = response.json()
+    grant_id = data.get("grant_id")
+    email = data.get("email", "")
+    provider = data.get("provider", "google")
+    
+    if not grant_id:
+        raise HTTPException(status_code=400, detail="No grant_id received from Nylas")
+    
+    # Save grant_id to database
+    async with get_db_async() as db:
+        # If campaign_id provided, update that specific campaign
+        if campaign_id:
+            # Update the campaign with the Nylas grant_id and email
+            await db.execute("""
+                UPDATE campaigns 
+                SET nylas_grant_id = $1,
+                    email_account = $2,
+                    email_provider = 'nylas'
+                WHERE campaign_id = $3
+            """, grant_id, email, campaign_id)
+            
+            # Also check/update campaign_email_accounts table if it exists
+            try:
+                existing = await db.fetch_one("""
+                    SELECT id FROM campaign_email_accounts 
+                    WHERE campaign_id = $1 AND email_address = $2
+                """, campaign_id, email)
+                
+                if existing:
+                    await db.execute("""
+                        UPDATE campaign_email_accounts 
+                        SET nylas_grant_id = $1, 
+                            is_active = true,
+                            email_provider = 'nylas',
+                            updated_at = NOW()
+                        WHERE id = $2
+                    """, grant_id, existing["id"])
+                else:
+                    await db.execute("""
+                        INSERT INTO campaign_email_accounts 
+                        (campaign_id, email_address, nylas_grant_id, email_provider, is_active, is_primary)
+                        VALUES ($1, $2, $3, 'nylas', true, false)
+                    """, campaign_id, email, grant_id)
+            except Exception as e:
+                logger.warning(f"campaign_email_accounts table may not exist: {e}")
+        else:
+            # Get user's most recent campaign
+            campaign = await db.fetch_one("""
+                SELECT campaign_id FROM campaigns 
+                WHERE person_id = $1 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            """, person_id)
+            
+            if campaign:
+                campaign_id = campaign["campaign_id"]
+                
+                # Update the campaign with Nylas grant_id
+                await db.execute("""
+                    UPDATE campaigns 
+                    SET nylas_grant_id = $1,
+                        email_account = $2,
+                        email_provider = 'nylas'
+                    WHERE campaign_id = $3
+                """, grant_id, email, campaign_id)
+                
+                # Also try to update campaign_email_accounts if it exists
+                try:
+                    existing = await db.fetch_one("""
+                        SELECT id FROM campaign_email_accounts 
+                        WHERE campaign_id = $1 AND email_address = $2
+                    """, campaign_id, email)
+                    
+                    if existing:
+                        await db.execute("""
+                            UPDATE campaign_email_accounts 
+                            SET nylas_grant_id = $1, 
+                                is_active = true,
+                                email_provider = 'nylas',
+                                updated_at = NOW()
+                            WHERE id = $2
+                        """, grant_id, existing["id"])
+                    else:
+                        await db.execute("""
+                            INSERT INTO campaign_email_accounts 
+                            (campaign_id, email_address, nylas_grant_id, email_provider, is_active, is_primary)
+                            VALUES ($1, $2, $3, 'nylas', true, false)
+                        """, campaign_id, email, grant_id)
+                except Exception as e:
+                    logger.warning(f"campaign_email_accounts table may not exist: {e}")
+    
+    logger.info(f"Successfully connected email {email} for user {person_id}")
+    
+    # Return success with redirect URL
+    redirect_url = f"{FRONTEND_ORIGIN}/settings/integrations?connected=success&email={email}"
+    
+    return {
+        "status": "success",
+        "grant_id": grant_id,
+        "email": email,
+        "provider": provider,
+        "redirect_url": redirect_url,
+        "message": f"Successfully connected {email}"
+    }
+
+
 @router.post("/nylas/disconnect")
-async def disconnect_nylas_account(grant_id: str, current_user: dict = Depends(get_current_user)):
-    """Disconnect a Nylas email account."""
+async def disconnect_nylas_account(
+    grant_id: str, 
+    campaign_id: Optional[str] = Query(None, description="Specific campaign to disconnect"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Disconnect a Nylas email account and revoke the grant."""
+    
+    from podcast_outreach.config import NYLAS_API_KEY, NYLAS_API_URI
+    import httpx
     
     person_id = current_user.get("person_id")
     if not person_id:
         raise HTTPException(status_code=400, detail="User not properly authenticated")
     
     async with get_db_async() as db:
-        # Verify grant belongs to user
-        grant_check = await db.fetch_one("""
-            SELECT cea.id
-            FROM campaign_email_accounts cea
-            JOIN campaigns c ON cea.campaign_id = c.campaign_id
-            WHERE c.person_id = $1 AND cea.nylas_grant_id = $2
-        """, person_id, grant_id)
+        # Verify grant belongs to user (check campaigns table)
+        if campaign_id:
+            grant_check = await db.fetch_one("""
+                SELECT campaign_id, nylas_grant_id 
+                FROM campaigns 
+                WHERE campaign_id = $1 AND person_id = $2 AND nylas_grant_id = $3
+            """, campaign_id, person_id, grant_id)
+        else:
+            grant_check = await db.fetch_one("""
+                SELECT campaign_id, nylas_grant_id 
+                FROM campaigns 
+                WHERE person_id = $1 AND nylas_grant_id = $2
+            """, person_id, grant_id)
         
         if not grant_check:
-            raise HTTPException(status_code=403, detail="Access denied to this grant")
+            # Also check campaign_email_accounts table if exists
+            try:
+                grant_check = await db.fetch_one("""
+                    SELECT cea.id
+                    FROM campaign_email_accounts cea
+                    JOIN campaigns c ON cea.campaign_id = c.campaign_id
+                    WHERE c.person_id = $1 AND cea.nylas_grant_id = $2
+                """, person_id, grant_id)
+                
+                if not grant_check:
+                    raise HTTPException(status_code=403, detail="Access denied to this grant")
+            except:
+                raise HTTPException(status_code=403, detail="Access denied to this grant")
         
-        # Mark grant as inactive in campaign_email_accounts
-        await db.execute("""
-            UPDATE campaign_email_accounts 
-            SET is_active = false,
-                updated_at = NOW()
-            WHERE nylas_grant_id = $1
-        """, grant_id)
+        # Clear grant from campaigns table
+        if campaign_id:
+            await db.execute("""
+                UPDATE campaigns 
+                SET nylas_grant_id = NULL,
+                    email_account = NULL,
+                    email_provider = 'instantly'
+                WHERE campaign_id = $1
+            """, campaign_id)
+        else:
+            # Clear from all user's campaigns
+            await db.execute("""
+                UPDATE campaigns 
+                SET nylas_grant_id = NULL,
+                    email_account = NULL,
+                    email_provider = 'instantly'
+                WHERE person_id = $1 AND nylas_grant_id = $2
+            """, person_id, grant_id)
         
-        # Optionally revoke access token via Nylas API
+        # Also mark as inactive in campaign_email_accounts if exists
         try:
-            from podcast_outreach.integrations.nylas import NylasAPIClient
-            client = NylasAPIClient(grant_id=grant_id)
-            # client.revoke_grant()  # Implement if needed
-        except Exception as e:
-            logger.error(f"Error revoking Nylas grant: {e}")
+            await db.execute("""
+                UPDATE campaign_email_accounts 
+                SET is_active = false,
+                    updated_at = NOW()
+                WHERE nylas_grant_id = $1
+            """, grant_id)
+        except:
+            pass  # Table might not exist
+        
+        # Revoke grant via Nylas API
+        if NYLAS_API_KEY:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.delete(
+                        f"{NYLAS_API_URI}/v3/grants/{grant_id}",
+                        headers={"Authorization": f"Bearer {NYLAS_API_KEY}"}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"Successfully revoked Nylas grant {grant_id}")
+                    else:
+                        logger.warning(f"Failed to revoke grant {grant_id}: {response.status_code}")
+            except Exception as e:
+                logger.error(f"Error revoking Nylas grant: {e}")
+                # Continue even if revocation fails - we've already removed from our DB
     
-    return {"status": "success", "message": "Email account disconnected"}
+    return {"status": "success", "message": "Email account disconnected", "grant_id": grant_id}
 
 
-@router.post("/send")
-async def send_email(
-    to: List[str],
-    subject: str,
-    body: str,
-    cc: Optional[List[str]] = None,
-    bcc: Optional[List[str]] = None,
-    grant_id: Optional[str] = None,
+@router.post("/send-json")
+async def send_email_json(
+    request: SendEmailRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """Send a new email through Nylas."""
+    """Send a new email through Nylas (JSON version)."""
     
     person_id = current_user.get("person_id")
     if not person_id:
@@ -636,18 +900,38 @@ async def send_email(
     
     from podcast_outreach.integrations.nylas import NylasAPIClient
     
+    # Extract from request object
+    to = request.to
+    subject = request.subject
+    body = request.body
+    cc = request.cc
+    bcc = request.bcc
+    grant_id = request.grant_id
+    
     if not grant_id:
         # Get default grant for user's campaigns
         async with get_db_async() as db:
             grant = await db.fetch_one("""
-                SELECT cea.nylas_grant_id as grant_id 
-                FROM campaign_email_accounts cea
-                JOIN campaigns c ON cea.campaign_id = c.campaign_id
-                WHERE c.person_id = $1 
-                AND cea.is_active = true 
-                AND cea.nylas_grant_id IS NOT NULL
+                SELECT nylas_grant_id as grant_id 
+                FROM campaigns
+                WHERE person_id = $1 
+                AND nylas_grant_id IS NOT NULL
+                ORDER BY created_at DESC
                 LIMIT 1
             """, person_id)
+            
+            if not grant:
+                # Try campaign_email_accounts as fallback
+                grant = await db.fetch_one("""
+                    SELECT cea.nylas_grant_id as grant_id 
+                    FROM campaign_email_accounts cea
+                    JOIN campaigns c ON cea.campaign_id = c.campaign_id
+                    WHERE c.person_id = $1 
+                    AND cea.is_active = true 
+                    AND cea.nylas_grant_id IS NOT NULL
+                    LIMIT 1
+                """, person_id)
+                
             if not grant:
                 raise HTTPException(status_code=400, detail="No active email account connected")
             grant_id = grant["grant_id"]
@@ -655,30 +939,219 @@ async def send_email(
         # Verify the provided grant_id belongs to the user
         async with get_db_async() as db:
             grant_check = await db.fetch_one("""
-                SELECT cea.id
-                FROM campaign_email_accounts cea
-                JOIN campaigns c ON cea.campaign_id = c.campaign_id
-                WHERE c.person_id = $1 AND cea.nylas_grant_id = $2
+                SELECT campaign_id
+                FROM campaigns
+                WHERE person_id = $1 AND nylas_grant_id = $2
             """, person_id, grant_id)
             
             if not grant_check:
-                raise HTTPException(status_code=403, detail="Access denied to this grant")
+                # Try campaign_email_accounts as fallback
+                grant_check = await db.fetch_one("""
+                    SELECT cea.id
+                    FROM campaign_email_accounts cea
+                    JOIN campaigns c ON cea.campaign_id = c.campaign_id
+                    WHERE c.person_id = $1 AND cea.nylas_grant_id = $2
+                """, person_id, grant_id)
+                
+                if not grant_check:
+                    raise HTTPException(status_code=403, detail="Access denied to this grant")
     
     client = NylasAPIClient(grant_id=grant_id)
     
+    # Ensure HTML is properly formatted if not already
+    if body and not body.strip().startswith('<'):
+        # Plain text - convert to HTML
+        body = f"<html><body><p>{body.replace(chr(10), '<br>')}</p></body></html>"
+    elif body and '<html>' not in body.lower():
+        # Partial HTML - wrap it
+        body = f"<html><body>{body}</body></html>"
+    
     try:
-        result = client.send_email(
+        result = client.send_email_v3(
             to_emails=to,
             subject=subject,
             body=body,
             cc_emails=cc,
-            bcc_emails=bcc
+            bcc_emails=bcc,
+            tracking=False  # Disable tracking to avoid spam filters
         )
+        
+        # Store the sent message in inbox_messages table
+        async with get_db_async() as db:
+            await db.execute("""
+                INSERT INTO inbox_messages (
+                    message_id, grant_id, thread_id, folder_id,
+                    subject, snippet, body_html, body_plain,
+                    from_email, from_name, to_json,
+                    date, unread, starred, synced_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+                ON CONFLICT (message_id) DO UPDATE SET
+                    folder_id = 'sent',
+                    synced_at = NOW()
+            """, 
+                result.get("id"),
+                grant_id,
+                result.get("thread_id"),
+                'sent',  # Folder is 'sent'
+                subject,
+                body[:200] if body else '',  # Snippet
+                body if body.startswith('<') else f"<html><body>{body}</body></html>",
+                body.replace('<br>', '\n').replace('</p>', '\n').replace('<[^>]+>', '') if '<' in body else body,
+                result.get("from", [{}])[0].get("email", ""),
+                result.get("from", [{}])[0].get("name", ""),
+                json.dumps([{"email": email} for email in to]),
+                datetime.now(timezone.utc),
+                False,  # Not unread (we sent it)
+                False   # Not starred
+            )
         
         return {
             "status": "success",
             "message_id": result.get("id"),
-            "thread_id": result.get("thread_id")
+            "thread_id": result.get("thread_id"),
+            "stored": True  # Indicate message was stored
+        }
+    except Exception as e:
+        logger.error(f"Error sending email: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/send")
+async def send_email(
+    subject: str = Form(...),
+    body: str = Form(...),
+    to: str = Form(...),  # JSON string like '["email@example.com"]'
+    cc: Optional[str] = Form(None),  # JSON string
+    bcc: Optional[str] = Form(None),  # JSON string
+    grant_id: Optional[str] = Form(None),
+    attachments: Optional[List[UploadFile]] = File(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """Send a new email through Nylas (multipart/form-data version)."""
+    
+    person_id = current_user.get("person_id")
+    if not person_id:
+        raise HTTPException(status_code=400, detail="User not properly authenticated")
+    
+    from podcast_outreach.integrations.nylas import NylasAPIClient
+    import json
+    
+    # Parse JSON strings from form data
+    try:
+        to = json.loads(to) if isinstance(to, str) else to
+        cc = json.loads(cc) if cc else None
+        bcc = json.loads(bcc) if bcc else None
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in email addresses: {e}")
+    
+    # Validate email addresses
+    if not to or not isinstance(to, list):
+        raise HTTPException(status_code=400, detail="'to' must be a list of email addresses")
+    
+    if not grant_id:
+        # Get default grant for user's campaigns
+        async with get_db_async() as db:
+            # First try campaigns table
+            grant = await db.fetch_one("""
+                SELECT nylas_grant_id as grant_id 
+                FROM campaigns
+                WHERE person_id = $1 
+                AND nylas_grant_id IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, person_id)
+            
+            if not grant:
+                # Try campaign_email_accounts as fallback
+                grant = await db.fetch_one("""
+                    SELECT cea.nylas_grant_id as grant_id 
+                    FROM campaign_email_accounts cea
+                    JOIN campaigns c ON cea.campaign_id = c.campaign_id
+                    WHERE c.person_id = $1 
+                    AND cea.is_active = true 
+                    AND cea.nylas_grant_id IS NOT NULL
+                    LIMIT 1
+                """, person_id)
+                
+            if not grant:
+                raise HTTPException(status_code=400, detail="No active email account connected")
+            grant_id = grant["grant_id"]
+    else:
+        # Verify the provided grant_id belongs to the user
+        async with get_db_async() as db:
+            # First try campaigns table
+            grant_check = await db.fetch_one("""
+                SELECT campaign_id
+                FROM campaigns
+                WHERE person_id = $1 AND nylas_grant_id = $2
+            """, person_id, grant_id)
+            
+            if not grant_check:
+                # Try campaign_email_accounts as fallback
+                grant_check = await db.fetch_one("""
+                    SELECT cea.id
+                    FROM campaign_email_accounts cea
+                    JOIN campaigns c ON cea.campaign_id = c.campaign_id
+                    WHERE c.person_id = $1 AND cea.nylas_grant_id = $2
+                """, person_id, grant_id)
+                
+                if not grant_check:
+                    raise HTTPException(status_code=403, detail="Access denied to this grant")
+    
+    client = NylasAPIClient(grant_id=grant_id)
+    
+    # Ensure HTML is properly formatted if not already
+    if body and not body.strip().startswith('<'):
+        # Plain text - convert to HTML
+        body = f"<html><body><p>{body.replace(chr(10), '<br>')}</p></body></html>"
+    elif body and '<html>' not in body.lower():
+        # Partial HTML - wrap it
+        body = f"<html><body>{body}</body></html>"
+    
+    try:
+        result = client.send_email_v3(
+            to_emails=to,
+            subject=subject,
+            body=body,
+            cc_emails=cc,
+            bcc_emails=bcc,
+            tracking=False  # Disable tracking to avoid spam filters
+        )
+        
+        # Store the sent message in inbox_messages table
+        async with get_db_async() as db:
+            await db.execute("""
+                INSERT INTO inbox_messages (
+                    message_id, grant_id, thread_id, folder_id,
+                    subject, snippet, body_html, body_plain,
+                    from_email, from_name, to_json,
+                    date, unread, starred, synced_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+                ON CONFLICT (message_id) DO UPDATE SET
+                    folder_id = 'sent',
+                    synced_at = NOW()
+            """, 
+                result.get("id"),
+                grant_id,
+                result.get("thread_id"),
+                'sent',  # Folder is 'sent'
+                subject,
+                body[:200] if body else '',  # Snippet
+                body if body.startswith('<') else f"<html><body>{body}</body></html>",
+                body.replace('<br>', '\n').replace('</p>', '\n').replace('<[^>]+>', '') if '<' in body else body,
+                result.get("from", [{}])[0].get("email", ""),
+                result.get("from", [{}])[0].get("name", ""),
+                json.dumps([{"email": email} for email in to]),
+                datetime.now(timezone.utc),
+                False,  # Not unread (we sent it)
+                False   # Not starred
+            )
+        
+        return {
+            "status": "success",
+            "message_id": result.get("id"),
+            "thread_id": result.get("thread_id"),
+            "stored": True  # Indicate message was stored
         }
     except Exception as e:
         logger.error(f"Error sending email: {e}")
@@ -735,7 +1208,12 @@ async def reply_to_message(
 
 
 @router.post("/sync")
-async def sync_inbox_messages(grant_id: str, current_user: dict = Depends(get_current_user)):
+async def sync_inbox_messages(
+    grant_id: Optional[str] = Query(None),
+    folder: Optional[str] = Query(None, description="Specific folder to sync (inbox, sent, trash, etc.)"),
+    limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user)
+):
     """Sync inbox messages from Nylas for the current user."""
     
     person_id = current_user.get("person_id")
@@ -760,11 +1238,17 @@ async def sync_inbox_messages(grant_id: str, current_user: dict = Depends(get_cu
         # Initialize Nylas client
         nylas_client = NylasAPIClient(grant_id=grant_id)
         
-        # Get recent messages
-        messages = nylas_client.search_messages(
-            after_date=datetime.now() - timedelta(days=7),
-            limit=100
-        )
+        # Get recent messages (with folder filter if specified)
+        search_params = {
+            "after_date": datetime.now() - timedelta(days=7),
+            "limit": limit
+        }
+        
+        # Add folder filter if specified
+        if folder:
+            search_params["folder"] = folder
+            
+        messages = nylas_client.search_messages(**search_params)
         
         # Store messages in inbox_messages table
         async with get_db_async() as db:

@@ -44,6 +44,102 @@ class NylasAPIClient:
         )
         logger.info("NylasAPIClient initialized")
     
+    def send_email_v3(self,
+                      to_emails: List[str],
+                      subject: str,
+                      body: str,
+                      cc_emails: Optional[List[str]] = None,
+                      bcc_emails: Optional[List[str]] = None,
+                      thread_id: Optional[str] = None,
+                      reply_to_message_id: Optional[str] = None,
+                      tracking: bool = False,
+                      track_opens: bool = False,
+                      track_links: bool = False) -> Dict[str, Any]:
+        """
+        Send email using Nylas v3 API directly (no draft creation).
+        
+        Args:
+            to_emails: List of recipient email addresses
+            subject: Email subject
+            body: Email body (HTML)
+            cc_emails: Optional list of CC email addresses
+            bcc_emails: Optional list of BCC email addresses  
+            thread_id: Optional thread ID for replies
+            reply_to_message_id: Optional message ID being replied to
+            
+        Returns:
+            Dict with message details or raises exception on error
+        """
+        import httpx
+        from podcast_outreach.config import NYLAS_API_KEY, NYLAS_API_URI
+        
+        if not self.grant_id:
+            raise ValueError("No grant_id available for sending email")
+            
+        # Build recipients list
+        to_list = [{"email": email} for email in to_emails]
+        
+        # Build request payload for v3 API
+        payload = {
+            "to": to_list,
+            "subject": subject,
+            "body": body
+        }
+        
+        # Add optional fields
+        if cc_emails:
+            payload["cc"] = [{"email": email} for email in cc_emails]
+        if bcc_emails:
+            payload["bcc"] = [{"email": email} for email in bcc_emails]
+        if thread_id:
+            payload["thread_id"] = thread_id
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+            
+        # Configure tracking based on parameters
+        if tracking:
+            # Full tracking enabled (for campaigns/marketing)
+            # Note: v3 doesn't support "thread_replies" in tracking_options
+            payload["tracking_options"] = {
+                "opens": True,
+                "links": True
+            }
+        else:
+            # Selective or no tracking (better deliverability)
+            payload["tracking_options"] = {
+                "opens": track_opens,
+                "links": track_links
+            }
+        
+        # Add headers to improve deliverability (skip if full tracking is on)
+        if not tracking:
+            payload["custom_headers"] = [
+                {"name": "X-Mailer", "value": "Gmail"},
+                {"name": "Importance", "value": "Normal"},
+                {"name": "X-Priority", "value": "3"}
+            ]
+            
+        # Send via Nylas v3 messages/send endpoint
+        url = f"{NYLAS_API_URI}/v3/grants/{self.grant_id}/messages/send"
+        headers = {
+            "Authorization": f"Bearer {NYLAS_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        logger.info(f"Sending email via Nylas v3 to {to_emails}")
+        
+        with httpx.Client(timeout=20) as client:
+            response = client.post(url, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to send email: {response.status_code} - {response.text}")
+                response.raise_for_status()
+                
+            result = response.json()
+            logger.info(f"Email sent successfully. Message ID: {result.get('data', {}).get('id')}")
+            
+            return result.get("data", result)
+    
     def send_email(self, 
                    to_email: str,
                    subject: str,
