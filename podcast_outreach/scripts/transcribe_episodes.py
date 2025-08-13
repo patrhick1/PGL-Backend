@@ -158,7 +158,17 @@ async def process_single_episode_with_retry(
             audio_url = ep.get("direct_audio_url") or ep["episode_url"]
             
             try:
-                local_audio_path = await transcriber.download_audio(audio_url, episode_id=episode_id)
+                download_result = await transcriber.download_audio(audio_url, episode_id=episode_id)
+                if download_result:
+                    local_audio_path, needs_compression = download_result
+                    
+                    # Compress if needed
+                    if needs_compression:
+                        logger.info(f"Compressing large audio file for episode {episode_id}...")
+                        local_audio_path = transcriber.compress_audio(local_audio_path)
+                        logger.info(f"Compression complete, using: {local_audio_path}")
+                else:
+                    local_audio_path = None
             except AudioNotFoundError as e:
                 # 404 error - audio file doesn't exist, no point retrying
                 logger.error(f"Audio not found (404) for episode {episode_id}: {e}")
@@ -179,7 +189,7 @@ async def process_single_episode_with_retry(
                 return False
             except ValueError as e:
                 # Check if it's a file size error (permanent error, no retries)
-                if "File too large" in str(e):
+                if "File too large" in str(e) or "too large even for compression" in str(e):
                     logger.warning(f"Episode {episode_id} file is too large, skipping retries: {e}")
                     await episode_queries.mark_episode_as_failed(
                         episode_id,

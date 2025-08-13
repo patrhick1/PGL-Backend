@@ -98,8 +98,11 @@ class MediaTranscriber:
         self._model = genai.GenerativeModel('gemini-1.5-flash-latest')
         logger.info("Gemini API configured for MediaTranscriber.")
 
-    async def download_audio(self, url: str, episode_id: Optional[int] = None) -> Optional[str]:
+    async def download_audio(self, url: str, episode_id: Optional[int] = None) -> Optional[Tuple[str, bool]]:
         """Download audio file from URL using a fallback approach.
+        
+        Returns:
+            Tuple of (file_path, needs_compression) or None
         
         Raises:
             AudioNotFoundError: If the audio URL returns 404 (file not found)
@@ -107,8 +110,12 @@ class MediaTranscriber:
         async with DOWNLOAD_SEMAPHORE:
             return await asyncio.to_thread(self._download_audio_sync, url)
 
-    def _download_audio_sync(self, url: str) -> Optional[str]:
-        """Synchronous download using requests library with proper cleanup."""
+    def _download_audio_sync(self, url: str) -> Optional[Tuple[str, bool]]:
+        """Synchronous download using requests library with proper cleanup.
+        
+        Returns:
+            Tuple of (file_path, needs_compression) or None if download fails
+        """
         parsed_url = urlparse(url)
         file_extension = os.path.splitext(parsed_url.path)[1] or ".mp3"
         
@@ -122,6 +129,7 @@ class MediaTranscriber:
         })
         
         download_successful = False
+        needs_compression = False
         
         try:
             # Check file size BEFORE download
@@ -133,12 +141,19 @@ class MediaTranscriber:
             if content_length:
                 file_size_mb = int(content_length) / (1024 * 1024)
                 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
+                COMPRESS_THRESHOLD_MB = int(os.getenv("COMPRESS_THRESHOLD_MB", "500"))
+                MAX_DOWNLOAD_SIZE_MB = int(os.getenv("MAX_DOWNLOAD_SIZE_MB", "2000"))  # 2GB absolute max
                 
-                if file_size_mb > MAX_FILE_SIZE_MB:
-                    # Raise a specific error for file size so we can skip retries
-                    error_msg = f"File too large: {file_size_mb:.1f} MB (max: {MAX_FILE_SIZE_MB} MB)"
+                if file_size_mb > MAX_DOWNLOAD_SIZE_MB:
+                    # File is too large even for compression
+                    error_msg = f"File too large even for compression: {file_size_mb:.1f} MB (max: {MAX_DOWNLOAD_SIZE_MB} MB)"
                     logger.error(f"Error downloading audio from {url}: {error_msg}")
                     raise ValueError(error_msg)
+                
+                if file_size_mb > COMPRESS_THRESHOLD_MB:
+                    # File will need compression after download
+                    logger.info(f"File size {file_size_mb:.1f} MB exceeds threshold {COMPRESS_THRESHOLD_MB} MB - will compress after download")
+                    needs_compression = True
                 
                 logger.info(f"File size from HEAD: {file_size_mb:.1f} MB")
             
@@ -169,7 +184,7 @@ class MediaTranscriber:
             logger.info(f"Successfully downloaded audio from {url} to {tmp_path} (size: {file_size} bytes)")
             
             download_successful = True
-            return tmp_path
+            return (tmp_path, needs_compression)
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"HTTP error downloading from {url}: {e}")
@@ -460,6 +475,76 @@ Provide a comprehensive but concise summary (400-600 words) that captures the ep
             logger.error(f"Error generating comprehensive episode summary: {e}", exc_info=True)
             # Fallback to basic summary if AI fails
             return f"Episode: {episode_title}\n\nBasic content from transcript: {transcript[:800]}..."
+
+    def compress_audio(self, audio_path: str, target_bitrate: str = "64k") -> str:
+        """Compress audio file to reduce size for processing.
+        
+        Args:
+            audio_path: Path to the original audio file
+            target_bitrate: Target bitrate for compression (default: 64k for mono)
+        
+        Returns:
+            Path to compressed audio file
+        """
+        try:
+            logger.info(f"Starting audio compression for {audio_path}")
+            
+            # Load the audio file
+            audio = AudioSegment.from_file(audio_path)
+            
+            # Get original file info
+            original_size = os.path.getsize(audio_path) / (1024 * 1024)  # MB
+            original_duration = len(audio) / 1000  # seconds
+            original_channels = audio.channels
+            original_frame_rate = audio.frame_rate
+            
+            logger.info(f"Original: {original_size:.1f}MB, {original_duration:.1f}s, "
+                       f"{original_channels} channels, {original_frame_rate}Hz")
+            
+            # Convert to mono to reduce size
+            if audio.channels > 1:
+                logger.info("Converting to mono...")
+                audio = audio.set_channels(1)
+            
+            # Reduce sample rate if it's very high
+            if audio.frame_rate > 16000:
+                logger.info(f"Reducing sample rate from {audio.frame_rate} to 16000Hz...")
+                audio = audio.set_frame_rate(16000)
+            
+            # Create compressed file path
+            compressed_path = audio_path.replace('.mp3', '_compressed.mp3').replace('.mp4', '_compressed.mp3')
+            if compressed_path == audio_path:
+                compressed_path = audio_path + '_compressed.mp3'
+            
+            # Export with compression
+            logger.info(f"Exporting compressed audio to {compressed_path} with bitrate {target_bitrate}...")
+            audio.export(
+                compressed_path,
+                format="mp3",
+                bitrate=target_bitrate,
+                parameters=["-ac", "1"]  # Force mono
+            )
+            
+            # Check compressed size
+            compressed_size = os.path.getsize(compressed_path) / (1024 * 1024)  # MB
+            compression_ratio = (1 - compressed_size / original_size) * 100
+            
+            logger.info(f"Compression complete: {compressed_size:.1f}MB "
+                       f"({compression_ratio:.1f}% reduction)")
+            
+            # Clean up original file to save space
+            try:
+                os.remove(audio_path)
+                logger.info(f"Removed original file: {audio_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove original file {audio_path}: {e}")
+            
+            return compressed_path
+            
+        except Exception as e:
+            logger.error(f"Error compressing audio {audio_path}: {e}")
+            # Return original path if compression fails
+            return audio_path
 
     async def transcribe_audio(self, audio_path: str, episode_id: int, episode_title: Optional[str] = None) -> Tuple[str, Optional[str], Optional[List[float]]]:
         # Use global semaphore to limit total concurrent transcriptions
