@@ -18,7 +18,7 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
                     match_score (float), matched_keywords (List[str]), outreach_type (str),
                     subject_line (str), body_snippet (str), pitch_gen_id (int),
                     pitch_state (str), client_approval_status (str), created_by (str),
-                    instantly_lead_id (Optional[str]).
+                    instantly_lead_id (Optional[str]), recipient_email (Optional[str]).
 
     Returns:
         The created pitch record as a dictionary, or None on failure.
@@ -29,9 +29,9 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
         score_evaluated_at, outreach_type, subject_line, body_snippet,
         send_ts, reply_bool, reply_ts, pitch_gen_id, placement_id,
         pitch_state, client_approval_status, created_by,
-        instantly_lead_id
+        instantly_lead_id, recipient_email
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
     ) RETURNING *;
     """
     pool = await get_db_pool()
@@ -56,7 +56,8 @@ async def create_pitch_in_db(pitch_data: Dict[str, Any]) -> Optional[Dict[str, A
                 pitch_data.get('pitch_state', 'generated'),
                 pitch_data.get('client_approval_status', 'pending_review'),
                 pitch_data.get('created_by', 'system'),
-                pitch_data.get('instantly_lead_id')
+                pitch_data.get('instantly_lead_id'),
+                pitch_data.get('recipient_email')  # New field
             )
             if row:
                 logger.info(f"Pitch record created: {row['pitch_id']}")
@@ -339,6 +340,7 @@ async def get_pitch_by_id_enriched(pitch_id: int) -> Optional[Dict[str, Any]]:
         p.*,
         c.campaign_name,
         m.name AS media_name,
+        m.contact_email AS media_contact_email,
         cl.full_name AS client_name,
         pg.draft_text
     FROM pitches p

@@ -28,6 +28,7 @@ class ManualPitchCreateRequest(BaseModel):
     match_id: int = Field(..., description="The ID of the approved match suggestion")
     subject_line: str = Field(..., min_length=1, max_length=200, description="Email subject line")
     body_text: str = Field(..., min_length=10, description="Email body content")
+    recipient_email: Optional[str] = Field(None, description="Override recipient email (defaults to media contact_email)")
 
 class PitchGenerationResponse(BaseModel):
     pitch_gen_id: int
@@ -61,6 +62,7 @@ class PitchInDB(BaseModel):
     client_approval_status: Optional[str]
     created_by: Optional[str]
     created_at: datetime
+    recipient_email: Optional[str] = None  # Added for recipient email tracking
 
     # Enriched fields
     campaign_name: Optional[str] = None
@@ -94,6 +96,7 @@ class PitchGenerationInDB(BaseModel):
 class PitchGenerationContentUpdate(BaseModel):
     draft_text: Optional[str] = Field(None, description="The updated draft text of the pitch email body.")
     new_subject_line: Optional[str] = Field(None, description="The updated subject line for the pitch.")
+    recipient_email: Optional[str] = Field(None, description="The updated recipient email address for the pitch.")
 
     class Config:
         from_attributes = True # Or orm_mode for Pydantic v1 compatibility

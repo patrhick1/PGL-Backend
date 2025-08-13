@@ -108,7 +108,7 @@ async def validate_match_ownership(match_id: int, user: dict) -> bool:
         return True
     
     # Get the match and check campaign ownership
-    match = await match_queries.get_match_suggestion_by_id(match_id)
+    match = await match_queries.get_match_suggestion_by_id_from_db(match_id)
     if not match:
         return False
     
@@ -453,7 +453,7 @@ async def create_manual_pitch(
     
     try:
         # Get match details
-        match = await match_queries.get_match_suggestion_by_id(request_data.match_id)
+        match = await match_queries.get_match_suggestion_by_id_from_db(request_data.match_id)
         if not match:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -469,11 +469,15 @@ async def create_manual_pitch(
         campaign_id = match.get("campaign_id")
         media_id = match.get("media_id")
         
+        # Get media data for default email if not provided
+        media_data = await media_queries.get_media_by_id_from_db(media_id)
+        recipient_email = request_data.recipient_email or (media_data.get('contact_email') if media_data else None)
+        
         # Create pitch generation record (marked as manual)
         pitch_gen_data = {
             "campaign_id": campaign_id,
             "media_id": media_id,
-            "template_id": "manual_creation",  # Special identifier for manual pitches
+            "template_id": None,  # NULL for manual pitches (no template used)
             "draft_text": request_data.body_text,
             "ai_model_used": "manual",  # Indicates manual creation
             "pitch_topic": "Manual Pitch",
@@ -501,9 +505,10 @@ async def create_manual_pitch(
             "subject_line": request_data.subject_line,
             "body_snippet": request_data.body_text[:250],
             "pitch_gen_id": created_pitch_gen['pitch_gen_id'],
-            "pitch_state": "generated",
+            "pitch_state": "ready_to_send",  # Manual pitches are immediately ready to send
             "client_approval_status": "approved",  # Manual pitches are pre-approved by the creator
-            "created_by": f"user_{user.get('person_id', 'unknown')}"
+            "created_by": f"user_{user.get('person_id', 'unknown')}",
+            "recipient_email": recipient_email  # Include recipient email
         }
         
         created_pitch = await pitch_queries.create_pitch_in_db(pitch_data)
@@ -601,11 +606,8 @@ async def send_pitch_via_nylas(
     """
     Sends an approved pitch via Nylas email service.
     Requires the campaign to have a configured Nylas grant ID.
-    Staff or Admin access required.
+    Clients can send their own pitches, admin/staff can send any pitch.
     """
-    if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
-    
     sender_service_v2 = PitchSenderServiceV2()
     
     try:
@@ -620,6 +622,11 @@ async def send_pitch_via_nylas(
         # Get campaign and verify it has Nylas configured
         campaign_id = pitch_gen_record.get('campaign_id')
         campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+        
+        # Authorization check - clients can only send their own pitches
+        if user.get("role") == "client":
+            if not campaign_data or campaign_data.get('person_id') != user.get('person_id'):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send this pitch.")
         
         if not campaign_data:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
@@ -656,11 +663,8 @@ async def send_pitch_via_instantly(
     """
     Sends an approved pitch via Instantly.ai email service.
     Requires the campaign to have a configured Instantly campaign ID.
-    Staff or Admin access required.
+    Clients can send their own pitches, admin/staff can send any pitch.
     """
-    if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
-    
     sender_service_v2 = PitchSenderServiceV2()
     
     try:
@@ -675,6 +679,11 @@ async def send_pitch_via_instantly(
         # Get campaign and verify it has Instantly configured
         campaign_id = pitch_gen_record.get('campaign_id')
         campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+        
+        # Authorization check - clients can only send their own pitches
+        if user.get("role") == "client":
+            if not campaign_data or campaign_data.get('person_id') != user.get('person_id'):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send this pitch.")
         
         if not campaign_data:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Campaign {campaign_id} not found.")
@@ -711,13 +720,11 @@ async def send_pitches_batch_nylas(
     """
     Sends multiple approved pitches via Nylas email service.
     Each pitch generation must be from a campaign with a configured Nylas grant ID.
-    Staff or Admin access required.
+    Clients can send their own pitches, admin/staff can send any pitch.
     
     Example request body:
     [1, 2, 3, 4, 5]
     """
-    if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
     
     sender_service_v2 = PitchSenderServiceV2()
     results = {"successful": [], "failed": []}
@@ -743,6 +750,15 @@ async def send_pitches_batch_nylas(
             # Get campaign and verify it has Nylas configured
             campaign_id = pitch_gen_record.get('campaign_id')
             campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+            
+            # Authorization check - clients can only send their own pitches
+            if user.get("role") == "client":
+                if not campaign_data or campaign_data.get('person_id') != user.get('person_id'):
+                    results["failed"].append({
+                        "pitch_gen_id": pitch_gen_id,
+                        "error": "Not authorized to send this pitch."
+                    })
+                    continue
             
             if not campaign_data:
                 results["failed"].append({
@@ -998,12 +1014,9 @@ async def send_pitches_bulk_api(
 ):
     """
     Sends multiple approved pitches via Instantly.ai.
-    Staff or Admin access required.
+    Clients can send their own pitches, admin/staff can send any pitch.
     Returns a summary of successes and failures.
     """
-    if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to send pitches.")
-    
     sender_service = PitchSenderService()
     results = {"successful": [], "failed": []}
     
@@ -1020,6 +1033,18 @@ async def send_pitches_bulk_api(
                 continue
             
             pitch_gen_record = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            
+            # Authorization check - clients can only send their own pitches
+            if user.get("role") == "client":
+                campaign_id = pitch_gen_record.get('campaign_id') if pitch_gen_record else None
+                if campaign_id:
+                    campaign_data = await campaign_queries.get_campaign_by_id(campaign_id)
+                    if not campaign_data or campaign_data.get('person_id') != user.get('person_id'):
+                        results["failed"].append({"pitch_id": pitch_id, "error": "Not authorized to send this pitch"})
+                        continue
+                else:
+                    results["failed"].append({"pitch_id": pitch_id, "error": "Campaign not found for pitch"})
+                    continue
             if not pitch_gen_record or not pitch_gen_record.get('send_ready_bool'):
                 results["failed"].append({"pitch_id": pitch_id, "error": "Pitch not ready to send"})
                 continue
@@ -1064,21 +1089,29 @@ async def update_pitch_generation_content_api(
         if not updated_pitch_gen:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found or update failed.")
 
-    if update_data.new_subject_line is not None:
-        # Find the associated pitch record to update its subject line
+    # Update pitch record fields if needed (subject line and/or recipient email)
+    if update_data.new_subject_line is not None or update_data.recipient_email is not None:
+        # Find the associated pitch record to update
         pitch_record = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
         if not pitch_record or not pitch_record.get("pitch_id"):
-            logger.warning(f"No associated pitch record found for pitch_gen_id {pitch_gen_id} to update subject line.")
+            logger.warning(f"No associated pitch record found for pitch_gen_id {pitch_gen_id} to update pitch fields.")
             # Decide if this is an error or if pitch_gen can exist without a pitch record yet.
             # If pitch_gen always has a pitch, this is an error.
             # For now, we'll proceed if pitch_gen was updated, but log a warning.
         else:
-            updated_pitch = await pitch_queries.update_pitch_in_db(
-                pitch_record["pitch_id"],
-                {"subject_line": update_data.new_subject_line}
-            )
-            if not updated_pitch:
-                 logger.warning(f"Failed to update subject line for pitch_id {pitch_record['pitch_id']}.")
+            pitch_updates = {}
+            if update_data.new_subject_line is not None:
+                pitch_updates["subject_line"] = update_data.new_subject_line
+            if update_data.recipient_email is not None:
+                pitch_updates["recipient_email"] = update_data.recipient_email
+            
+            if pitch_updates:
+                updated_pitch = await pitch_queries.update_pitch_in_db(
+                    pitch_record["pitch_id"],
+                    pitch_updates
+                )
+                if not updated_pitch:
+                    logger.warning(f"Failed to update pitch fields for pitch_id {pitch_record['pitch_id']}.")
     
     # Return the updated pitch generation record as the primary object of this endpoint
     # If only subject was updated, fetch the pitch_gen again to return its current state

@@ -696,6 +696,7 @@ def create_pitches_table(conn):
         matched_keywords TEXT[],
         score_evaluated_at TIMESTAMPTZ,
         outreach_type VARCHAR(100),
+        recipient_email TEXT,
         subject_line TEXT,
         body_snippet TEXT,
         send_ts TIMESTAMPTZ,

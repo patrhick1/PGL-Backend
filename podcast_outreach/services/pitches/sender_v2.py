@@ -90,7 +90,7 @@ class PitchSenderServiceV2:
             # Get or create pitch record
             pitch_record = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
             if not pitch_record:
-                # Create new pitch record
+                # Create new pitch record with recipient email from media
                 pitch_data = {
                     "campaign_id": campaign_id,
                     "media_id": media_id,
@@ -99,7 +99,8 @@ class PitchSenderServiceV2:
                     "body_snippet": (pitch_gen.get('final_text') or pitch_gen.get('draft_text'))[:500],
                     "pitch_state": "draft",
                     "email_provider": email_provider.value,
-                    "created_by": "system"
+                    "created_by": "system",
+                    "recipient_email": media_data.get('contact_email')  # Copy from media by default
                 }
                 pitch_record = await pitch_queries.create_pitch_in_db(pitch_data)
             
@@ -133,10 +134,10 @@ class PitchSenderServiceV2:
             result["message"] = "No Nylas grant ID configured for campaign"
             return result
         
-        # Get recipient email
-        recipient_email = media_data.get('contact_email')
+        # Get recipient email - prefer pitch record's recipient_email, fallback to media contact_email
+        recipient_email = pitch_record.get('recipient_email') or media_data.get('contact_email')
         if not recipient_email:
-            result["message"] = f"No contact email found for media {media_data.get('media_id')}"
+            result["message"] = f"No recipient email found for pitch {pitch_record.get('pitch_id')} or media {media_data.get('media_id')}"
             return result
         
         # Parse multiple emails if comma-separated
@@ -193,7 +194,7 @@ class PitchSenderServiceV2:
             send_result = {"error": str(e)}
         
         if success:
-            # Update pitch record with tracking info
+            # Update pitch record with tracking info and actual email used
             update_data = {
                 "send_ts": datetime.now(timezone.utc),
                 "pitch_state": "sent",
@@ -201,7 +202,8 @@ class PitchSenderServiceV2:
                 "nylas_thread_id": send_result.get("thread_id"),
                 "nylas_draft_id": send_result.get("draft_id"),
                 "tracking_label": tracking_label,
-                "send_status": "sent"
+                "send_status": "sent",
+                "recipient_email": primary_email  # Store the actual email used
             }
             await pitch_queries.update_pitch_in_db(pitch_record['pitch_id'], update_data)
             
@@ -229,9 +231,10 @@ class PitchSenderServiceV2:
             result["message"] = f"Instantly Campaign ID not found for campaign {campaign_data.get('campaign_id')}"
             return result
         
-        recipient_email = media_data.get('contact_email')
+        # Get recipient email - prefer pitch record's recipient_email, fallback to media contact_email
+        recipient_email = pitch_record.get('recipient_email') or media_data.get('contact_email')
         if not recipient_email:
-            result["message"] = f"No contact email found for media {media_data.get('media_id')}"
+            result["message"] = f"No recipient email found for pitch {pitch_record.get('pitch_id')} or media {media_data.get('media_id')}"
             return result
         
         email_list = [e.strip() for e in recipient_email.split(',') if e.strip()]
@@ -254,13 +257,14 @@ class PitchSenderServiceV2:
             if response_data and response_data.get('id'):
                 lead_id = response_data['id']
                 
-                # Update pitch record
+                # Update pitch record with actual email used
                 await pitch_queries.update_pitch_in_db(
                     pitch_record['pitch_id'],
                     {
                         "send_ts": datetime.now(timezone.utc),
                         "pitch_state": "sent",
-                        "instantly_lead_id": lead_id
+                        "instantly_lead_id": lead_id,
+                        "recipient_email": primary_email  # Store the actual email used
                     }
                 )
                 
