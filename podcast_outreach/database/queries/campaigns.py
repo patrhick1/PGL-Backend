@@ -101,6 +101,32 @@ async def create_campaign_in_db(campaign_data: Dict[str, Any]) -> Optional[Dict[
             logger.exception(f"Error creating campaign (ID: {campaign_data.get('campaign_id')}) in DB: {e}")
             raise
 
+async def get_campaigns_by_ids(campaign_ids: List[uuid.UUID]) -> Dict[uuid.UUID, Dict[str, Any]]:
+    """Batch fetch campaigns by multiple IDs for performance optimization."""
+    if not campaign_ids:
+        return {}
+    
+    # Convert UUIDs to strings for the query
+    campaign_id_strs = [str(cid) for cid in campaign_ids]
+    
+    query = """
+    SELECT * FROM campaigns 
+    WHERE campaign_id = ANY($1::uuid[])
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, campaign_id_strs)
+            result = {}
+            for row in rows:
+                processed_row = _process_campaign_row(row, row['campaign_id'])
+                result[processed_row['campaign_id']] = processed_row
+            return result
+        except Exception as e:
+            logger.error(f"Error batch fetching campaigns: {e}")
+            return {}
+
 async def get_campaign_by_id(campaign_id: uuid.UUID, pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM campaigns WHERE campaign_id = $1;"
     if pool is None:

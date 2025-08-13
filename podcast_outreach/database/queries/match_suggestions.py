@@ -64,6 +64,28 @@ async def create_match_suggestion_in_db(suggestion: Dict[str, Any]) -> Optional[
             logger.exception("Error creating match suggestion: %s", e)
             raise
 
+async def get_match_suggestions_by_ids(match_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batch fetch match suggestions by multiple IDs for performance optimization."""
+    if not match_ids:
+        return {}
+    
+    query = """
+    SELECT * FROM match_suggestions 
+    WHERE match_id = ANY($1::int[])
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, match_ids)
+            result = {}
+            for row in rows:
+                result[row['match_id']] = dict(row)
+            return result
+        except Exception as e:
+            logger.error(f"Error batch fetching match suggestions: {e}")
+            return {}
+
 async def get_match_suggestion_by_id_from_db(match_id: int) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM match_suggestions WHERE match_id = $1;"
     pool = await get_db_pool()

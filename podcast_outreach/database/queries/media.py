@@ -11,6 +11,28 @@ import asyncpg
 
 logger = get_logger(__name__)
 
+async def get_media_by_ids(media_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batch fetch media by multiple IDs for performance optimization."""
+    if not media_ids:
+        return {}
+    
+    query = """
+    SELECT * FROM media 
+    WHERE media_id = ANY($1::int[])
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, media_ids)
+            result = {}
+            for row in rows:
+                result[row['media_id']] = dict(row)
+            return result
+        except Exception as e:
+            logger.error(f"Error batch fetching media: {e}")
+            return {}
+
 async def get_media_by_id_from_db(media_id: int, pool: Optional[asyncpg.Pool] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT * FROM media WHERE media_id = $1;"
     if pool is None:

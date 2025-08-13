@@ -379,6 +379,41 @@ async def mark_review_task_created(
             logger.error(f"Error marking review task created for discovery {discovery_id}: {e}")
             return False
 
+async def get_discoveries_by_campaign_media_pairs(
+    campaign_media_pairs: List[tuple]
+) -> Dict[tuple, Dict[str, Any]]:
+    """Batch fetch discoveries by multiple (campaign_id, media_id) pairs for performance optimization."""
+    if not campaign_media_pairs:
+        return {}
+    
+    # Build the query with multiple condition pairs
+    conditions = []
+    params = []
+    param_idx = 1
+    
+    for campaign_id, media_id in campaign_media_pairs:
+        conditions.append(f"(campaign_id = ${param_idx} AND media_id = ${param_idx + 1})")
+        params.extend([campaign_id, media_id])
+        param_idx += 2
+    
+    query = f"""
+    SELECT * FROM campaign_media_discoveries
+    WHERE {' OR '.join(conditions)}
+    """
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+            result = {}
+            for row in rows:
+                key = (row['campaign_id'], row['media_id'])
+                result[key] = dict(row)
+            return result
+        except Exception as e:
+            logger.error(f"Error batch fetching discoveries: {e}")
+            return {}
+
 async def get_discovery_by_campaign_and_media(
     campaign_id: uuid.UUID, 
     media_id: int
