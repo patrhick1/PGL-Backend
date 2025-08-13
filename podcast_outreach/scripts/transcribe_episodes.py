@@ -177,6 +177,20 @@ async def process_single_episode_with_retry(
                 except Exception as db_e:
                     logger.error(f"Failed to update episode {episode_id} after 404 error: {db_e}")
                 return False
+            except ValueError as e:
+                # Check if it's a file size error (permanent error, no retries)
+                if "File too large" in str(e):
+                    logger.warning(f"Episode {episode_id} file is too large, skipping retries: {e}")
+                    await episode_queries.mark_episode_as_failed(
+                        episode_id,
+                        error_type='failed_perm',
+                        error_message=str(e),
+                        pool=pool_to_use
+                    )
+                    return False  # Don't retry file size errors
+                else:
+                    # Re-raise other ValueErrors for retry logic
+                    raise
             
             if not local_audio_path:
                 if attempt < max_retries:
@@ -291,21 +305,6 @@ async def process_single_episode_with_retry(
                 pool=pool_to_use
             )
             return False  # Don't retry memory errors
-        except ValueError as e:
-            # Check if it's a file size error
-            if "Audio file too large" in str(e):
-                logger.warning(f"Episode {episode_id} file is too large: {e}")
-                from podcast_outreach.database.queries.episodes import mark_episode_as_failed
-                await mark_episode_as_failed(
-                    episode_id,
-                    error_type='failed_temp',
-                    error_message=f"File too large: {str(e)}",
-                    pool=pool_to_use
-                )
-                return False  # Don't retry file size errors
-            else:
-                # Re-raise other ValueErrors
-                raise
         except Exception as e:
             if attempt < max_retries:
                 logger.warning(f"Error processing episode {episode_id} (attempt {attempt + 1}): {e}. Will retry.")

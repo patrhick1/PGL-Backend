@@ -23,6 +23,12 @@ class PitchGenerationRequest(BaseModel):
     match_id: int = Field(..., description="The ID of the approved match suggestion for which to generate a pitch.")
     pitch_template_id: str = Field(..., description="ID of the pitch template to use (e.g., 'friendly_intro_template').")
 
+class ManualPitchCreateRequest(BaseModel):
+    """Request model for creating a manual pitch without AI generation"""
+    match_id: int = Field(..., description="The ID of the approved match suggestion")
+    subject_line: str = Field(..., min_length=1, max_length=200, description="Email subject line")
+    body_text: str = Field(..., min_length=10, description="Email body content")
+
 class PitchGenerationResponse(BaseModel):
     pitch_gen_id: int
     campaign_id: uuid.UUID

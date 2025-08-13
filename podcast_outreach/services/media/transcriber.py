@@ -135,7 +135,10 @@ class MediaTranscriber:
                 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
                 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    raise ValueError(f"File too large: {file_size_mb:.1f} MB (max: {MAX_FILE_SIZE_MB} MB)")
+                    # Raise a specific error for file size so we can skip retries
+                    error_msg = f"File too large: {file_size_mb:.1f} MB (max: {MAX_FILE_SIZE_MB} MB)"
+                    logger.error(f"Error downloading audio from {url}: {error_msg}")
+                    raise ValueError(error_msg)
                 
                 logger.info(f"File size from HEAD: {file_size_mb:.1f} MB")
             

@@ -6,7 +6,14 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 # Import schemas
-from ..schemas.pitch_schemas import PitchGenerationRequest, PitchGenerationResponse, PitchInDB, PitchGenerationInDB, PitchGenerationContentUpdate
+from ..schemas.pitch_schemas import (
+    PitchGenerationRequest, 
+    PitchGenerationResponse, 
+    PitchInDB, 
+    PitchGenerationInDB, 
+    PitchGenerationContentUpdate,
+    ManualPitchCreateRequest
+)
 
 # Import services
 from podcast_outreach.services.pitches.generator import PitchGeneratorService
@@ -19,6 +26,8 @@ from podcast_outreach.database.queries import pitch_generations as pitch_gen_que
 from podcast_outreach.database.queries import campaigns as campaign_queries # For validation
 from podcast_outreach.database.queries import media as media_queries # For validation
 from podcast_outreach.database.queries import people as people_queries # For enrichment
+from podcast_outreach.database.queries import client_profiles as client_profile_queries # For plan checking
+from podcast_outreach.database.queries import match_suggestions as match_queries # For match validation
 
 # Import dependencies for authentication
 from ..dependencies import get_current_user, get_admin_user
@@ -27,6 +36,135 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pitches", tags=["Pitches"])
+
+
+# ====== Helper Functions for Access Control ======
+
+async def check_pitch_generation_access(user: dict) -> bool:
+    """
+    Check if user can access AI pitch generation based on their role and plan.
+    
+    Args:
+        user: The current user dictionary from authentication
+        
+    Returns:
+        True if user can access AI generation, False otherwise
+    """
+    # Admin and staff always have access
+    if user.get("role") in ["admin", "staff"]:
+        return True
+    
+    # For client users, check their plan type
+    if user.get("role") == "client":
+        person_id = user.get("person_id")
+        if not person_id:
+            logger.warning("Client user without person_id attempted AI pitch generation")
+            return False
+            
+        client_profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+        
+        if client_profile and client_profile.get("plan_type") == "paid":
+            return True
+    
+    return False
+
+
+async def validate_campaign_ownership(campaign_id: uuid.UUID, user: dict) -> bool:
+    """
+    Validate that the user owns the campaign or has admin/staff privileges.
+    
+    Args:
+        campaign_id: The UUID of the campaign
+        user: The current user dictionary
+        
+    Returns:
+        True if user owns the campaign or is admin/staff, False otherwise
+    """
+    # Admin/staff can access all campaigns
+    if user.get("role") in ["admin", "staff"]:
+        return True
+    
+    # Check if the user owns the campaign
+    campaign = await campaign_queries.get_campaign_by_id(campaign_id)
+    if campaign and campaign.get("person_id") == user.get("person_id"):
+        return True
+    
+    return False
+
+
+async def validate_match_ownership(match_id: int, user: dict) -> bool:
+    """
+    Validate that the user owns the match (through campaign ownership).
+    
+    Args:
+        match_id: The ID of the match suggestion
+        user: The current user dictionary
+        
+    Returns:
+        True if user owns the match's campaign or is admin/staff, False otherwise
+    """
+    # Admin/staff can access all matches
+    if user.get("role") in ["admin", "staff"]:
+        return True
+    
+    # Get the match and check campaign ownership
+    match = await match_queries.get_match_suggestion_by_id(match_id)
+    if not match:
+        return False
+    
+    return await validate_campaign_ownership(match.get("campaign_id"), user)
+
+@router.get("/capabilities", summary="Check User's Pitch Generation Capabilities")
+async def get_pitch_generation_capabilities(
+    user: dict = Depends(get_current_user)
+):
+    """
+    Check what pitch generation features are available to the current user.
+    Returns information about manual and AI pitch generation access.
+    """
+    try:
+        # Get user's plan information
+        person_id = user.get("person_id")
+        plan_type = "admin"  # Default for admin/staff
+        
+        if user.get("role") == "client" and person_id:
+            client_profile = await client_profile_queries.get_client_profile_by_person_id(person_id)
+            if client_profile:
+                plan_type = client_profile.get("plan_type", "free")
+            else:
+                # Create a default profile if none exists
+                await client_profile_queries.ensure_client_profile_exists(person_id)
+                plan_type = "free"
+        elif user.get("role") in ["admin", "staff"]:
+            plan_type = "admin"
+        
+        # Check AI generation access
+        has_ai_access = await check_pitch_generation_access(user)
+        
+        return {
+            "user_role": user.get("role"),
+            "plan_type": plan_type,
+            "capabilities": {
+                "manual_pitch_creation": True,  # Everyone can create manual pitches
+                "ai_pitch_generation": has_ai_access,
+                "view_templates": True,  # Everyone can view templates
+                "use_templates": has_ai_access,  # Only paid users can use templates for AI generation
+                "send_via_nylas": True,  # Everyone can send if configured
+                "send_via_instantly": True,  # Everyone can send if configured
+            },
+            "limits": {
+                "ai_generations_per_month": "unlimited" if has_ai_access else 0,
+                "manual_pitches": "unlimited"
+            },
+            "upgrade_message": None if has_ai_access else "Upgrade to Premium to unlock AI-powered pitch generation and save hours of writing time."
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking pitch generation capabilities: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check capabilities: {str(e)}"
+        )
 
 @router.get("/metrics", summary="Get Pitch Metrics for Current User")
 async def get_pitch_metrics(
@@ -193,6 +331,7 @@ async def generate_pitches_batch_api(
     """
     Generate pitches for multiple approved matches with different templates.
     Each request can specify a different template for each match.
+    Available to paid users and admin/staff.
     
     Example request body:
     [
@@ -201,14 +340,27 @@ async def generate_pitches_batch_api(
         {"match_id": 3, "pitch_template_id": "template_1"}
     ]
     """
-    if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to generate pitches.")
+    # Check if user has access to AI pitch generation
+    has_ai_access = await check_pitch_generation_access(user)
+    if not has_ai_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="AI pitch generation is available for Premium users. Upgrade to access this feature or create your pitch manually."
+        )
     
     generator_service = PitchGeneratorService()
     results = {"successful": [], "failed": []}
     
     for request in requests:
         try:
+            # Validate match ownership for client users
+            if user.get("role") == "client":
+                if not await validate_match_ownership(request.match_id, user):
+                    results["failed"].append({
+                        "match_id": request.match_id,
+                        "error": "You don't have permission to generate pitches for this match"
+                    })
+                    continue
             result = await generator_service.generate_pitch_for_match(
                 match_id=request.match_id,
                 pitch_template_id=request.pitch_template_id
@@ -246,8 +398,23 @@ async def generate_pitch_for_match_api(
 ):
     """
     Triggers the AI-powered generation of a pitch email for an approved match suggestion.
-    Staff or Admin access required.
+    Available to paid users and admin/staff.
     """
+    # Check if user has access to AI pitch generation
+    has_ai_access = await check_pitch_generation_access(user)
+    if not has_ai_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="AI pitch generation is available for Premium users. Upgrade to access this feature or create your pitch manually."
+        )
+    
+    # Validate match ownership for client users
+    if user.get("role") == "client":
+        if not await validate_match_ownership(request_data.match_id, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to generate pitches for this match"
+            )
     generator_service = PitchGeneratorService()
     try:
         result = await generator_service.generate_pitch_for_match(
@@ -264,6 +431,108 @@ async def generate_pitch_for_match_api(
     except Exception as e:
         logger.exception(f"Error generating pitch for match {request_data.match_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred during pitch generation: {str(e)}")
+
+@router.post("/create-manual", response_model=PitchGenerationResponse, status_code=status.HTTP_201_CREATED, summary="Create Manual Pitch")
+async def create_manual_pitch(
+    request_data: ManualPitchCreateRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Create a manual pitch without AI generation.
+    Available to all users (free and paid) for their own campaigns.
+    
+    This endpoint allows users to write their own pitch content manually
+    without using AI generation capabilities.
+    """
+    # Validate match ownership
+    if not await validate_match_ownership(request_data.match_id, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to create pitches for this match"
+        )
+    
+    try:
+        # Get match details
+        match = await match_queries.get_match_suggestion_by_id(request_data.match_id)
+        if not match:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Match with ID {request_data.match_id} not found"
+            )
+        
+        if not match.get("client_approved"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Match must be approved before creating a pitch"
+            )
+        
+        campaign_id = match.get("campaign_id")
+        media_id = match.get("media_id")
+        
+        # Create pitch generation record (marked as manual)
+        pitch_gen_data = {
+            "campaign_id": campaign_id,
+            "media_id": media_id,
+            "template_id": "manual_creation",  # Special identifier for manual pitches
+            "draft_text": request_data.body_text,
+            "ai_model_used": "manual",  # Indicates manual creation
+            "pitch_topic": "Manual Pitch",
+            "temperature": 0.0,  # No AI temperature for manual
+            "generation_status": "manual",
+            "send_ready_bool": True  # Manual pitches are immediately ready
+        }
+        
+        created_pitch_gen = await pitch_gen_queries.create_pitch_generation_in_db(pitch_gen_data)
+        if not created_pitch_gen:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save pitch generation to database"
+            )
+        
+        # Create pitch record
+        pitch_data = {
+            "campaign_id": campaign_id,
+            "media_id": media_id,
+            "attempt_no": 1,
+            "match_score": match.get("match_score"),
+            "matched_keywords": match.get("matched_keywords"),
+            "score_evaluated_at": datetime.utcnow(),
+            "outreach_type": "cold_email",
+            "subject_line": request_data.subject_line,
+            "body_snippet": request_data.body_text[:250],
+            "pitch_gen_id": created_pitch_gen['pitch_gen_id'],
+            "pitch_state": "generated",
+            "client_approval_status": "approved",  # Manual pitches are pre-approved by the creator
+            "created_by": f"user_{user.get('person_id', 'unknown')}"
+        }
+        
+        created_pitch = await pitch_queries.create_pitch_in_db(pitch_data)
+        if not created_pitch:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save pitch record to database"
+            )
+        
+        # Return response in same format as AI generation
+        return PitchGenerationResponse(
+            pitch_gen_id=created_pitch_gen['pitch_gen_id'],
+            campaign_id=campaign_id,
+            media_id=media_id,
+            generated_at=created_pitch_gen.get('generated_at', datetime.utcnow()),
+            status="success",
+            message="Manual pitch created successfully",
+            pitch_text_preview=request_data.body_text[:500] + "..." if len(request_data.body_text) > 500 else request_data.body_text,
+            subject_line_preview=request_data.subject_line
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error creating manual pitch for match {request_data.match_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred during manual pitch creation: {str(e)}"
+        )
 
 @router.patch("/generations/{pitch_gen_id}/approve", response_model=PitchGenerationInDB, summary="Approve a Generated Pitch")
 async def approve_pitch_generation_api(
