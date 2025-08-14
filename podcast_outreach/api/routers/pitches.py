@@ -1075,54 +1075,78 @@ async def update_pitch_generation_content_api(
     Updates the draft_text of a pitch generation and/or the subject_line 
     of the associated pitch record.
     """
+    # Check if user is admin/staff or owns the pitch
     if user.get("role") not in ["admin", "staff"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to edit pitch content.")
+        try:
+            # For clients, verify they own the pitch through the campaign
+            pitch_gen = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            if not pitch_gen:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found.")
+            
+            campaign = await campaign_queries.get_campaign_by_id(pitch_gen['campaign_id'])
+            if not campaign:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
+            
+            # Check if the client owns this campaign
+            if campaign.get('person_id') != user.get('person_id'):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to edit this pitch content.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Error checking pitch ownership for pitch_gen_id {pitch_gen_id}: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error verifying pitch ownership.")
 
     updated_pitch_gen = None
     updated_pitch = None
 
-    if update_data.draft_text is not None:
-        updated_pitch_gen = await pitch_gen_queries.update_pitch_generation_in_db(
-            pitch_gen_id,
-            {"draft_text": update_data.draft_text}
-        )
-        if not updated_pitch_gen:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found or update failed.")
+    try:
+        if update_data.draft_text is not None:
+            updated_pitch_gen = await pitch_gen_queries.update_pitch_generation_in_db(
+                pitch_gen_id,
+                {"draft_text": update_data.draft_text}
+            )
+            if not updated_pitch_gen:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found or update failed.")
 
-    # Update pitch record fields if needed (subject line and/or recipient email)
-    if update_data.new_subject_line is not None or update_data.recipient_email is not None:
-        # Find the associated pitch record to update
-        pitch_record = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
-        if not pitch_record or not pitch_record.get("pitch_id"):
-            logger.warning(f"No associated pitch record found for pitch_gen_id {pitch_gen_id} to update pitch fields.")
-            # Decide if this is an error or if pitch_gen can exist without a pitch record yet.
-            # If pitch_gen always has a pitch, this is an error.
-            # For now, we'll proceed if pitch_gen was updated, but log a warning.
+        # Update pitch record fields if needed (subject line and/or recipient email)
+        if update_data.new_subject_line is not None or update_data.recipient_email is not None:
+            # Find the associated pitch record to update
+            pitch_record = await pitch_queries.get_pitch_by_pitch_gen_id(pitch_gen_id)
+            if not pitch_record or not pitch_record.get("pitch_id"):
+                logger.warning(f"No associated pitch record found for pitch_gen_id {pitch_gen_id} to update pitch fields.")
+                # Decide if this is an error or if pitch_gen can exist without a pitch record yet.
+                # If pitch_gen always has a pitch, this is an error.
+                # For now, we'll proceed if pitch_gen was updated, but log a warning.
+            else:
+                pitch_updates = {}
+                if update_data.new_subject_line is not None:
+                    pitch_updates["subject_line"] = update_data.new_subject_line
+                if update_data.recipient_email is not None:
+                    pitch_updates["recipient_email"] = update_data.recipient_email
+                
+                if pitch_updates:
+                    updated_pitch = await pitch_queries.update_pitch_in_db(
+                        pitch_record["pitch_id"],
+                        pitch_updates
+                    )
+                    if not updated_pitch:
+                        logger.warning(f"Failed to update pitch fields for pitch_id {pitch_record['pitch_id']}.")
+        
+        # Return the updated pitch generation record as the primary object of this endpoint
+        # If only subject or recipient_email was updated, fetch the pitch_gen again to return its current state
+        if updated_pitch_gen:
+            return PitchGenerationInDB(**updated_pitch_gen)
+        elif (update_data.new_subject_line or update_data.recipient_email) and not update_data.draft_text:
+            # Only subject or recipient_email was updated, fetch current pitch_gen to return
+            current_pitch_gen = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
+            if not current_pitch_gen:
+                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found after attempting update.")
+            return PitchGenerationInDB(**current_pitch_gen)
         else:
-            pitch_updates = {}
-            if update_data.new_subject_line is not None:
-                pitch_updates["subject_line"] = update_data.new_subject_line
-            if update_data.recipient_email is not None:
-                pitch_updates["recipient_email"] = update_data.recipient_email
-            
-            if pitch_updates:
-                updated_pitch = await pitch_queries.update_pitch_in_db(
-                    pitch_record["pitch_id"],
-                    pitch_updates
-                )
-                if not updated_pitch:
-                    logger.warning(f"Failed to update pitch fields for pitch_id {pitch_record['pitch_id']}.")
-    
-    # Return the updated pitch generation record as the primary object of this endpoint
-    # If only subject was updated, fetch the pitch_gen again to return its current state
-    if updated_pitch_gen:
-        return PitchGenerationInDB(**updated_pitch_gen)
-    elif update_data.new_subject_line and not update_data.draft_text:
-        # Only subject was updated, fetch current pitch_gen to return
-        current_pitch_gen = await pitch_gen_queries.get_pitch_generation_by_id(pitch_gen_id)
-        if not current_pitch_gen:
-             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pitch generation {pitch_gen_id} not found after attempting subject update.")
-        return PitchGenerationInDB(**current_pitch_gen)
-    else:
-        # This case should ideally not be reached if at least one update was attempted and failed to find pitch_gen
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update performed or pitch generation not found.")
+            # This case should ideally not be reached if at least one update was attempted and failed to find pitch_gen
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No update performed or pitch generation not found.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error updating pitch generation {pitch_gen_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error updating pitch: {str(e)}")

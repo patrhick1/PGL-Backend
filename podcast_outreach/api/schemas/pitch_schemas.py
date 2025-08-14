@@ -78,7 +78,7 @@ class PitchGenerationInDB(BaseModel):
     pitch_gen_id: int
     campaign_id: uuid.UUID
     media_id: int
-    template_id: str
+    template_id: Optional[str] = None
     draft_text: Optional[str] = None
     ai_model_used: Optional[str]
     pitch_topic: Optional[str]
