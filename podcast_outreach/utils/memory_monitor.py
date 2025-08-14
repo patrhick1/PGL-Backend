@@ -28,51 +28,67 @@ def get_memory_info() -> dict:
     }
 
 
-def check_memory_usage() -> bool:
+def check_memory_usage(warn_threshold: float = 70.0, critical_threshold: float = 85.0) -> bool:
     """
     Check current memory usage and warn if high.
     Returns True if memory usage is acceptable, False if too high.
+    
+    Args:
+        warn_threshold: System memory percentage to trigger warning (default: 70%)
+        critical_threshold: System memory percentage to return False (default: 85%)
     """
     memory_info = get_memory_info()
     
-    # Check process memory
-    if memory_info["process_percent"] > 60:
-        logger.error(
-            f"HIGH MEMORY USAGE: Process using {memory_info['process_percent']:.1f}% "
-            f"({memory_info['process_rss_mb']:.1f} MB)"
-        )
-        return False
-    elif memory_info["process_percent"] > 40:
-        logger.warning(
-            f"Elevated memory usage: Process using {memory_info['process_percent']:.1f}% "
-            f"({memory_info['process_rss_mb']:.1f} MB)"
-        )
-    
-    # Check system memory
-    if memory_info["system_percent"] > 90:
+    # Check system memory first (more critical)
+    if memory_info["system_percent"] > critical_threshold:
         logger.error(
             f"SYSTEM MEMORY CRITICAL: {memory_info['system_percent']:.1f}% used, "
             f"only {memory_info['system_available_mb']:.1f} MB available"
         )
         return False
+    elif memory_info["system_percent"] > warn_threshold:
+        logger.warning(
+            f"System memory high: {memory_info['system_percent']:.1f}% used, "
+            f"only {memory_info['system_available_mb']:.1f} MB available"
+        )
+    
+    # Check process memory
+    if memory_info["process_percent"] > 60:
+        logger.error(
+            f"HIGH PROCESS MEMORY: Process using {memory_info['process_percent']:.1f}% "
+            f"({memory_info['process_rss_mb']:.1f} MB)"
+        )
+        return False
+    elif memory_info["process_percent"] > 40:
+        logger.warning(
+            f"Elevated process memory: Process using {memory_info['process_percent']:.1f}% "
+            f"({memory_info['process_rss_mb']:.1f} MB)"
+        )
     
     return True
 
 
-def memory_guard(threshold_percent: float = 60.0):
+def memory_guard(threshold_percent: float = 60.0, system_threshold: float = 85.0):
     """
     Decorator to prevent operations when memory is high.
     
     Args:
-        threshold_percent: Memory usage percentage threshold (default: 60%)
+        threshold_percent: Process memory usage percentage threshold (default: 60%)
+        system_threshold: System memory usage percentage threshold (default: 85%)
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs) -> Any:
             memory_info = get_memory_info()
+            # Check system memory first as it's more critical
+            if memory_info["system_percent"] > system_threshold:
+                raise MemoryError(
+                    f"System memory usage too high ({memory_info['system_percent']:.1f}%), "
+                    f"only {memory_info['system_available_mb']:.1f} MB available"
+                )
             if memory_info["process_percent"] > threshold_percent:
                 raise MemoryError(
-                    f"Memory usage too high ({memory_info['process_percent']:.1f}%), "
+                    f"Process memory usage too high ({memory_info['process_percent']:.1f}%), "
                     f"operation cancelled to prevent OOM"
                 )
             return await func(*args, **kwargs)
@@ -80,9 +96,15 @@ def memory_guard(threshold_percent: float = 60.0):
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs) -> Any:
             memory_info = get_memory_info()
+            # Check system memory first as it's more critical
+            if memory_info["system_percent"] > system_threshold:
+                raise MemoryError(
+                    f"System memory usage too high ({memory_info['system_percent']:.1f}%), "
+                    f"only {memory_info['system_available_mb']:.1f} MB available"
+                )
             if memory_info["process_percent"] > threshold_percent:
                 raise MemoryError(
-                    f"Memory usage too high ({memory_info['process_percent']:.1f}%), "
+                    f"Process memory usage too high ({memory_info['process_percent']:.1f}%), "
                     f"operation cancelled to prevent OOM"
                 )
             return func(*args, **kwargs)

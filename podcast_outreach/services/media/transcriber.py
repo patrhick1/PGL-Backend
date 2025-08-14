@@ -81,6 +81,8 @@ class MediaTranscriber:
     DEFAULT_CHUNK_MINUTES = 45
     DEFAULT_OVERLAP_SECONDS = 30
     MAX_TRANSCRIPT_CHARS_FOR_EMBEDDING = 10000
+    MEMORY_AWARE_PROCESSING = os.getenv("MEMORY_AWARE_PROCESSING", "true").lower() == "true"
+    SEQUENTIAL_MEMORY_THRESHOLD = float(os.getenv("SEQUENTIAL_MEMORY_THRESHOLD", "70.0"))
 
     def __init__(self, api_key: Optional[str] = None):
         self._model: Optional[genai.GenerativeModel] = None
@@ -403,25 +405,45 @@ class MediaTranscriber:
             logger.error(f"Error processing chunk {chunk_index+1}: {e}", exc_info=True)
             return chunk_index, f"ERROR in chunk {chunk_index+1}: {str(e)}"
 
-    @memory_guard(threshold_percent=40.0)  # Use 40% threshold for strict memory control
+    @memory_guard(threshold_percent=50.0, system_threshold=80.0)  # Adjusted thresholds
     async def _process_long_audio(self, file_path: str, episode_name: Optional[str] = None) -> str:
         logger.info(f"Processing long audio file: {file_path}")
         
         # Check memory before loading large audio file
-        if not check_memory_usage():
-            raise MemoryError("Memory usage too high to process long audio file")
+        memory_info = get_memory_info()
+        if memory_info["system_percent"] > 80:
+            raise MemoryError(f"System memory too high ({memory_info['system_percent']:.1f}%) to process long audio file")
         
         audio = await asyncio.to_thread(AudioSegment.from_file, file_path)
         chunk_length_ms = self.DEFAULT_CHUNK_MINUTES * 60 * 1000
         overlap_ms = self.DEFAULT_OVERLAP_SECONDS * 1000
         total_chunks = -(-len(audio) // chunk_length_ms) # Ceiling division
         
-        tasks = [
-            self._process_audio_chunk(i, audio, total_chunks, chunk_length_ms, overlap_ms, Path(file_path).suffix, episode_name)
-            for i in range(total_chunks)
-        ]
+        # Decide whether to process chunks concurrently or sequentially based on memory
+        memory_info = get_memory_info()
+        use_sequential = False
         
-        results = await asyncio.gather(*tasks)
+        if self.MEMORY_AWARE_PROCESSING:
+            use_sequential = (memory_info["system_percent"] > self.SEQUENTIAL_MEMORY_THRESHOLD or 
+                            memory_info["process_percent"] > 40)
+        
+        if use_sequential:
+            logger.info(f"Using sequential processing due to memory constraints (system: {memory_info['system_percent']:.1f}%, process: {memory_info['process_percent']:.1f}%)")
+            results = []
+            for i in range(total_chunks):
+                result = await self._process_audio_chunk(i, audio, total_chunks, chunk_length_ms, overlap_ms, Path(file_path).suffix, episode_name)
+                results.append(result)
+                # Clean up after each chunk in sequential mode
+                cleanup_memory()
+                await asyncio.sleep(0.5)  # Brief pause between chunks
+        else:
+            logger.info(f"Using concurrent processing (system: {memory_info['system_percent']:.1f}%, process: {memory_info['process_percent']:.1f}%)")
+            tasks = [
+                self._process_audio_chunk(i, audio, total_chunks, chunk_length_ms, overlap_ms, Path(file_path).suffix, episode_name)
+                for i in range(total_chunks)
+            ]
+            results = await asyncio.gather(*tasks)
+        
         results.sort(key=lambda x: x[0])
         transcripts = [transcript for _, transcript in results]
         
