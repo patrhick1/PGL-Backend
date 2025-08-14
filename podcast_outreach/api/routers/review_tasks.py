@@ -76,7 +76,7 @@ async def list_review_tasks(
 async def get_enhanced_review_tasks(
     campaign_id: Optional[str] = Query(None, description="Filter by campaign ID"),
     task_type: Optional[str] = Query(None, description="Filter by task type (match_suggestion, pitch_review)"),
-    status: Optional[str] = Query("pending", description="Filter by status (pending, approved, rejected)"),
+    status: Optional[str] = Query(None, description="Filter by status (pending, approved, rejected)"),
     min_vetting_score: Optional[int] = Query(None, ge=0, le=100, description="Minimum AI vetting score (0-100)"),
     current_user: dict = Depends(get_current_user)
 ):
