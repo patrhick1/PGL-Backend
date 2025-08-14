@@ -44,6 +44,21 @@ class NylasAPIClient:
         )
         logger.info("NylasAPIClient initialized")
     
+    def _normalize_send_result(self, send_result: dict) -> dict:
+        """
+        Accept either the raw response or the SDK Response, and return
+        a canonical dict we can persist safely.
+        
+        Nylas v3 wraps responses in "data" and uses "id" not "message_id"
+        """
+        data = send_result.get("data", send_result) or {}
+        return {
+            "id": data.get("id"),                 # Nylas message ID
+            "thread_id": data.get("thread_id"),   # Nylas thread ID
+            "draft_id": data.get("draft_id"),     # Draft ID if applicable
+            "raw": data,
+        }
+    
     def send_email_v3(self,
                       to_emails: List[str],
                       subject: str,
@@ -136,9 +151,10 @@ class NylasAPIClient:
                 response.raise_for_status()
                 
             result = response.json()
-            logger.info(f"Email sent successfully. Message ID: {result.get('data', {}).get('id')}")
+            payload = self._normalize_send_result(result)
+            logger.info(f"Email sent successfully. nylas_message_id={payload['id']} thread_id={payload['thread_id']}")
             
-            return result.get("data", result)
+            return payload  # Return normalized shape
     
     def send_email(self, 
                    to_email: str,
@@ -196,7 +212,7 @@ class NylasAPIClient:
             
             # Add custom headers for tracking
             if custom_headers:
-                request_body["headers"] = custom_headers  # v3 uses "headers" not "custom_headers"
+                request_body["custom_headers"] = custom_headers  # v3 expects custom_headers on send/draft
             
             # Add tracking options (Nylas v3 format)
             if tracking_options:
@@ -242,7 +258,7 @@ class NylasAPIClient:
             logger.info(f"Email sent successfully. Message ID: {message.data.id}")
             
             return True, {
-                "message_id": message.data.id,
+                "id": message.data.id,  # Use "id" not "message_id" for v3 consistency
                 "thread_id": message.data.thread_id,
                 "draft_id": draft_response.data.id
             }

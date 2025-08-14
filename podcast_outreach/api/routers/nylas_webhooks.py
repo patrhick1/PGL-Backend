@@ -1,7 +1,7 @@
 # podcast_outreach/api/routers/nylas_webhooks.py
 
-from fastapi import APIRouter, Request, HTTPException, status, Header
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request, HTTPException, status, Header, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 import logging
 import hmac
 import hashlib
@@ -53,31 +53,28 @@ def verify_nylas_signature(request_body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected_signature, signature)
 
 
-@router.post("/challenge", status_code=status.HTTP_200_OK, summary="Nylas Webhook Challenge")
-async def nylas_webhook_challenge(request: Request):
+@router.get("/challenge", status_code=status.HTTP_200_OK, summary="Nylas v3 Webhook Challenge (Legacy)")
+async def nylas_webhook_challenge(challenge: str = Query(...)):
     """
-    Handle Nylas webhook challenge for verification.
-    This endpoint is called when setting up a new webhook.
+    Legacy endpoint - kept for backward compatibility.
+    Nylas v3 actually sends challenge to the same URL as events (/events).
     """
-    try:
-        data = await request.json()
-        challenge = data.get("challenge")
-        
-        if challenge:
-            logger.info(f"Responding to Nylas webhook challenge: {challenge}")
-            return JSONResponse(content={"challenge": challenge})
-        else:
-            logger.error("No challenge found in Nylas webhook verification request")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No challenge found in request"
-            )
-    except Exception as e:
-        logger.exception(f"Error handling Nylas webhook challenge: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    logger.info(f"Responding to Nylas v3 webhook challenge (legacy endpoint): {challenge}")
+    return PlainTextResponse(content=challenge)
+
+
+@router.get("/events", status_code=status.HTTP_200_OK, summary="Nylas v3 Challenge (same URL as events)")
+async def nylas_webhook_events_challenge(challenge: Optional[str] = Query(None)):
+    """
+    Handle Nylas v3 webhook challenge for verification.
+    Nylas v3 sends GET request with ?challenge=... to the SAME URL used for events.
+    Must return the raw challenge string (not JSON) within 10 seconds.
+    """
+    if challenge:
+        logger.info(f"Responding to Nylas v3 webhook challenge: {challenge}")
+        return PlainTextResponse(content=challenge)
+    # If someone GETs without a challenge, return 200 anyway
+    return PlainTextResponse(content="ok")
 
 
 @router.post("/events", status_code=status.HTTP_200_OK, summary="Nylas Webhook Events")
@@ -86,14 +83,17 @@ async def nylas_webhook_events(
     x_nylas_signature: Optional[str] = Header(None)
 ):
     """
-    Handle Nylas webhook events for email tracking.
+    Handle Nylas v3 webhook events for email tracking.
     
-    Supported events:
-    - message.sent: Email was sent
-    - message.opened: Email was opened
-    - message.link_clicked: Link in email was clicked
-    - message.replied: Email received a reply
-    - message.bounced: Email bounced
+    Supported v3 events:
+    - message.created: New message created/received
+    - message.updated: Message changed (labels/folder, flags, etc.)
+    - message.opened: Email was opened (tracking must be enabled)
+    - message.link_clicked: Link in email was clicked (tracking must be enabled)
+    - thread.replied: Someone replied in the thread (tracking must be enabled)
+    - message.bounce_detected: Email bounced
+    - message.send_success: Scheduled message sent successfully
+    - message.send_failed: Scheduled message failed to send
     """
     try:
         # Get raw body for signature verification
@@ -108,46 +108,69 @@ async def nylas_webhook_events(
                     detail="Invalid webhook signature"
                 )
         
-        # Parse JSON
+        # Parse JSON - Nylas v3 uses CloudEvents format (single event per webhook)
         data = json.loads(body)
         
-        # Process each event in the webhook payload
-        events = data.get("data", [])
+        # Extract v3 CloudEvent fields
+        event_type = data.get("type")  # e.g., "message.opened", "thread.replied"
+        event_time = data.get("time")
+        event_data = data.get("data", {})
+        grant_id = event_data.get("grant_id")
+        event_object = event_data.get("object", {})
         
-        # Process events using the event processor for deduplication and persistence
-        processed_count = 0
-        duplicate_count = 0
+        logger.info(f"Processing Nylas v3 webhook event: {event_type} for grant: {grant_id}")
         
-        for event in events:
-            event_type = event.get("type")
-            
-            logger.info(f"Processing Nylas webhook event: {event_type}")
-            
-            # Use event processor for deduplication and persistence
-            result = await event_processor.process_webhook_event(event)
-            
-            if result.get("duplicate"):
-                duplicate_count += 1
-                continue
-            
-            if result.get("success"):
-                processed_count += 1
-                
-                # Also run legacy handlers for specific event types
-                # These will be phased out once event processor handles everything
-                event_data = event.get("data", {})
-                
-                if event_type == "message.sent":
-                    await handle_message_sent(event_data)
-                elif event_type == "message.replied":
-                    await handle_message_replied(event_data)
-                # Opens, clicks, and bounces are now fully handled by event processor
+        # Process event using the event processor for deduplication and persistence
+        # Convert v3 format to internal format for processor
+        internal_event = {
+            "type": event_type,
+            "time": event_time,
+            "grant_id": grant_id,
+            "data": event_object
+        }
+        
+        result = await event_processor.process_webhook_event(internal_event)
+        
+        if result.get("duplicate"):
+            return JSONResponse(content={
+                "status": "duplicate",
+                "message": "Event already processed"
+            })
+        
+        # Handle specific event types with v3 names
+        if result.get("success"):
+            # Map v3 events to handlers
+            if event_type == "message.created":
+                # For message.created, check if we have this message ID in our database
+                # If yes, it's a message we sent
+                message_id = event_object.get("id")
+                if message_id:
+                    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+                    if pitch_record:
+                        await handle_message_sent(event_object)
+            elif event_type == "thread.replied":
+                await handle_thread_replied(event_object, grant_id)
+            elif event_type == "message.opened":
+                await handle_message_opened(event_object)
+            elif event_type == "message.link_clicked":
+                await handle_link_clicked(event_object)
+            elif event_type == "message.bounce_detected":
+                await handle_message_bounce_detected(event_object)
+            elif event_type == "message.send_success":
+                # For scheduled sends only
+                await handle_scheduled_send_success(event_object)
+            elif event_type == "message.send_failed":
+                # For scheduled sends only
+                await handle_scheduled_send_failed(event_object)
+            # Handle transformed/truncated variants
+            elif event_type.endswith(".transformed") or event_type.endswith(".truncated"):
+                logger.info(f"Received {event_type} variant, processing base event")
+                # You may need to fetch full message if truncated
         
         return JSONResponse(content={
-            "status": "success", 
-            "events_received": len(events),
-            "events_processed": processed_count,
-            "duplicates_skipped": duplicate_count
+            "status": "success",
+            "event_type": event_type,
+            "processed": result.get("success", False)
         })
         
     except json.JSONDecodeError:
@@ -165,12 +188,12 @@ async def nylas_webhook_events(
 
 
 async def handle_message_sent(event_data: dict):
-    """Handle message.sent event."""
-    message_id = event_data.get("message_id")
+    """Handle message sent detection via message.created event (v3)."""
+    message_id = event_data.get("id")  # v3 uses 'id' not 'message_id'
     thread_id = event_data.get("thread_id")
     
     if not message_id:
-        logger.warning("No message_id in message.sent event")
+        logger.warning("No id in message.created event")
         return
     
     # Find pitch by Nylas message ID
@@ -188,12 +211,15 @@ async def handle_message_sent(event_data: dict):
         
         # Update Attio if configured
         try:
+            # Get recipient email from 'to' field (v3)
+            to_email = (event_data.get("to") or [{}])[0].get("email", "")
+            
             # Convert to format expected by Attio integration
             attio_data = {
                 "pitch_gen_id": pitch_record.get("pitch_gen_id"),
                 "campaign_id": str(pitch_record.get("campaign_id")),
                 "media_id": str(pitch_record.get("media_id")),
-                "email": event_data.get("recipient_email", ""),
+                "email": to_email,
                 "Subject": pitch_record.get("subject_line", "")
             }
             await update_attio_when_email_sent(attio_data)
@@ -204,9 +230,10 @@ async def handle_message_sent(event_data: dict):
 
 
 async def handle_message_opened(event_data: dict):
-    """Handle message.opened event."""
+    """Handle message.opened event (v3)."""
+    # v3 schema: message_id is under event_data, timestamp is under message_data
     message_id = event_data.get("message_id")
-    opened_at = event_data.get("timestamp")
+    opened_at = (event_data.get("message_data") or {}).get("timestamp")
     
     if not message_id:
         return
@@ -224,10 +251,13 @@ async def handle_message_opened(event_data: dict):
 
 
 async def handle_link_clicked(event_data: dict):
-    """Handle message.link_clicked event."""
+    """Handle message.link_clicked event (v3)."""
+    # v3 schema: message_id at top level, link details nested
     message_id = event_data.get("message_id")
-    link_url = event_data.get("link_url")
-    clicked_at = event_data.get("timestamp")
+    # Link URL might be under 'link' object or 'clicked_url'
+    link_info = event_data.get("link", {})
+    link_url = link_info.get("url") or event_data.get("clicked_url", "")
+    clicked_at = (event_data.get("message_data") or {}).get("timestamp")
     
     if not message_id:
         return
@@ -245,30 +275,35 @@ async def handle_link_clicked(event_data: dict):
             logger.info(f"Updated pitch {pitch_record['pitch_id']} to 'clicked' state (link: {link_url})")
 
 
-async def handle_message_replied(event_data: dict):
-    """Handle message.replied event with BookingAssistant integration."""
+async def handle_thread_replied(event_data: dict, grant_id: str):
+    """Handle thread.replied event (v3) with BookingAssistant integration."""
     
-    original_message_id = event_data.get("original_message_id")
-    reply_message_id = event_data.get("reply_message_id")
-    thread_id = event_data.get("thread_id")
+    # v3 thread.replied sends the reply message_id, not a thread object
+    reply_message_id = event_data.get("message_id")
     
-    if not original_message_id:
+    if not reply_message_id:
+        logger.warning("No message_id in thread.replied event")
         return
     
-    # Get the reply message details
-    monitor = NylasEmailMonitor()
+    # Get the reply message details using the grant_id
+    monitor = NylasEmailMonitor(grant_id=grant_id)
     reply_message = monitor.nylas_client.get_message(reply_message_id)
     
     if not reply_message:
         logger.warning(f"Could not fetch reply message: {reply_message_id}")
         return
     
-    # Get pitch record first
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(original_message_id)
+    # Get thread_id from the reply message
+    thread_id = reply_message.get("thread_id")
+    
+    # Find the original pitch using thread_id
+    pitch_record = await pitch_queries.get_pitch_by_nylas_thread_id(thread_id)
     
     if not pitch_record:
-        logger.warning(f"No pitch found for message ID: {original_message_id}")
+        logger.warning(f"No pitch found for thread ID: {thread_id}")
         return
+    
+    original_message_id = pitch_record.get("nylas_message_id")
     
     # Process through BookingAssistant
     booking_assistant = BookingAssistantService()
@@ -339,16 +374,33 @@ async def handle_message_replied(event_data: dict):
         logger.warning(f"Failed to process reply: {result}")
 
 
-async def handle_message_bounced(event_data: dict):
-    """Handle message.bounced event."""
-    message_id = event_data.get("message_id")
-    bounce_type = event_data.get("bounce_type")  # hard_bounce or soft_bounce
-    bounce_reason = event_data.get("reason")
+async def handle_message_bounce_detected(event_data: dict):
+    """Handle message.bounce_detected event (v3)."""
+    # v3 bounce structure has origin object with original message details
+    origin = event_data.get("origin", {})
+    message_id = origin.get("id")  # Provider ID of the original message
+    bounce_type = event_data.get("type", "hard_bounce")
+    bounce_reason = event_data.get("bounce_reason", "")
+    bounced_recipients = origin.get("to", [])
     
     if not message_id:
-        return
-    
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+        # Try to match by recipient email if no message ID
+        if bounced_recipients:
+            recipient_email = bounced_recipients[0].get("email", "").lower()
+            # Get recent pitch to this email
+            recent_pitches = await pitch_queries.get_recent_pitches_by_recipient_email(
+                recipient_email, days_back=7
+            )
+            if recent_pitches:
+                pitch_record = recent_pitches[0]
+            else:
+                logger.warning(f"No pitch found for bounced email: {recipient_email}")
+                return
+        else:
+            logger.warning("No message ID or recipients in bounce event")
+            return
+    else:
+        pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to bounced
@@ -717,6 +769,61 @@ async def update_contact_status(email: str, status: str, reason: str):
         """
         
         await db.execute(query, email, status, reason)
+
+
+async def handle_scheduled_send_success(event_data: dict):
+    """Handle message.send_success event for scheduled sends (v3)."""
+    message_id = event_data.get("id")
+    thread_id = event_data.get("thread_id")
+    
+    if not message_id:
+        logger.warning("No message_id in message.send_success event")
+        return
+    
+    # Find pitch by Nylas message ID
+    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    
+    if pitch_record:
+        # Update pitch state to sent
+        update_data = {
+            "pitch_state": "sent",
+            "send_ts": datetime.now(timezone.utc),
+            "nylas_thread_id": thread_id
+        }
+        await pitch_queries.update_pitch_in_db(pitch_record['pitch_id'], update_data)
+        logger.info(f"Scheduled pitch {pitch_record['pitch_id']} successfully sent")
+
+
+async def handle_scheduled_send_failed(event_data: dict):
+    """Handle message.send_failed event for scheduled sends (v3)."""
+    message_id = event_data.get("id")
+    error_message = event_data.get("error_message") or event_data.get("reason")
+    
+    if not message_id:
+        logger.warning("No message_id in message.send_failed event")
+        return
+    
+    # Find pitch by Nylas message ID
+    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    
+    if pitch_record:
+        # Update pitch state to failed
+        update_data = {
+            "pitch_state": "failed",
+            "error_message": error_message,
+            "failed_ts": datetime.now(timezone.utc)
+        }
+        await pitch_queries.update_pitch_in_db(pitch_record['pitch_id'], update_data)
+        logger.error(f"Scheduled pitch {pitch_record['pitch_id']} failed to send: {error_message}")
+        
+        # Create review task for failed send
+        await create_review_task({
+            "task_type": "send_failed",
+            "related_id": pitch_record['pitch_id'],
+            "campaign_id": pitch_record['campaign_id'],
+            "priority": "high",
+            "notes": f"Scheduled send failed: {error_message}"
+        })
 
 
 @router.get("/health", status_code=status.HTTP_200_OK, summary="Webhook Health Check")

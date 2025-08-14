@@ -198,7 +198,7 @@ class PitchSenderServiceV2:
             update_data = {
                 "send_ts": datetime.now(timezone.utc),
                 "pitch_state": "sent",
-                "nylas_message_id": send_result.get("message_id"),
+                "nylas_message_id": send_result.get("id") or send_result.get("message_id"),  # Handle both v3 formats
                 "nylas_thread_id": send_result.get("thread_id"),
                 "nylas_draft_id": send_result.get("draft_id"),
                 "tracking_label": tracking_label,
@@ -209,9 +209,9 @@ class PitchSenderServiceV2:
             
             result["success"] = True
             result["message"] = f"Pitch sent successfully via Nylas to {primary_email}"
-            result["nylas_message_id"] = send_result.get("message_id")
+            result["nylas_message_id"] = send_result.get("id") or send_result.get("message_id")
             
-            logger.info(f"Pitch {pitch_record['pitch_id']} sent via Nylas. Message ID: {send_result.get('message_id')}")
+            logger.info(f"Pitch {pitch_record['pitch_id']} sent via Nylas. Message ID: {send_result.get('id') or send_result.get('message_id')}")
         else:
             result["message"] = f"Nylas send failed: {send_result.get('error', 'Unknown error')}"
             logger.error(result["message"])
