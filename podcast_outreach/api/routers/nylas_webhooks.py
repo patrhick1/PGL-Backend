@@ -252,12 +252,19 @@ async def handle_message_opened(event_data: dict):
 
 async def handle_link_clicked(event_data: dict):
     """Handle message.link_clicked event (v3)."""
-    # v3 schema: message_id at top level, link details nested
+    # v3 schema: message_id at top level; link_data is a list with {url, count}
     message_id = event_data.get("message_id")
-    # Link URL might be under 'link' object or 'clicked_url'
-    link_info = event_data.get("link", {})
-    link_url = link_info.get("url") or event_data.get("clicked_url", "")
-    clicked_at = (event_data.get("message_data") or {}).get("timestamp")
+    link_items = event_data.get("link_data") or []
+    link_url = (link_items[0].get("url") if link_items else None)
+    
+    # Get timestamp from recents array or message_data
+    recents = event_data.get("recents") or []
+    clicked_at = None
+    if recents:
+        # Get the most recent click timestamp
+        clicked_at = recents[-1].get("timestamp")
+    if not clicked_at:
+        clicked_at = (event_data.get("message_data") or {}).get("timestamp")
     
     if not message_id:
         return
@@ -269,7 +276,7 @@ async def handle_link_clicked(event_data: dict):
         if pitch_record.get("pitch_state") not in ["replied", "clicked"]:
             update_data = {
                 "pitch_state": "clicked",
-                "clicked_ts": datetime.fromtimestamp(clicked_at) if clicked_at else datetime.now(timezone.utc)
+                "clicked_ts": datetime.fromtimestamp(clicked_at, timezone.utc) if clicked_at else datetime.now(timezone.utc)
             }
             await pitch_queries.update_pitch_in_db(pitch_record['pitch_id'], update_data)
             logger.info(f"Updated pitch {pitch_record['pitch_id']} to 'clicked' state (link: {link_url})")

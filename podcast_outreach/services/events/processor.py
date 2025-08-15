@@ -61,7 +61,21 @@ class EventProcessor:
             # Extract event details
             event_type = event_data.get('type')
             event_id = event_data.get('id')
-            message_id = event_data.get('data', {}).get('message_id')
+            obj = event_data.get('data', {}) or {}
+            
+            # v3: message_id appears in different places depending on event
+            message_id = (
+                obj.get('message_id') or          # tracking events (opened, link_clicked, thread.replied)
+                obj.get('id') or                  # message.created / updated / send_success / send_failed
+                (obj.get('origin') or {}).get('id') or  # bounce_detected original message id
+                obj.get('root_message_id')        # thread.replied original tracked message id (fallback)
+            )
+            
+            # Ensure we keep the event time correctly
+            event_time = event_data.get('time')  # set by router
+            if not event_time:
+                # tracking puts timestamp under message_data; messages have `date`
+                event_time = (obj.get('message_data') or {}).get('timestamp') or obj.get('date')
             
             if not event_id:
                 # Generate event ID if not provided
@@ -100,7 +114,8 @@ class EventProcessor:
                 message_id=message_id,
                 pitch_id=pitch_id,
                 event_type=event_type,
-                event_data=event_data
+                event_data=event_data,
+                event_time=event_time
             )
             
             # Add to memory cache
@@ -141,14 +156,22 @@ class EventProcessor:
                             message_id: Optional[str],
                             pitch_id: Optional[int],
                             event_type: str,
-                            event_data: Dict[str, Any]):
+                            event_data: Dict[str, Any],
+                            event_time: Optional[float] = None):
         """Persist event to message_events table."""
         async with get_db_async() as db:
             # Extract additional fields from event data
             data = event_data.get('data', {})
-            timestamp = datetime.fromtimestamp(
-                data.get('timestamp', datetime.now(timezone.utc).timestamp())
-            )
+            
+            # Use the computed event_time, fall back to now if not available
+            if event_time:
+                timestamp = (
+                    datetime.fromtimestamp(event_time, timezone.utc)
+                    if isinstance(event_time, (int, float)) 
+                    else datetime.now(timezone.utc)
+                )
+            else:
+                timestamp = datetime.now(timezone.utc)
             
             # Extract IP and user agent for opens/clicks
             ip_address = None
@@ -159,14 +182,16 @@ class EventProcessor:
                 # Nylas provides IP and user agent in recents array
                 recents = data.get('recents', [])
                 if recents:
-                    latest = recents[0]
+                    latest = recents[-1]  # Get most recent
                     ip_address = latest.get('ip')
                     user_agent = latest.get('user_agent')
             elif event_type == 'message.link_clicked':
-                link_url = data.get('link_url')
+                # v3: link_data is a list with {url, count}
+                link_items = data.get('link_data', [])
+                link_url = link_items[0].get('url') if link_items else None
                 recents = data.get('recents', [])
                 if recents:
-                    latest = recents[0]
+                    latest = recents[-1]  # Get most recent
                     ip_address = latest.get('ip')
                     user_agent = latest.get('user_agent')
             
