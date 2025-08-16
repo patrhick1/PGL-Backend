@@ -14,6 +14,7 @@ from podcast_outreach.services.email.monitor import NylasEmailMonitor
 from podcast_outreach.services.events.processor import event_processor
 from podcast_outreach.services.inbox.booking_assistant import BookingAssistantService, map_classification
 from podcast_outreach.database.queries import pitches as pitch_queries
+from podcast_outreach.database.queries import pitches_nylas
 from podcast_outreach.database.queries import placements as placement_queries
 from podcast_outreach.database.queries import media as media_queries
 from podcast_outreach.database.connection import get_db_async
@@ -145,7 +146,7 @@ async def nylas_webhook_events(
                 # If yes, it's a message we sent
                 message_id = event_object.get("id")
                 if message_id:
-                    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+                    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
                     if pitch_record:
                         await handle_message_sent(event_object)
             elif event_type == "thread.replied":
@@ -197,7 +198,7 @@ async def handle_message_sent(event_data: dict):
         return
     
     # Find pitch by Nylas message ID
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to sent
@@ -238,7 +239,7 @@ async def handle_message_opened(event_data: dict):
     if not message_id:
         return
     
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record and pitch_record.get("pitch_state") != "replied":
         # Only update to opened if not already replied
@@ -269,7 +270,7 @@ async def handle_link_clicked(event_data: dict):
     if not message_id:
         return
     
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to clicked if not already in a more advanced state
@@ -304,7 +305,7 @@ async def handle_thread_replied(event_data: dict, grant_id: str):
     thread_id = reply_message.get("thread_id")
     
     # Find the original pitch using thread_id
-    pitch_record = await pitch_queries.get_pitch_by_nylas_thread_id(thread_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_thread_id(thread_id)
     
     if not pitch_record:
         logger.warning(f"No pitch found for thread ID: {thread_id}")
@@ -395,7 +396,7 @@ async def handle_message_bounce_detected(event_data: dict):
         if bounced_recipients:
             recipient_email = bounced_recipients[0].get("email", "").lower()
             # Get recent pitch to this email
-            recent_pitches = await pitch_queries.get_recent_pitches_by_recipient_email(
+            recent_pitches = await pitches_nylas.get_recent_pitches_by_recipient_email(
                 recipient_email, days_back=7
             )
             if recent_pitches:
@@ -407,7 +408,7 @@ async def handle_message_bounce_detected(event_data: dict):
             logger.warning("No message ID or recipients in bounce event")
             return
     else:
-        pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+        pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to bounced
@@ -788,7 +789,7 @@ async def handle_scheduled_send_success(event_data: dict):
         return
     
     # Find pitch by Nylas message ID
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to sent
@@ -811,7 +812,7 @@ async def handle_scheduled_send_failed(event_data: dict):
         return
     
     # Find pitch by Nylas message ID
-    pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+    pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
     
     if pitch_record:
         # Update pitch state to failed

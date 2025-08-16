@@ -13,6 +13,7 @@ import asyncio
 from uuid import uuid4
 
 from podcast_outreach.database.queries import pitches as pitch_queries
+from podcast_outreach.database.queries import pitches_nylas
 from podcast_outreach.database.connection import get_db_async
 from podcast_outreach.logging_config import get_logger
 
@@ -104,7 +105,7 @@ class EventProcessor:
             # Find associated pitch if message_id exists
             pitch_id = None
             if message_id:
-                pitch_record = await pitch_queries.get_pitch_by_nylas_message_id(message_id)
+                pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
                 if pitch_record:
                     pitch_id = pitch_record.get('pitch_id')
             
