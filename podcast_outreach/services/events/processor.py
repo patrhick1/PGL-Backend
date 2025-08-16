@@ -7,6 +7,7 @@ Handles event persistence, deduplication, and automation triggers
 
 import logging
 import json
+import ipaddress
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import asyncio
@@ -18,6 +19,48 @@ from podcast_outreach.database.connection import get_db_async
 from podcast_outreach.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _extract_first_valid_ip(raw_ip: Optional[str]) -> Optional[str]:
+    """
+    Extract the first valid IP address from a string that may contain
+    comma-separated IPs (X-Forwarded-For style) or IPs with ports.
+    
+    Args:
+        raw_ip: String that may contain one or more IP addresses
+        
+    Returns:
+        First valid IP address or None if no valid IP found
+    """
+    if not raw_ip:
+        return None
+    
+    # Handle string input
+    if isinstance(raw_ip, str):
+        # Split by comma for X-Forwarded-For style chains
+        ip_candidates = [ip.strip() for ip in raw_ip.split(',')]
+    else:
+        ip_candidates = [str(raw_ip).strip()]
+    
+    for candidate in ip_candidates:
+        # Remove brackets and port for IPv6 first
+        if candidate.startswith('[') and ']' in candidate:
+            candidate = candidate[1:candidate.index(']')]
+        # Check if it's likely IPv4:port (not IPv6 which has multiple colons)
+        elif ':' in candidate and candidate.count(':') == 1:
+            # This is likely IPv4:port format
+            parts = candidate.rsplit(':', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                candidate = parts[0]
+        
+        # Try to validate as IP address
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            continue
+    
+    return None
 
 
 class EventProcessor:
@@ -183,8 +226,11 @@ class EventProcessor:
                 # Nylas provides IP and user agent in recents array
                 recents = data.get('recents', [])
                 if recents:
-                    latest = recents[-1]  # Get most recent
-                    ip_address = latest.get('ip')
+                    # Get the most recent entry by timestamp
+                    latest = max(recents, key=lambda r: r.get('timestamp', 0), default=recents[-1] if recents else {})
+                    # Extract and sanitize IP address (may be comma-separated chain)
+                    raw_ip = latest.get('ip')
+                    ip_address = _extract_first_valid_ip(raw_ip)
                     user_agent = latest.get('user_agent')
             elif event_type == 'message.link_clicked':
                 # v3: link_data is a list with {url, count}
@@ -192,8 +238,11 @@ class EventProcessor:
                 link_url = link_items[0].get('url') if link_items else None
                 recents = data.get('recents', [])
                 if recents:
-                    latest = recents[-1]  # Get most recent
-                    ip_address = latest.get('ip')
+                    # Get the most recent entry by timestamp
+                    latest = max(recents, key=lambda r: r.get('timestamp', 0), default=recents[-1] if recents else {})
+                    # Extract and sanitize IP address (may be comma-separated chain)
+                    raw_ip = latest.get('ip')
+                    ip_address = _extract_first_valid_ip(raw_ip)
                     user_agent = latest.get('user_agent')
             
             query = """
