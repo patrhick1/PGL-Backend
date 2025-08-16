@@ -142,13 +142,37 @@ async def nylas_webhook_events(
         if result.get("success"):
             # Map v3 events to handlers
             if event_type == "message.created":
-                # For message.created, check if we have this message ID in our database
-                # If yes, it's a message we sent
+                # Check if this is a message we sent or a reply to our thread
                 message_id = event_object.get("id")
+                thread_id = event_object.get("thread_id")
+                
                 if message_id:
+                    # First check if this is a message we sent
                     pitch_record = await pitches_nylas.get_pitch_by_nylas_message_id(message_id)
                     if pitch_record:
                         await handle_message_sent(event_object)
+                    elif thread_id:
+                        # Check if this is a reply in one of our threads
+                        pitch_in_thread = await pitches_nylas.get_pitch_by_nylas_thread_id(thread_id)
+                        if pitch_in_thread:
+                            # This is a reply to our pitch!
+                            logger.info(f"Detected reply in thread {thread_id} for pitch {pitch_in_thread['pitch_id']}")
+                            
+                            # For message.created events, we already have the message data
+                            # Just update the pitch state to replied
+                            await pitch_queries.update_pitch_in_db(
+                                pitch_in_thread['pitch_id'],
+                                {
+                                    "pitch_state": "replied",
+                                    "reply_bool": True,
+                                    "reply_ts": datetime.now(timezone.utc)
+                                }
+                            )
+                            logger.info(f"Updated pitch {pitch_in_thread['pitch_id']} to 'replied' state")
+                            
+                            # If we have grant_id, also process through BookingAssistant
+                            if grant_id:
+                                await handle_thread_replied(event_object, grant_id)
             elif event_type == "thread.replied":
                 await handle_thread_replied(event_object, grant_id)
             elif event_type == "message.opened":
@@ -287,7 +311,9 @@ async def handle_thread_replied(event_data: dict, grant_id: str):
     """Handle thread.replied event (v3) with BookingAssistant integration."""
     
     # v3 thread.replied sends the reply message_id, not a thread object
-    reply_message_id = event_data.get("message_id")
+    # When called from message.created, the ID is in 'id' field
+    # When called from thread.replied, it's in 'message_id' field
+    reply_message_id = event_data.get("message_id") or event_data.get("id")
     
     if not reply_message_id:
         logger.warning("No message_id in thread.replied event")
