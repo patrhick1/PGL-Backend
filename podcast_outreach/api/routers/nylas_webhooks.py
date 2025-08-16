@@ -30,6 +30,116 @@ router = APIRouter(prefix="/webhooks/nylas", tags=["Nylas Webhooks"])
 NYLAS_WEBHOOK_SECRET = os.getenv("NYLAS_WEBHOOK_SECRET")
 
 
+async def store_email_message(
+    nylas_message_id: str,
+    nylas_thread_id: str,
+    pitch_id: int,
+    campaign_id: str,
+    media_id: int,
+    sender_email: str,
+    sender_name: str,
+    subject: str,
+    snippet: str,
+    body: str,
+    message_date: Optional[int],
+    direction: str,
+    raw_message: Dict[str, Any]
+):
+    """Store email message content in the database."""
+    async with get_db_async() as db:
+        try:
+            # Get or create thread record
+            thread_query = """
+                SELECT thread_id FROM email_threads WHERE nylas_thread_id = $1
+            """
+            thread = await db.fetch_one(thread_query, nylas_thread_id)
+            
+            if not thread:
+                # Create thread record
+                create_thread = """
+                    INSERT INTO email_threads (
+                        nylas_thread_id, pitch_id, campaign_id, media_id,
+                        subject, thread_status, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, 'active', NOW())
+                    RETURNING thread_id
+                """
+                thread_id = await db.fetch_val(
+                    create_thread,
+                    nylas_thread_id, pitch_id, campaign_id, media_id, subject
+                )
+            else:
+                thread_id = thread['thread_id']
+            
+            # Store the message
+            insert_message = """
+                INSERT INTO email_messages (
+                    nylas_message_id, thread_id, sender_email, sender_name,
+                    subject, body_text, snippet, message_date, direction,
+                    is_reply, raw_message, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                ON CONFLICT (nylas_message_id) DO UPDATE
+                SET body_text = EXCLUDED.body_text,
+                    snippet = EXCLUDED.snippet
+                RETURNING message_id
+            """
+            
+            message_timestamp = datetime.fromtimestamp(message_date, timezone.utc) if message_date else datetime.now(timezone.utc)
+            
+            msg_id = await db.fetch_val(
+                insert_message,
+                nylas_message_id,
+                thread_id,
+                sender_email,
+                sender_name,
+                subject,
+                body,
+                snippet,
+                message_timestamp,
+                direction,
+                True,  # is_reply
+                json.dumps(raw_message)
+            )
+            
+            # Update thread participant
+            upsert_participant = """
+                INSERT INTO thread_participants (
+                    thread_id, email, name, first_message_at, last_message_at, message_count
+                ) VALUES ($1, $2, $3, $4, $4, 1)
+                ON CONFLICT (thread_id, email) DO UPDATE
+                SET last_message_at = EXCLUDED.last_message_at,
+                    message_count = thread_participants.message_count + 1,
+                    name = COALESCE(thread_participants.name, EXCLUDED.name)
+            """
+            
+            await db.execute(
+                upsert_participant,
+                thread_id,
+                sender_email.lower(),
+                sender_name,
+                message_timestamp
+            )
+            
+            # Update thread stats
+            update_thread = """
+                UPDATE email_threads
+                SET message_count = message_count + 1,
+                    last_message_at = $2,
+                    last_reply_at = $2,
+                    host_last_sent_at = $2,
+                    updated_at = NOW()
+                WHERE thread_id = $1
+            """
+            
+            await db.execute(update_thread, thread_id, message_timestamp)
+            
+            logger.info(f"Stored email message {nylas_message_id} in thread {thread_id}")
+            
+        except Exception as e:
+            logger.error(f"Error storing email message: {e}")
+            # Don't fail the webhook processing if storage fails
+            pass
+
+
 def verify_nylas_signature(request_body: bytes, signature: str) -> bool:
     """
     Verify Nylas webhook signature for security.
@@ -158,6 +268,19 @@ async def nylas_webhook_events(
                             # This is a reply to our pitch!
                             logger.info(f"Detected reply in thread {thread_id} for pitch {pitch_in_thread['pitch_id']}")
                             
+                            # Extract email content from the webhook payload
+                            from_email = (event_object.get("from") or [{}])[0].get("email", "")
+                            from_name = (event_object.get("from") or [{}])[0].get("name", "")
+                            subject = event_object.get("subject", "")
+                            snippet = event_object.get("snippet", "")
+                            body = event_object.get("body", "")
+                            message_date = event_object.get("date")
+                            
+                            # Log the email content
+                            logger.info(f"Reply from: {from_name} <{from_email}>")
+                            logger.info(f"Subject: {subject}")
+                            logger.info(f"Snippet: {snippet[:200] if snippet else 'No snippet'}")
+                            
                             # Update pitch state to replied
                             await pitch_queries.update_pitch_in_db(
                                 pitch_in_thread['pitch_id'],
@@ -170,6 +293,23 @@ async def nylas_webhook_events(
                             )
                             logger.info(f"Updated pitch {pitch_in_thread['pitch_id']} to 'replied' state")
                             
+                            # Store the email content in the database
+                            await store_email_message(
+                                nylas_message_id=message_id,
+                                nylas_thread_id=thread_id,
+                                pitch_id=pitch_in_thread['pitch_id'],
+                                campaign_id=pitch_in_thread['campaign_id'],
+                                media_id=pitch_in_thread['media_id'],
+                                sender_email=from_email,
+                                sender_name=from_name,
+                                subject=subject,
+                                snippet=snippet,
+                                body=body,
+                                message_date=message_date,
+                                direction="inbound",
+                                raw_message=event_object
+                            )
+                            
                             # Auto-create placement if one doesn't exist
                             if not pitch_in_thread.get('placement_id'):
                                 placement_data = {
@@ -178,11 +318,14 @@ async def nylas_webhook_events(
                                     "pitch_id": pitch_in_thread['pitch_id'],
                                     "current_status": "in_discussion",
                                     "status_ts": datetime.now(timezone.utc),
-                                    "notes": "Auto-created from podcast host reply",
+                                    "notes": f"Auto-created from reply by {from_name} <{from_email}>",
                                     "email_thread": [{
                                         "type": "reply_detected",
                                         "thread_id": thread_id,
                                         "message_id": message_id,
+                                        "from": from_email,
+                                        "subject": subject,
+                                        "snippet": snippet[:200] if snippet else "",
                                         "timestamp": datetime.now(timezone.utc).isoformat()
                                     }]
                                 }
@@ -884,6 +1027,104 @@ async def handle_scheduled_send_failed(event_data: dict):
             "priority": "high",
             "notes": f"Scheduled send failed: {error_message}"
         })
+
+
+async def store_email_message(
+    nylas_message_id: str,
+    nylas_thread_id: str,
+    pitch_id: int,
+    campaign_id: str,
+    media_id: int,
+    sender_email: str,
+    sender_name: str,
+    subject: str,
+    snippet: str,
+    body: str,
+    message_date: Optional[int],
+    direction: str,
+    raw_message: dict
+):
+    """
+    Store email message content in the database.
+    This function ensures email content is stored for thread tracking.
+    """
+    try:
+        async with get_db_async() as db:
+            # First ensure thread exists
+            thread_check = """
+                SELECT thread_id FROM email_threads 
+                WHERE nylas_thread_id = $1
+            """
+            thread = await db.fetch_one(thread_check, nylas_thread_id)
+            
+            if not thread:
+                # Create thread record
+                create_thread = """
+                    INSERT INTO email_threads (
+                        nylas_thread_id, pitch_id, campaign_id, media_id,
+                        subject, thread_status, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, 'active', NOW())
+                    RETURNING thread_id
+                """
+                thread = await db.fetch_one(
+                    create_thread,
+                    nylas_thread_id, pitch_id, campaign_id, 
+                    media_id, subject
+                )
+            
+            thread_id = thread["thread_id"]
+            
+            # Check if message already exists
+            msg_check = """
+                SELECT message_id FROM email_messages 
+                WHERE nylas_message_id = $1
+            """
+            existing = await db.fetch_one(msg_check, nylas_message_id)
+            
+            if not existing:
+                # Store the message
+                insert_msg = """
+                    INSERT INTO email_messages (
+                        nylas_message_id, thread_id, sender_email, sender_name,
+                        subject, body_text, snippet, message_date, 
+                        direction, is_reply, raw_message
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                """
+                
+                msg_timestamp = datetime.fromtimestamp(
+                    message_date, timezone.utc
+                ) if message_date else datetime.now(timezone.utc)
+                
+                await db.execute(
+                    insert_msg,
+                    nylas_message_id, thread_id, sender_email, sender_name,
+                    subject, body or snippet, snippet, msg_timestamp,
+                    direction, "Re:" in (subject or ""), json.dumps(raw_message)
+                )
+                
+                logger.info(f"Stored email message {nylas_message_id} in thread {nylas_thread_id}")
+                
+                # Update thread stats
+                update_thread = """
+                    UPDATE email_threads
+                    SET last_message_at = $2,
+                        message_count = COALESCE(message_count, 0) + 1,
+                        last_reply_at = CASE WHEN $3 = 'inbound' THEN $2 ELSE last_reply_at END,
+                        updated_at = NOW()
+                    WHERE thread_id = $1
+                """
+                await db.execute(update_thread, thread_id, msg_timestamp, direction)
+                
+                logger.info(f"Updated thread stats for thread {thread_id}")
+            else:
+                logger.info(f"Message {nylas_message_id} already exists in database")
+            
+    except Exception as e:
+        logger.error(f"Error storing email message: {e}")
+        # Don't fail the webhook processing if storage fails
+        pass
 
 
 @router.get("/health", status_code=status.HTTP_200_OK, summary="Webhook Health Check")

@@ -1118,6 +1118,110 @@ def create_processed_emails_table(conn):
     execute_sql(conn, sql_statement)
     print("Table PROCESSED_EMAILS created/ensured.")
 
+def create_email_threads_table(conn):
+    """Create email_threads table to track entire conversations."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS email_threads (
+        thread_id SERIAL PRIMARY KEY,
+        nylas_thread_id VARCHAR(255) UNIQUE NOT NULL,
+        pitch_id INTEGER REFERENCES pitches(pitch_id),
+        placement_id INTEGER REFERENCES placements(placement_id),
+        campaign_id UUID REFERENCES campaigns(campaign_id),
+        media_id INTEGER REFERENCES media(media_id),
+        
+        -- Thread metadata
+        subject TEXT,
+        participant_emails TEXT[], -- All email addresses in thread
+        message_count INTEGER DEFAULT 0,
+        last_message_at TIMESTAMPTZ,
+        thread_status VARCHAR(50), -- active, completed, stale
+        
+        -- Tracking
+        first_reply_at TIMESTAMPTZ,
+        last_reply_at TIMESTAMPTZ,
+        client_last_sent_at TIMESTAMPTZ,
+        host_last_sent_at TIMESTAMPTZ,
+        
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_email_threads_nylas_thread_id ON email_threads(nylas_thread_id);
+    CREATE INDEX IF NOT EXISTS idx_email_threads_pitch_id ON email_threads(pitch_id);
+    CREATE INDEX IF NOT EXISTS idx_email_threads_placement_id ON email_threads(placement_id);
+    CREATE INDEX IF NOT EXISTS idx_email_threads_campaign_id ON email_threads(campaign_id);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table EMAIL_THREADS created/ensured.")
+    apply_timestamp_update_trigger(conn, "email_threads")
+
+def create_email_messages_table(conn):
+    """Create email_messages table to store individual messages."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS email_messages (
+        message_id SERIAL PRIMARY KEY,
+        nylas_message_id VARCHAR(255) UNIQUE NOT NULL,
+        thread_id INTEGER REFERENCES email_threads(thread_id) ON DELETE CASCADE,
+        
+        -- Message details
+        sender_email TEXT NOT NULL,
+        sender_name TEXT,
+        recipient_emails TEXT[],
+        cc_emails TEXT[],
+        bcc_emails TEXT[],
+        
+        subject TEXT,
+        body_text TEXT,
+        body_html TEXT,
+        snippet TEXT,
+        
+        -- Metadata
+        message_date TIMESTAMPTZ,
+        direction VARCHAR(20), -- inbound, outbound
+        is_reply BOOLEAN DEFAULT FALSE,
+        is_forward BOOLEAN DEFAULT FALSE,
+        
+        -- Tracking
+        opened_at TIMESTAMPTZ,
+        clicked_at TIMESTAMPTZ,
+        replied_at TIMESTAMPTZ,
+        
+        -- Raw data
+        raw_message JSONB,
+        
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_email_messages_nylas_message_id ON email_messages(nylas_message_id);
+    CREATE INDEX IF NOT EXISTS idx_email_messages_thread_id ON email_messages(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_email_messages_sender_email ON email_messages(sender_email);
+    CREATE INDEX IF NOT EXISTS idx_email_messages_message_date ON email_messages(message_date DESC);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table EMAIL_MESSAGES created/ensured.")
+
+def create_thread_participants_table(conn):
+    """Create thread_participants table for tracking all participants."""
+    sql_statement = """
+    CREATE TABLE IF NOT EXISTS thread_participants (
+        participant_id SERIAL PRIMARY KEY,
+        thread_id INTEGER REFERENCES email_threads(thread_id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        name TEXT,
+        role VARCHAR(50), -- client, host, cc_participant
+        first_message_at TIMESTAMPTZ,
+        last_message_at TIMESTAMPTZ,
+        message_count INTEGER DEFAULT 0,
+        
+        UNIQUE(thread_id, email)
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_thread_participants_thread_id ON thread_participants(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_thread_participants_email ON thread_participants(email);
+    """
+    execute_sql(conn, sql_statement)
+    print("Table THREAD_PARTICIPANTS created/ensured.")
+
 def create_message_events_table(conn):
     """Create message_events table for comprehensive event tracking."""
     sql_statement = """
@@ -1254,6 +1358,9 @@ def drop_all_tables(conn):
     # Order for dropping: from tables that are referenced by others to tables that are not, 
     # or essentially reverse of creation order. CASCADE should make the order less critical, but explicit order can help.
     table_names_in_drop_order = [
+        "THREAD_PARTICIPANTS", # FK to EMAIL_THREADS
+        "EMAIL_MESSAGES",     # FK to EMAIL_THREADS
+        "EMAIL_THREADS",      # FKs to PITCHES, PLACEMENTS, CAMPAIGNS, MEDIA
         "CONVERSATION_INSIGHTS", # FK to CHATBOT_CONVERSATIONS
         "CHATBOT_CONVERSATIONS", # FKs to CAMPAIGNS, PEOPLE
         "MATCH_NOTIFICATION_LOG", # FKs to CAMPAIGNS, PEOPLE
@@ -1366,6 +1473,12 @@ def create_all_tables():
         # Create Nylas-related tables
         create_email_sync_status_table(conn)
         create_processed_emails_table(conn) # Depends on PITCHES, PLACEMENTS
+        
+        # Create email thread tracking tables
+        create_email_threads_table(conn) # Depends on PITCHES, PLACEMENTS, CAMPAIGNS, MEDIA
+        create_email_messages_table(conn) # Depends on EMAIL_THREADS
+        create_thread_participants_table(conn) # Depends on EMAIL_THREADS
+        
         create_message_events_table(conn) # Depends on PITCHES
         create_contact_status_table(conn)
         create_send_queue_table(conn) # Depends on PITCHES
