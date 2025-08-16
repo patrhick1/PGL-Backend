@@ -158,19 +158,45 @@ async def nylas_webhook_events(
                             # This is a reply to our pitch!
                             logger.info(f"Detected reply in thread {thread_id} for pitch {pitch_in_thread['pitch_id']}")
                             
-                            # For message.created events, we already have the message data
-                            # Just update the pitch state to replied
+                            # Update pitch state to replied
                             await pitch_queries.update_pitch_in_db(
                                 pitch_in_thread['pitch_id'],
                                 {
                                     "pitch_state": "replied",
                                     "reply_bool": True,
-                                    "reply_ts": datetime.now(timezone.utc)
+                                    "reply_ts": datetime.now(timezone.utc),
+                                    "nylas_thread_id": thread_id  # Ensure thread ID is stored
                                 }
                             )
                             logger.info(f"Updated pitch {pitch_in_thread['pitch_id']} to 'replied' state")
                             
-                            # If we have grant_id, also process through BookingAssistant
+                            # Auto-create placement if one doesn't exist
+                            if not pitch_in_thread.get('placement_id'):
+                                placement_data = {
+                                    "campaign_id": pitch_in_thread['campaign_id'],
+                                    "media_id": pitch_in_thread['media_id'],
+                                    "pitch_id": pitch_in_thread['pitch_id'],
+                                    "current_status": "in_discussion",
+                                    "status_ts": datetime.now(timezone.utc),
+                                    "notes": "Auto-created from podcast host reply",
+                                    "email_thread": [{
+                                        "type": "reply_detected",
+                                        "thread_id": thread_id,
+                                        "message_id": message_id,
+                                        "timestamp": datetime.now(timezone.utc).isoformat()
+                                    }]
+                                }
+                                
+                                placement = await placement_queries.create_placement_in_db(placement_data)
+                                if placement:
+                                    # Update pitch with placement reference
+                                    await pitch_queries.update_pitch_in_db(
+                                        pitch_in_thread['pitch_id'],
+                                        {"placement_id": placement['placement_id']}
+                                    )
+                                    logger.info(f"Auto-created placement {placement['placement_id']} for reply in thread {thread_id}")
+                            
+                            # If we have grant_id, also process through BookingAssistant for classification
                             if grant_id:
                                 await handle_thread_replied(event_object, grant_id)
             elif event_type == "thread.replied":
